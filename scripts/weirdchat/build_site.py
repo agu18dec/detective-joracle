@@ -20,9 +20,10 @@ the build also writes ``cells_to_translate.json`` (every non-Latin-script sample
 script that fills it. ``highlights`` adds hand-picked cells; one that does not verify verbatim
 against the read is a build error. Auto highlights are every mechanism-quoted cell that does.
 
-The pattern page follows the lie-detection sweep viewer: left, the read tokens of one lens
-read grouped by region, every token clickable; right, that position's readout at every layer,
-one column per compared read. A "read" is one OLens readout over one conversation — from the
+The page follows the design contract in ``docs/viewer_design.md`` (the wsbench viewer's light
+app shell): a top bar of pickers and searches, metadata panes, then two resizable panes — the
+read tokens of one lens read on the left, every token clickable; that position's readout at
+every layer on the right, one column per compared read. A "read" is one OLens readout over one conversation — from the
 diagnostic pass (``diag/``) or parsed back out of the agent's ``readouts`` tool pages.
 
 Serve the directory: ``fetch()`` of ``data/…`` is blocked from a ``file://`` origin in most
@@ -421,7 +422,11 @@ def run_of(path: Path, auditor_dir: str) -> tuple[dict[str, Any], list[dict[str,
         "steps": steps_of(record),
         "file": path.name,
     }
-    return run, [as_dict(t) for t in as_list(record.get("tool_log"))]
+    tool_log = [as_dict(t) for t in as_list(record.get("tool_log"))]
+    run["n_tool_calls"] = len(tool_log)
+    run["n_readouts"] = sum(1 for t in tool_log if as_text(t.get("name")) == "readouts")
+    run["n_chat"] = sum(1 for t in tool_log if as_text(t.get("name")) == "chat")
+    return run, tool_log
 
 
 # ---------------------------------------------------------------- collection
@@ -733,6 +738,7 @@ def auto_highlights(patterns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
         "unresolved": 0,
         "ellipsis": 0,
         "failures": [],
+        "per_pattern": {},
     }
     seen: set[tuple[str, str, int, int, str]] = set()
     for pat in patterns:
@@ -742,6 +748,8 @@ def auto_highlights(patterns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
                 text = mech["readout_cells"]
                 for start, quote in quoted_fragments(text):
                     stats["fragments"] += 1
+                    per = stats["per_pattern"].setdefault(pat["key"], [0, 0])
+                    per[1] += 1
                     prefix = text[:start]
                     cid, posm, laym = (
                         last_match(CID_RE, prefix),
@@ -782,6 +790,7 @@ def auto_highlights(patterns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
                         )
                         continue
                     stats["verified"] += 1
+                    per[0] += 1
                     layer, sample = hit
                     sig = (pat["key"], read["id"], row["pos"], layer, quote)
                     if sig in seen:
@@ -853,6 +862,9 @@ def build_site(
     cards, hl_stats = auto_highlights(patterns)
     hand = hand_highlights(patterns, highlights) if highlights else []
     cards = hand + cards
+    for pat in patterns:  # per-pattern "cited cells verified k/n", shown in the agent-summary pane
+        k, n = hl_stats["per_pattern"].get(pat["key"], (0, 0))
+        pat["cited_verified"], pat["cited_fragments"] = k, n
     samples = all_samples(patterns)
     cache = read_json(translations) if translations else None
     en = {s: as_text(e) for s, e in (cache or {}).items() if s in samples and as_text(e)}
@@ -946,733 +958,651 @@ def main() -> None:
 
 # plain text (no quotes/backslashes): it is injected into a JS string and set via textContent
 BANNER = (
-    "No ground truth, no interventions. The agent was told the behavior and asked why the model "
-    "does it; every mechanism below is an UNVERIFIED HYPOTHESIS read off chat probes and OLens "
-    "readouts. Nothing on this page has been causally tested."
+    "Unverified hypotheses: the agent was told the behavior and asked why; every mechanism here "
+    "is read off chat probes and OLens readouts and nothing has been causally tested."
 )
 
 TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WeirdChat × OLens: why Qwen3.6-27B does it</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<title>WeirdChat × OLens</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;1,400&display=swap">
 <style>
 :root{
-  color-scheme:light dark;
-  --paper:#F7F7F4; --card:#FFFFFF; --ink:#1B2230; --ink2:#4A5262; --mute:#7A8394; --line:#DDDFE3; --line2:#ECEDEF;
-  --s3d:#0E7C7B; --s3d-bg:#E6F4F3; --ddp:#B8531A; --ddp-bg:#FBEEE4; --jl:#4B5563; --jl-bg:#EEF0F3;
-  --claims:#B42318; --claims-bg:#FCE9E6; --discl:#15803D; --discl-bg:#E5F4EA; --silent:#B45309; --silent-bg:#FCF0DF;
-  --sel:#1B2230; --selfg:#FFFFFF; --swept:#B9BEC7; --mark:#FFF1A8; --flagdot:#B42318;
-  --serif:"Source Serif 4",Georgia,"Times New Roman",serif; --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif; --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --ground:#f3f5f7; --surface:#ffffff; --surface-2:#e9edf0; --line:#cfd8de; --line-soft:#e1e7eb;
+  --text:#152230; --text-dim:#5a6b78; --text-faint:#8695a2;
+  --accent:#1d6f8b; --accent-soft:#dbeaf0; --accent-ink:#0d4c62;
+  --hit:#20714c; --hit-soft:#d9eee2; --miss:#a8431c; --miss-soft:#f6e0d5;
+  --hold:#8a6410; --hold-soft:#f5e9cf;
+  --sample:#8a6d00; --sample-soft:#fff3a8; --sample-line:#b89a1e;
+  --find:#5b3fa8; --find-soft:#e6ddff; --find-ink:#3d2a80;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif; --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --serif:"IBM Plex Serif",Georgia,serif;
+  --col:300px; --rowmax:none; --split:46%;
 }
-@media (prefers-color-scheme:dark){
-  :root{
-    --paper:#12151B; --card:#1A1E26; --ink:#E7EAF0; --ink2:#B4BCCB; --mute:#8A93A5; --line:#2C323D; --line2:#232832;
-    --s3d:#4FD1C5; --s3d-bg:#14312F; --ddp:#F0A070; --ddp-bg:#3A2418; --jl:#B4BCCB; --jl-bg:#232832;
-    --claims:#FF8A80; --claims-bg:#3A1D1C; --discl:#6EE7A0; --discl-bg:#16301F; --silent:#F0B25F; --silent-bg:#3A2E14;
-    --sel:#E7EAF0; --selfg:#12151B; --swept:#4A5262; --mark:#6B5A10; --flagdot:#FF8A80;
-  }
+:root[data-theme="dark"]{
+  --ground:#0e161d; --surface:#152029; --surface-2:#1b2833; --line:#2a3d4a; --line-soft:#223341;
+  --text:#e6edf2; --text-dim:#9fb2bf; --text-faint:#6d8393;
+  --accent:#57b6d0; --accent-soft:#16333f; --accent-ink:#9ad8e8; --hit:#5cc294; --hit-soft:#12332a;
+  --miss:#e08b62; --miss-soft:#3a2118; --hold:#d9b45e; --hold-soft:#33290f;
+  --sample:#f0d24a; --sample-soft:#4a3d05; --sample-line:#e2c53a; --find:#b9a3ff; --find-soft:#2c1f5c; --find-ink:#d6c8ff;
 }
 *{box-sizing:border-box}
-body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;margin:0}
-a{color:inherit}
-header{padding:18px 28px 12px;border-bottom:1px solid var(--line);background:var(--card)}
-h1{font-family:var(--serif);font-weight:600;font-size:24px;margin:0 0 4px;letter-spacing:-.01em;text-wrap:balance}
-h1 a{text-decoration:none}
-.sub{color:var(--ink2);max-width:100ch;margin:0}
-.sub code{font-family:var(--mono);font-size:12.5px;background:var(--line2);padding:0 4px;border-radius:3px}
-h2{font-family:var(--serif);font-weight:600;font-size:19px;margin:22px 0 8px;letter-spacing:-.01em}
-h3{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:16px 0 6px;font-weight:500}
-.crumb{font-size:12.5px;color:var(--mute)} .crumb a{color:var(--ink2)}
-.banner{background:var(--claims-bg);color:var(--claims);border:1px solid var(--claims);border-radius:6px;padding:8px 12px;margin:10px 0 0;font-size:12.5px;max-width:120ch}
-.banner b{letter-spacing:.04em}
-.page{padding:18px 28px 80px;max-width:1500px}
-.kkey{font-family:var(--mono);font-size:11.5px;color:var(--ink2)}
-.hint{color:var(--mute);font-size:12.5px}
-.none{color:var(--mute);font-size:13px}
-kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:3px;padding:0 4px;background:var(--card)}
-table.t{border-collapse:separate;border-spacing:0;width:100%;background:var(--card);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:6px 0 10px}
-table.t th{text-align:left;font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--mute);font-weight:500;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
-table.t td{padding:7px 10px;border-bottom:1px solid var(--line2);vertical-align:top;font-size:13px}
-table.t tr:last-child td{border-bottom:none}
-table.t tr.click{cursor:pointer} table.t tr.click:hover td{background:var(--s3d-bg)}
-td.num,th.num{text-align:right;font-family:var(--mono);font-size:12px;white-space:nowrap}
-.tag{font-size:11px;border-radius:4px;padding:1px 6px;font-family:var(--mono)}
-.tag.y{background:var(--discl-bg);color:var(--discl)} .tag.n{background:var(--line2);color:var(--mute)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:0 0 10px}
-pre.block{font-family:var(--mono);font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;margin:0;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px 12px;color:var(--ink)}
-pre.small{font-size:11.5px;color:var(--ink2);border:none;padding:0;background:none}
-details{margin:6px 0} summary{cursor:pointer;color:var(--s3d);font-size:12.5px} summary::marker{color:var(--mute)}
-details.alltbl{margin:10px 0 0} details.alltbl summary{color:var(--mute)}
-.pill{display:inline-block;font-size:11.5px;color:var(--ink2);background:var(--line2);border-radius:999px;padding:1px 9px;margin:0 5px 5px 0;font-family:var(--mono)}
-/* --- pickers, as in the sweep viewer --- */
-.recs{display:flex;flex-direction:column;gap:8px;margin-top:12px}
-.pick{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.pick .lbl{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);min-width:64px}
-.tab{font:inherit;font-family:var(--mono);font-size:12px;border:1px solid var(--line);background:var(--card);border-radius:5px;padding:3px 9px;cursor:pointer;color:var(--ink2)}
-.tab:hover{border-color:var(--ink2)} .tab[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
-.tab:disabled{opacity:.55;cursor:default}
-.tab .cnt{color:var(--mute);margin-left:4px}
-.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:3px 10px;font-size:12.5px;cursor:pointer;display:inline-flex;gap:6px;align-items:center;font-family:var(--sans);color:var(--ink2);max-width:100%}
-.chip:hover{border-color:var(--ink2)} .chip[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
-.chip .g{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
-.g.run{background:var(--claims)} .g.diag{background:var(--silent)} .g.data{background:var(--swept)}
-.g.matched{background:var(--claims)} .g.unmatched{background:var(--discl)} .g.agent{background:var(--swept)} .g.err{background:var(--silent)}
-.chip .n{color:var(--mute);font-family:var(--mono);font-size:11.5px}
-.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin:6px 0 12px}
-.legend span i{display:inline-block;width:14px;height:12px;vertical-align:-2px;margin-right:5px;border-radius:2px;background:var(--card)}
-.legend span i.dot{width:8px;height:8px;border-radius:50%;vertical-align:0}
-/* --- highlights --- */
-#hl{padding:14px 28px 6px;border-bottom:1px solid var(--line);background:var(--paper)}
-.hlhead{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}
-.hlhead h2{font-family:var(--serif);font-weight:600;font-size:18px;margin:0}
-.hlhead button{margin-left:auto}
+html,body{height:100%}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);font-size:13px;line-height:1.45;display:flex;flex-direction:column;overflow:hidden}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+a{color:var(--accent)}
+.kbd{font-family:var(--mono);font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:3px;padding:0 5px;color:var(--text-dim)}
+/* top bar */
+#bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 14px;padding-top:calc(8px + env(safe-area-inset-top,0px));background:var(--surface);border-bottom:1px solid var(--line);flex:none}
+#bar h1{margin:0 8px 0 0;font-size:14px;font-weight:600}
+#bar h1 a{color:inherit;text-decoration:none}
+.pick{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.1em}
+.pick select{font-family:var(--mono);font-size:12px;text-transform:none;letter-spacing:0;padding:3px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--text);max-width:300px}
+.btn{font-size:12px;line-height:1;padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--text-dim);cursor:pointer}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.cmp{font-family:var(--mono);font-size:11px;padding:3px 6px}
+.btn.cmp i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;vertical-align:0}
+i.matched{background:var(--miss)} i.unmatched{background:var(--hit)} i.agent{background:var(--text-faint)} i.err{background:var(--hold)}
+#search,#find{padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:var(--ground);font-family:var(--mono);font-size:12px;width:230px}
+#find{border-color:var(--find)}
+.spacer{flex:1}
+.sub{font-size:11.5px;color:var(--text-dim)}
+#banner{flex:none;background:var(--miss-soft);color:var(--miss);font-size:11.5px;padding:3px 14px;border-bottom:1px solid var(--line)}
+#results{flex:none;background:var(--surface);border-bottom:1px solid var(--line);max-height:170px;overflow:auto;padding:4px 14px}
+#results[hidden]{display:none}
+.res{display:flex;gap:10px;align-items:baseline;width:100%;text-align:left;border:0;background:none;padding:3px 0;cursor:pointer;font-size:11.5px;color:var(--text)}
+.res:hover{background:var(--surface-2)}
+.res .where{font-family:var(--mono);font-size:11px;color:var(--find);flex:none;width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.res .snip{font-family:var(--mono);font-size:11px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.res .fam{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint);flex:none;width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#results h4{margin:4px 0;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
+/* context panes */
+#ctx{flex:none;background:var(--surface);border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr)}
+#ctx[hidden]{display:none}
+#ctx .pane{padding:8px 14px;border-right:1px solid var(--line-soft);min-width:0;max-height:170px;overflow:auto}
+#ctx .pane:last-child{border-right:0}
+#ctx h3{margin:0 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
+.prompt{font-family:var(--serif);font-size:13px;white-space:pre-wrap;word-break:break-word}
+.mono{font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word;color:var(--text)}
+.tags{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
+.tag{font-family:var(--mono);font-size:11px;border-radius:3px;padding:1px 6px;background:var(--hold-soft);color:var(--text)}
+.vrow{display:flex;gap:8px;align-items:baseline;font-size:11.5px;margin-bottom:3px}
+.vrow .name{width:110px;flex:none;color:var(--text-dim)}
+.badge{font-family:var(--mono);font-size:10.5px;border-radius:3px;padding:0 5px;border:1px solid transparent;white-space:nowrap}
+.badge.hit{background:var(--hit-soft);color:var(--hit);border-color:var(--hit)}
+.badge.miss{background:var(--miss-soft);color:var(--miss);border-color:var(--miss)}
+.badge.hold{background:var(--hold-soft);color:var(--hold);border-color:var(--hold)}
+.badge.dim{background:var(--surface-2);color:var(--text-dim);border-color:var(--line)}
+.quote{font-family:var(--mono);font-size:11px;color:var(--text-dim);border-left:2px solid var(--line);padding-left:6px;margin:2px 0 4px;white-space:pre-wrap;word-break:break-word}
+.empty{color:var(--text-faint);font-style:italic}
+.dim{color:var(--text-dim)}
+.clipbox{max-height:96px;overflow:hidden;position:relative}
+.clipbox.open{max-height:none}
+.showall{font-size:11px;color:var(--accent);background:none;border:0;padding:0;cursor:pointer}
+/* hits row */
+#hits{flex:none;background:var(--surface);border-bottom:1px solid var(--line);padding:4px 14px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;min-height:28px}
+#hits[hidden]{display:none}
+#hits .lbl{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint);margin-right:4px}
+.hitchip{font-family:var(--mono);font-size:11px;border:1px solid var(--find);background:var(--find-soft);color:var(--find-ink);border-radius:3px;padding:1px 6px;cursor:pointer;white-space:pre}
+.hitchip:hover{filter:brightness(.95)}
+/* main: two panes + splitter */
+#main{flex:1;display:flex;min-height:0}
+#text{flex:none;width:var(--split);min-width:240px;max-width:85%;overflow:auto;background:var(--surface);padding:10px 14px 30px;border-right:1px solid var(--line)}
+#split{flex:none;width:7px;cursor:col-resize;background:var(--ground);touch-action:none}
+#split:hover,#split.on{background:var(--accent)}
+#grid{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--surface)}
+.blk{margin:0 0 10px}
+.blk .role{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600;margin:0 0 4px;display:flex;gap:8px;align-items:baseline}
+.blk .role .lbl2{letter-spacing:0;text-transform:none;font-weight:400;color:var(--text-dim);font-size:11px}
+.toks{display:flex;flex-wrap:wrap;gap:2px;padding:6px;background:var(--ground);border:1px solid var(--line-soft);border-radius:5px}
+.blk.reply .toks{border-color:var(--line)}
+.tok{font-family:var(--mono);font-size:12.5px;padding:2px 4px;border-radius:3px;border:1px solid transparent;cursor:pointer;white-space:pre;color:var(--text-dim);background:var(--surface)}
+.tok:hover{border-color:var(--line)}
+.tok.read{background:var(--sample-soft);color:var(--text);border-color:var(--sample-line)}
+.tok.hit{border-top:3px solid var(--hit)}
+.tok.found{box-shadow:inset 0 -3px 0 var(--find)}
+.tok.mark{border-bottom:2px dotted var(--text)}
+.tok.cur{background:var(--accent)!important;color:#fff;border-color:var(--accent)}
+.tok.nodata{opacity:.4;cursor:default;background:transparent}
+.tok .nl{font-size:10px;color:var(--text-faint)} .tok.cur .nl{color:#fff}
+.rolls{margin-top:14px}
+.rolls h3{margin:0 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
+.roll{display:flex;gap:8px;align-items:baseline;width:100%;text-align:left;border:1px solid var(--line-soft);border-left:3px solid var(--line);background:var(--surface);border-radius:4px;padding:4px 8px;margin:0 0 4px;cursor:pointer;font-size:11.5px}
+.roll:hover{border-color:var(--accent)} .roll:disabled{cursor:default;opacity:.7}
+.roll.matched{border-left-color:var(--miss)} .roll.unmatched{border-left-color:var(--hit)}
+.roll .lab{font-family:var(--mono);font-size:10.5px;color:var(--text-dim);flex:none;width:130px}
+.roll .snip{font-family:var(--mono);font-size:11px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+/* position header + grid */
+#posbar{flex:none;padding:8px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+#posbar .row{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+#posbar h2{margin:0;font-size:14px;font-weight:600}
+.tokbox{font-family:var(--mono);background:var(--accent);color:#fff;padding:1px 6px;border-radius:3px;font-size:12px}
+.wherenote{font-size:12px;color:var(--text-dim)}
+.mcards{display:flex;flex-direction:column;gap:4px}
+.mcard{border:1px solid var(--line-soft);border-left:3px solid var(--miss);border-radius:4px;background:var(--surface);padding:4px 8px;font-size:12px;cursor:pointer;text-align:left;width:100%}
+.mcard:hover{border-color:var(--accent)}
+.mcard .hd{display:flex;gap:8px;align-items:baseline}
+.mcard .txt{flex:1}
+.mcard .more{display:none;margin-top:4px}
+.mcard.open .more{display:block}
+.mcard.other{border-left-color:var(--line)}
+.notice{font-size:11.5px;color:var(--text-dim);padding:4px 14px;background:var(--surface-2);border-bottom:1px solid var(--line-soft)}
+#gridwrap{flex:1;overflow:auto;min-height:0;background:var(--surface)}
+table{border-collapse:separate;border-spacing:0;table-layout:fixed}
+th,td{border-bottom:1px solid var(--line-soft);border-right:1px solid var(--line-soft);vertical-align:top;text-align:left;padding:0}
+thead th{position:sticky;top:0;z-index:3;background:var(--surface);padding:7px 10px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim);font-weight:600;border-bottom:1px solid var(--line);width:var(--col)}
+thead th.layer{width:58px;left:0;z-index:4}
+thead th .rate{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:0;text-transform:none;color:var(--text-faint);font-weight:400;margin-top:2px}
+thead th .own{display:block;font-family:var(--mono);font-size:11px;letter-spacing:0;text-transform:none;color:var(--text);font-weight:400;margin-top:2px;white-space:pre-wrap}
+thead th.matched{color:var(--miss)} thead th.unmatched{color:var(--hit)}
+tbody th.layer{position:sticky;left:0;z-index:2;background:var(--surface);font-family:var(--mono);font-size:12px;color:var(--text-dim);padding:8px 10px;font-variant-numeric:tabular-nums;cursor:pointer;width:58px}
+tbody tr.focus th.layer{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+tbody tr.focus td{background:color-mix(in srgb, var(--accent-soft) 45%, var(--surface))}
+.grip-x{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:5}
+.grip-x:hover{background:var(--accent)}
+.grip-y{position:absolute;left:0;bottom:-3px;height:7px;width:100%;cursor:row-resize;z-index:5}
+.grip-y:hover{background:var(--accent)}
+td .cell{padding:8px 10px;font-family:var(--mono);font-size:11.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word;color:var(--text);max-height:var(--rowmax);overflow:auto}
+tbody tr{--rowmax:inherit}
+td.hit .cell{background:var(--hit-soft);box-shadow:inset 3px 0 0 var(--hit)}
+td .none{padding:8px 10px;color:var(--text-faint);font-style:italic;font-size:11px}
+.samp+.samp{border-top:1px dashed var(--line-soft);margin-top:4px;padding-top:4px}
+.en{color:var(--text-dim);font-style:italic;font-family:var(--sans);font-size:11.5px;margin-top:2px}
+.en::before{content:"EN  ";font-style:normal;font-size:10px;letter-spacing:.06em;color:var(--text-faint)}
+mark{background:var(--hit-soft);color:inherit;font-weight:600;border-radius:2px}
+mark.find{background:var(--find-soft);color:var(--find-ink);font-weight:700;border-bottom:2px solid var(--find);border-radius:2px}
+.legend{display:flex;gap:14px;align-items:center;font-size:11px;color:var(--text-dim);flex-wrap:wrap}
+.sw{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-2px;margin-right:4px;border:1px solid transparent}
+/* drawer under the panes */
+#below{flex:none;background:var(--surface);border-top:1px solid var(--line);display:flex;flex-direction:column;max-height:42vh;min-height:0}
+#below[hidden]{display:none}
+#tabs{flex:none;display:flex;gap:4px;padding:6px 14px;border-bottom:1px solid var(--line-soft);align-items:center}
+#drawer{overflow:auto;padding:10px 14px 20px;min-height:0}
+.mech{border:1px solid var(--line-soft);border-left:3px solid var(--accent);border-radius:4px;background:var(--surface);padding:8px 10px;margin:0 0 8px;font-size:12.5px}
+.mech .n{font-family:var(--mono);color:var(--text-faint);font-size:11px;margin-right:6px}
+.mech .ev{color:var(--text-dim);margin-top:4px;font-size:12px}
+.mech .cells{font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:4px;word-break:break-word;white-space:pre-wrap}
+.mech .test{font-size:11.5px;color:var(--text-dim);font-style:italic;margin-top:5px;border-top:1px dashed var(--line-soft);padding-top:4px}
+.mech .test b{font-style:normal;font-weight:600;letter-spacing:.06em;text-transform:uppercase;font-size:10px;color:var(--hold)}
+.step{border:1px solid var(--line-soft);border-radius:4px;background:var(--surface);margin:0 0 6px;padding:6px 10px;font-size:12px}
+.step .hd{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint)}
+.step .hd .nm{font-family:var(--mono);letter-spacing:0;text-transform:none;color:var(--text);background:var(--surface-2);border-radius:3px;padding:0 6px;font-weight:600}
+.step .hd a{letter-spacing:0;text-transform:none;margin-left:auto;font-size:11.5px}
+.step .think{color:var(--text-dim);white-space:pre-wrap;word-break:break-word;margin-top:4px}
+.step .call{font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:4px;white-space:pre-wrap;word-break:break-word}
+.step .call .usr{color:var(--text);background:var(--accent-soft);border-radius:3px;padding:0 3px}
+.step.finish{border-color:var(--accent)}
+pre.block{font-family:var(--mono);font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;margin:4px 0 0;background:var(--ground);border:1px solid var(--line-soft);border-radius:4px;padding:6px 8px;color:var(--text)}
+details{margin:4px 0} summary{cursor:pointer;color:var(--accent);font-size:11.5px}
 .hlgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:10px}
-.hlgrid[hidden]{display:none}
-.hlc{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--claims);border-radius:6px;padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:6px}
-.hlc:hover{border-color:var(--ink2);border-left-color:inherit}
-.hlc.header{border-left-color:var(--silent)} .hlc.user{border-left-color:var(--discl)}
-.hlc .where{font-family:var(--mono);font-size:11.5px;color:var(--mute);display:flex;gap:8px;flex-wrap:wrap}
-.hlc .where b{color:var(--ink2);font-weight:500}
-.hlc .q{font-family:var(--mono);font-size:12.5px;color:var(--ink);line-height:1.45;white-space:pre-wrap;word-break:break-word}
-.hlc .loc{font-family:var(--mono);font-size:11.5px;color:var(--ink2);white-space:pre-wrap;word-break:break-word}
-.hlc .loc b{background:var(--mark);font-weight:500}
-.hlc .n{font-size:12.5px;color:var(--ink2)}
-.hlc .hand{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--s3d)}
-/* --- two-column viewer --- */
-main.two{display:grid;grid-template-columns:minmax(380px,46%) 1fr;gap:0;border:1px solid var(--line);border-radius:6px;background:var(--paper);min-height:60vh}
-@media (max-width:980px){main.two{grid-template-columns:1fr}}
-#left{border-right:1px solid var(--line);padding:14px 18px 30px;overflow-x:hidden;min-width:0}
-#right{padding:14px 20px 30px;position:sticky;top:0;align-self:start;max-height:100vh;overflow:auto;min-width:0}
-.recmeta{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}
-.badge{font-size:11.5px;letter-spacing:.04em;padding:2px 8px;border-radius:4px;font-weight:500}
-.badge.matched{background:var(--claims-bg);color:var(--claims)} .badge.unmatched{background:var(--discl-bg);color:var(--discl)} .badge.agent{background:var(--jl-bg);color:var(--jl)} .badge.err{background:var(--silent-bg);color:var(--silent)}
-.block{margin:0 0 10px;border:1px solid var(--line2);border-radius:6px;background:var(--card)}
-.block .role{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);padding:6px 10px 0;display:flex;justify-content:space-between;gap:8px;align-items:baseline}
-.block .role .rl{letter-spacing:0;text-transform:none;color:var(--ink2);font-size:11.5px}
-.block pre{margin:0;padding:6px 10px 10px;font-family:var(--mono);font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word;color:var(--ink2)}
-.block pre.clip{max-height:120px;overflow:hidden;position:relative}
-.block pre.clip::after{content:"";position:absolute;left:0;right:0;bottom:0;height:40px;background:linear-gradient(transparent,var(--card))}
-.block.reply{border-color:var(--ink2)} .block.reply pre{color:var(--ink)}
-.tok{border-radius:3px;padding:0 1px;margin:0 -1px}
-.tok.swept{outline:1px solid var(--swept);outline-offset:-1px;cursor:pointer;background:var(--card)}
-.tok.swept:hover{outline-color:var(--ink)}
-.tok.swept.flag{background:var(--mark)}
-.tok.sel{background:var(--sel)!important;color:var(--selfg);outline-color:var(--sel)}
-.tok.r1{box-shadow:0 2px 0 var(--ink)}
-.tok.fork{border-bottom:2px dotted var(--ink)}
-.special{color:var(--mute)}
-.nl{color:var(--mute);font-size:10.5px}
-.gap{color:var(--mute);font-size:10px;letter-spacing:-1px;padding:0 2px;cursor:default}
-.poshdr{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-.poshdr h2{margin:0 0 4px}
-.poshdr .navb{margin-left:auto;display:flex;gap:4px}
-.navb button{font:inherit;background:var(--card);border:1px solid var(--line);border-radius:4px;padding:2px 9px;cursor:pointer;color:var(--ink)}
-.navb button:hover{border-color:var(--ink2)} .navb button:disabled{opacity:.4;cursor:default}
-.tokbox{font-family:var(--mono);background:var(--sel);color:var(--selfg);padding:1px 6px;border-radius:3px;font-size:12.5px}
-.where{font-size:13px;color:var(--ink2);margin:4px 0 0}
-.local{font-family:var(--mono);font-size:12px;color:var(--ink2);background:var(--card);border:1px solid var(--line2);border-radius:6px;padding:8px 10px;margin:10px 0 12px;white-space:pre-wrap;word-break:break-word}
-.local b{color:var(--ink);background:var(--mark);font-weight:500}
-.flags{margin:0 0 14px}
-.flag{border-left:3px solid var(--flagdot);background:var(--card);padding:6px 10px;margin:0 0 6px;border-radius:0 6px 6px 0;font-size:13px}
-.flag .cat{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--claims);margin-right:8px}
-.flag .cell{font-family:var(--mono);font-size:11.5px;color:var(--mute)}
-.flag q{font-family:var(--mono);font-size:12px;quotes:"“" "”";display:block;margin:3px 0;color:var(--ink2)}
-.flag .why{color:var(--ink2)}
-.flag.other{border-left-color:var(--swept);opacity:.8}
-table.reads{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed}
-table.reads th{text-align:left;font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line);color:var(--ink2);vertical-align:bottom}
-table.reads th .own{display:block;font-family:var(--mono);font-size:11.5px;color:var(--ink);font-weight:400;margin-top:2px}
-table.reads th.matched{color:var(--claims)} table.reads th.unmatched{color:var(--discl)}
-table.reads td{vertical-align:top;padding:8px 8px 10px;border-bottom:1px solid var(--line2);font-family:var(--mono);font-size:11.8px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
-table.reads td.L{font-family:var(--sans);font-weight:500;color:var(--ink2);width:52px;white-space:nowrap}
-.samp{padding:2px 0 6px;border-left:2px solid var(--line2);padding-left:8px;margin:0 0 6px}
-.samp.hit{border-color:var(--flagdot)}
-.en{color:var(--ink2);font-style:italic;margin-top:2px;font-family:var(--sans);font-size:12px}
-.en::before{content:"EN  ";font-style:normal;font-size:10px;letter-spacing:.06em;color:var(--mute)}
-mark{background:var(--mark);color:inherit;padding:0 1px}
-.notice{font-size:12.5px;color:var(--ink2);background:var(--card);border:1px solid var(--line2);border-radius:6px;padding:6px 10px;margin:0 0 8px}
-/* --- below the viewer --- */
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media (max-width:980px){.cols{grid-template-columns:1fr}}
-.roll{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:9px 11px;margin:0 0 9px}
-.roll .hd{font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--mute);margin-bottom:5px;display:flex;gap:8px;align-items:baseline}
-.roll.matched{border-left:3px solid var(--claims)} .roll.unmatched{border-left:3px solid var(--discl)}
-.step{border:1px solid var(--line2);border-radius:6px;background:var(--card);margin:0 0 8px;padding:7px 10px}
-.step .hd{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-.step .hd .nm{font-family:var(--mono);letter-spacing:0;text-transform:none;color:var(--ink);background:var(--line2);border-radius:4px;padding:0 6px;font-weight:500}
-.step .hd a{letter-spacing:0;text-transform:none;color:var(--s3d);margin-left:auto;font-size:12px}
-.step .think{font-size:12.5px;color:var(--ink2);white-space:pre-wrap;word-break:break-word;margin-top:5px}
-.step .call{font-family:var(--mono);font-size:11.5px;color:var(--ink2);margin-top:5px;white-space:pre-wrap;word-break:break-word}
-.step .call .k{color:var(--mute)} .step .call .usr{color:var(--ink);background:var(--s3d-bg);border-radius:3px;padding:0 3px}
-.step.readouts{border-color:var(--jl-bg)} .step.finish{border-color:var(--ink)} .step.finish .nm{background:var(--ink);color:var(--selfg)}
-.mech{border:1px solid var(--line2);border-left:3px solid var(--s3d);border-radius:0 6px 6px 0;background:var(--card);padding:9px 11px;margin:0 0 8px}
-.mech .n{font-family:var(--mono);color:var(--mute);font-size:11.5px;margin-right:6px}
-.mech .txt{font-size:13.5px;color:var(--ink)}
-.mech .ev{font-size:12.5px;color:var(--ink2);margin-top:5px}
-.mech .cells{font-family:var(--mono);font-size:11.5px;color:var(--mute);margin-top:4px;word-break:break-word;white-space:pre-wrap}
-.mech .cells a{color:var(--s3d)}
-.mech .test{font-size:12px;color:var(--mute);font-style:italic;margin-top:6px;border-top:1px dashed var(--line);padding-top:5px}
-.mech .test b{font-style:normal;font-weight:500;letter-spacing:.04em;text-transform:uppercase;font-size:10.5px;color:var(--silent)}
-.conf{font-family:var(--mono);font-size:11.5px;color:var(--ink2);background:var(--line2);border-radius:4px;padding:1px 6px}
+.hlc{background:var(--surface);border:1px solid var(--line-soft);border-left:4px solid var(--miss);border-radius:5px;padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:5px;text-align:left}
+.hlc:hover{border-color:var(--accent)}
+.hlc.header{border-left-color:var(--hold)} .hlc.user{border-left-color:var(--hit)}
+.hlc .where{font-family:var(--mono);font-size:11px;color:var(--text-faint);display:flex;gap:8px;flex-wrap:wrap}
+.hlc .where b{color:var(--text-dim);font-weight:600}
+.hlc .q{font-family:var(--mono);font-size:11.5px;color:var(--text);line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.hlc .loc{font-family:var(--mono);font-size:11px;color:var(--text-dim);white-space:pre-wrap;word-break:break-word}
+.hlc .loc b{background:var(--sample-soft);font-weight:500}
+.hlc .n{font-size:12px;color:var(--text-dim)}
+.hlc .hand{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent)}
+#note{flex:none;padding:5px 14px;font-size:11px;color:var(--text-dim);background:var(--surface);border-top:1px solid var(--line);display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+dialog{border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);padding:0;max-width:560px;width:92vw}
+dialog::backdrop{background:rgba(10,18,24,.45)}
+dialog .body{padding:16px;max-height:80vh;overflow:auto}
+dialog h2{margin:0 0 10px;font-size:15px}
+.man p{margin:0 0 10px;font-size:13px;line-height:1.5}
+.man .sub{font-size:12px}
+.man .sw{width:13px;height:13px;vertical-align:-2px;margin-right:6px}
+.keys{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:12px;align-items:baseline}
+.status{padding:24px;color:var(--text-dim);font-family:var(--mono);font-size:12px}
+.theme{border:1px solid var(--line-soft);border-radius:5px;padding:8px 10px;margin:0 0 8px}
+.theme .mem{font-size:12px;margin:3px 0} .theme .mem a{font-family:var(--mono);font-size:11px}
+@media (max-width:900px){ #ctx{grid-template-columns:1fr 1fr} :root{--col:240px} }
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
+<script>
+  try{ document.documentElement.setAttribute("data-theme", localStorage.getItem("wc-theme")==="dark" ? "dark" : "light"); }
+  catch(e){ document.documentElement.setAttribute("data-theme","light"); }
+</script>
 
-<header>
-  <h1><a href="#/">WeirdChat × OLens: why Qwen3.6-27B does it</a></h1>
-  <p class="sub">An investigator agent (Claude Opus 5) was told each WeirdChat-catalogued behavior of Qwen3.6-27B and asked <em>why</em> the model does it, with chat probes plus an OLens readout of the model's own activations. Pick a behavior, then one of its prompts; click any read token to see what the lens decoded there at every layer, side by side across reads.</p>
-  <div class="banner"><b>UNVERIFIED HYPOTHESES.</b> <span id="banner"></span></div>
-  <div class="recs" id="recs"></div>
-  <details class="alltbl"><summary>every pattern as a table</summary><div id="alltbl"></div></details>
-</header>
-<section id="hl">
-  <div class="hlhead"><h2>Highlights</h2><span class="hint">lens cells a mechanism quotes that verify verbatim against the read at build time — click one to jump to that pattern, read and position. Red = inside the reply, amber = about to answer (header), green = inside the user turn.</span><button id="hltoggle" class="tab">collapse</button></div>
-  <div id="hlgrid" class="hlgrid"></div>
-</section>
-<div class="page" id="app"></div>
+<div id="bar">
+  <h1><a href="#/">WeirdChat × OLens</a></h1>
+  <label class="pick"><span>behavior</span><select id="beh-select"></select></label>
+  <label class="pick"><span>pattern</span><select id="pat-select"></select></label>
+  <button class="btn" id="prev-item" title="previous pattern (k)">‹</button>
+  <button class="btn" id="next-item" title="next pattern (j)">›</button>
+  <label class="pick"><span>read</span><select id="read-select"></select></label>
+  <span id="cmp-toggles" style="display:flex;gap:4px;flex-wrap:wrap" title="compare columns (1…9)"></span>
+  <input id="find" placeholder="find in this pattern's readouts  ( / )" autocomplete="off" spellcheck="false">
+  <input id="search" placeholder="search patterns and mechanisms  ( ; )" autocomplete="off" spellcheck="false">
+  <span class="spacer"></span>
+  <a class="btn" id="themes-btn" href="#/themes" title="mechanism clusters">themes</a>
+  <button class="btn" id="ctx-toggle" aria-pressed="true" title="case / hypothesis / summary / rubric (c)">context</button>
+  <button class="btn" id="wrap-toggle" aria-pressed="false" title="cap row height (w)">compact rows</button>
+  <button class="btn" id="below-toggle" aria-pressed="false" title="mechanisms · transcript · highlights">details</button>
+  <button class="btn" id="theme" title="light / dark (t)">◐</button>
+  <button class="btn" id="manual-btn" title="what the colours mean (m)">m</button>
+  <button class="btn" id="keys" title="keyboard (?)">?</button>
+</div>
+<div id="banner"></div>
+<div id="results" hidden></div>
+<div id="ctx"></div>
+<div id="hits" hidden></div>
+<div id="main">
+  <section id="text"><div class="status">Loading…</div></section>
+  <div id="split" title="drag to resize (double-click resets)"></div>
+  <section id="grid"><div id="posbar"></div><div id="gridwrap"></div></section>
+</div>
+<div id="below" hidden>
+  <div id="tabs"></div>
+  <div id="drawer"></div>
+</div>
+<div id="note"></div>
+
+<dialog id="manual"><div class="body">
+  <h2>Reading the page</h2>
+  <div class="man">
+    <p><i class="sw" style="background:var(--accent)"></i><b>Teal</b> is the token in view: the grid on the right shows what the lens decoded at that position, one row per layer, one column per compared read.</p>
+    <p><i class="sw" style="background:var(--sample-soft);border-color:var(--sample-line)"></i><b>Yellow</b> is the position of record — the last header token, where the model has read the request and written nothing. It is identical for every rollout of a prompt, so a readout difference there is lens sampling, not the model. <span class="kbd">p</span> jumps to it.</p>
+    <p><i class="sw" style="background:var(--hit-soft);border-color:var(--hit)"></i><b>Green</b> means a phrase the agent quoted from a readout cell was found verbatim at build time: a green bar on a token says one of that token's cells carries such a phrase; the cell itself gets a green inset bar and the phrase is highlighted. Quotes that did not verify are listed in the build log, not here.</p>
+    <p><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i><b>Dotted</b> underline is the fork: the first reply word where the matched and unmatched rollouts diverge, computed from the read tokens (≈, positions were thinned).</p>
+    <p><i class="sw" style="background:var(--find-soft);border-color:var(--find)"></i><b>Violet</b> is your search: <span class="kbd">/</span> filters this pattern's readouts (tokens whose cells match get a violet underline and are listed under the bar); <span class="kbd">;</span> searches summaries, prompts and mechanisms across every pattern.</p>
+    <p><b>Faded</b> tokens (‥) stand for positions the read thinned away — the lens read every 4th token plus punctuation and boundaries.</p>
+    <p><b>Resizing.</b> Drag the splitter between the panes, the right edge of a column header, or the bottom edge of a layer label; double-click any of them to reset.</p>
+    <p class="sub">Reads: <i>diag</i> = the diagnostic pass over the study's matched / unmatched rollouts; <i>agent</i> = the investigator's own readouts, parsed back from its tool pages (w###m/u = the study rollouts it was seeded with — same text, a different lens sample; c### = conversations it created). Highlight cards: rust = inside the reply, amber = about to answer, green = inside the user turn.</p>
+  </div>
+</div></dialog>
+
+<dialog id="help"><div class="body">
+  <h2>Keyboard</h2>
+  <div class="keys">
+    <span class="kbd">← →</span><span>previous / next token</span>
+    <span class="kbd">shift ← →</span><span>jump 10 tokens</span>
+    <span class="kbd">home / end</span><span>first / last token</span>
+    <span class="kbd">p</span><span>the position of record (about to speak)</span>
+    <span class="kbd">↑ ↓</span><span>move the highlighted layer</span>
+    <span class="kbd">j k</span><span>next / previous pattern</span>
+    <span class="kbd">[ ]</span><span>previous / next behavior</span>
+    <span class="kbd">1…9</span><span>show / hide a read as a column</span>
+    <span class="kbd">c</span><span>show / hide the context panes</span>
+    <span class="kbd">w</span><span>compact rows on / off</span>
+    <span class="kbd">/</span><span>find in this pattern's readouts (violet)</span>
+    <span class="kbd">;</span><span>search patterns and mechanisms</span>
+    <span class="kbd">t</span><span>light / dark</span>
+    <span class="kbd">m</span><span>what the colours mean</span>
+    <span class="kbd">?</span><span>this list</span>
+  </div>
+</div></dialog>
+
+<dialog id="themes"><div class="body"><h2>Themes — mechanism clusters</h2><div id="themes-body"></div></div></dialog>
 
 <script>
 const D = /*__DATA__*/;
 const BANNER = "__BANNER__";
+const $ = s => document.querySelector(s);
 const esc = s => (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+const rxEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const num = (v,d) => v==null ? "—" : Number(v).toFixed(d==null?2:d);
 const pct = v => v==null ? "—" : Math.round(Number(v)*100) + "%";
+const cut = (s,n) => { s = s==null ? "" : String(s); return s.length<=n ? s : s.slice(0,n) + "…"; };
 const byKey = {}; (D.patterns||[]).forEach(p => byKey[p.key] = p);
 const GLABEL = {run: "agent run with mechanisms", diag: "diagnostics only", data: "data only"};
-document.getElementById("banner").textContent = BANNER;
+function el(tag, cls, text){ const e = document.createElement(tag); if (cls) e.className = cls; if (text!=null) e.textContent = text; return e; }
+function store(k, v){ try { v==null ? localStorage.removeItem(k) : localStorage.setItem(k, String(v)); } catch(e){} }
+function load(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
+$("#banner").textContent = BANNER;
 
-function cut(s, n){ s = s==null ? "" : String(s); return s.length<=n ? s : s.slice(0,n) + " …"; }
-function dataUrl(key){ return "data/" + encodeURIComponent(key) + ".json"; }
-function patUrl(key, read, pos){
-  let h = "#/pattern/" + encodeURIComponent(key);
-  if (read) h += "?read=" + encodeURIComponent(read) + (pos==null ? "" : "&pos=" + pos);
-  return h;
-}
-function firstKey(){
-  const b = (D.behaviors||[])[0]; if (!b) return null;
-  const p = (D.patterns||[]).find(p => p.behavior_id === b.behavior_id) || D.patterns[0];
-  return p ? p.key : null;
-}
-
-// text shown up to `n` chars, with the remainder behind a disclosure
-function expandable(text, n, label){
-  const t = text==null ? "" : String(text);
-  if (!t) return `<p class="none">(empty)</p>`;
-  if (t.length <= n) return `<pre class="block">${esc(t)}</pre>`;
-  return `<pre class="block">${esc(t.slice(0,n))} …</pre>` +
-    `<details><summary>${esc(label||"show full")} (${t.length} chars)</summary><pre class="block">${esc(t)}</pre></details>`;
-}
-
-// ------------------------------------------------------------ header pickers
-function renderPickers(curKey){
-  const box = document.getElementById("recs"); if (!box) return;
-  const cur = curKey ? byKey[curKey] : null;
-  const bs = D.behaviors || [];
-  const curB = cur ? cur.behavior_id : (bs[0] ? bs[0].behavior_id : null);
-  let h = `<div class="pick"><span class="lbl">behavior</span>` + bs.map(b =>
-    `<button class="tab" data-beh="${esc(b.behavior_id)}" aria-pressed="${b.behavior_id===curB}">${esc(b.behavior_name)}<span class="cnt">${b.n_patterns}</span></button>`).join("") +
-    `<a class="hint" href="#/themes" style="margin-left:auto">themes (${(D.clusters||[]).length} mechanism clusters) →</a></div>`;
-  const pats = (D.patterns||[]).filter(p => p.behavior_id === curB);
-  h += `<div class="pick"><span class="lbl">prompt</span>` + pats.map(p =>
-    `<button class="chip" data-key="${esc(p.key)}" aria-pressed="${cur && p.key===cur.key}" title="${esc(p.key)} · ${esc(GLABEL[p.grade]||p.grade)}"><span class="g ${esc(p.grade)}"></span>${esc(cut(p.group_summary || p.key, 70))}<span class="n">${pct(p.published_match_rate)}</span></button>`).join("") + `</div>`;
-  h += `<div class="legend"><span><i class="dot" style="background:var(--claims)"></i>agent run with ≥1 mechanism</span><span><i class="dot" style="background:var(--silent)"></i>diagnostics only</span><span><i class="dot" style="background:var(--swept)"></i>data only</span><span class="hint">% = WeirdChat's published match rate for the prompt</span></div>`;
-  box.innerHTML = h;
-  box.querySelectorAll("[data-beh]").forEach(b => b.onclick = () => { const p = (D.patterns||[]).find(p => p.behavior_id === b.dataset.beh); if (p) location.hash = patUrl(p.key); });
-  box.querySelectorAll("[data-key]").forEach(b => b.onclick = () => { location.hash = patUrl(b.dataset.key); });
-}
-
-function renderOverviewTables(){
-  const box = document.getElementById("alltbl"); if (!box) return;
-  const c = D.counts || {};
-  let h = `<p class="hint"><b>${c.patterns||0}</b> patterns · <b>${c.behaviors||0}</b> behaviors · <b>${c.runs||0}</b> agent runs · <b>${c.with_diag||0}</b> with OLens diagnostics · <b>${c.reads||0}</b> lens reads · <b>${c.mechanisms||0}</b> reported mechanisms · source <span class="kkey">${esc(D.source)}</span></p>`;
-  const bs = D.behaviors || [];
-  if (!bs.length) return box.innerHTML = h + `<p class="none">no patterns found.</p>`;
-  h += `<table class="t"><thead><tr><th>behavior</th><th>id</th><th class="num">patterns</th><th class="num">mean published match</th><th class="num">agent runs</th></tr></thead><tbody>`;
-  for (const b of bs) h += `<tr><td>${esc(b.behavior_name)}</td><td class="kkey">${esc(b.behavior_id)}</td><td class="num">${b.n_patterns}</td><td class="num">${num(b.mean_match_rate)}</td><td class="num">${b.n_runs}</td></tr>`;
-  h += `</tbody></table>`;
-  h += `<table class="t"><thead><tr><th>behavior</th><th>group summary</th><th class="num">match</th><th class="num">elo</th><th>grade</th><th>reads</th><th>runs</th><th class="num">mechanisms</th></tr></thead><tbody>`;
-  for (const p of D.patterns)
-    h += `<tr class="click" data-go="${patUrl(p.key)}"><td>${esc(p.behavior_name)}<div class="kkey">${esc(p.key)}</div></td><td>${esc(cut(p.group_summary, 160))}</td>` +
-      `<td class="num">${num(p.published_match_rate)}</td><td class="num">${num(p.elo, 0)}</td><td><span class="g ${esc(p.grade)}" style="display:inline-block;width:8px;height:8px;border-radius:50%"></span> ${esc(GLABEL[p.grade]||p.grade)}</td>` +
-      `<td><span class="tag ${p.n_reads?"y":"n"}">${p.n_reads||"none"}</span></td><td><span class="tag ${p.n_runs?"y":"n"}">${p.n_runs||"none"}</span></td><td class="num">${p.n_mechanisms}</td></tr>`;
-  h += `</tbody></table>`;
-  box.innerHTML = h;
-  box.querySelectorAll("tr[data-go]").forEach(tr => { tr.onclick = () => { location.hash = tr.dataset.go; }; });
-}
-
-// ---------------------------------------------------------------- highlights
-function renderHighlights(){
-  const g = document.getElementById("hlgrid"), sec = document.getElementById("hl"); if (!g) return;
-  const items = D.highlights || [];
-  if (!items.length){ sec.querySelector(".hint").textContent = "none yet — a highlight is a lens cell a mechanism quotes that verifies verbatim against the read; none of the current citations do."; g.innerHTML = ""; }
-  g.innerHTML = items.map((h, i) => {
-    const smp = esc(h.sample.trim()).split(esc(h.quote)).join(`<mark>${esc(h.quote)}</mark>`);
-    const loc = esc(h.local.slice(0, h.local.length - h.token.length)) + `<b>${esc(h.token)}</b>`;
-    const en = D.en && D.en[h.sample];
-    return `<div class="hlc ${esc(h.region)}" data-i="${i}">
-      <div class="where"><b>${esc(h.behavior)}</b> ${esc(cut(h.summary, 60))} · <span>${esc(h.read)}</span> · pos ${h.pos} · L${h.layer}${h.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div>
-      <div class="loc">${loc}</div>
-      <div class="q">${smp}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>
-      <div class="n">${esc(h.note)}</div></div>`;
-  }).join("");
-  g.querySelectorAll(".hlc").forEach(c => c.onclick = () => { const h = items[+c.dataset.i]; location.hash = patUrl(h.pattern_key, h.read, h.pos); const m = document.getElementById("app"); if (m && m.scrollIntoView) m.scrollIntoView({behavior:"smooth", block:"start"}); });
-  const tg = document.getElementById("hltoggle");
-  if (tg) tg.onclick = () => { g.hidden = !g.hidden; tg.textContent = g.hidden ? "show" : "collapse"; };
-}
-
-// ------------------------------------------------------------------- pattern
-// V = the open pattern page: its heavy data, the selected read/position and the comparison set
-let V = null;
+// ------------------------------------------------------------------ state
+const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
+           colw:{}, rowh:{}, below:false, tab:"mechanisms", agentPromise:null};
 const heavyCache = {};
+function dataUrl(key){ return "data/" + encodeURIComponent(key) + ".json"; }
+function patUrl(key, read, pos){ let h = "#/pattern/" + encodeURIComponent(key); if (read) h += "?read=" + encodeURIComponent(read) + (pos==null ? "" : "&pos=" + pos); return h; }
+function patternsOf(bid){ return (D.patterns||[]).filter(p => p.behavior_id === bid); }
+function firstKey(){ const b = (D.behaviors||[])[0]; if (!b) return null; const p = patternsOf(b.behavior_id)[0] || D.patterns[0]; return p ? p.key : null; }
+function curRead(){ return S.data && S.read ? S.data.byId[S.read] : null; }
 
-function renderPattern(key){
-  const p = byKey[key];
-  if (!p) return `<p class="none">no pattern <span class="kkey">${esc(key)}</span>.</p>`;
-  let h = `<h2 style="margin-top:4px">${esc(p.behavior_name)}</h2>` +
-    `<p class="crumb"><span class="kkey">${esc(p.key)}</span>` +
-    (p.entry_id ? ` · entry ${esc(p.entry_id)}` : "") + (p.group_id ? ` · group ${esc(p.group_id)}` : "") +
-    (p.n_group_members!=null ? ` · ${p.n_group_members} group members` : "") + ` · ${esc(GLABEL[p.grade]||p.grade)}</p>`;
-  h += `<div><span class="pill">published match ${pct(p.published_match_rate)}</span><span class="pill">elo ${num(p.elo,0)}</span>` +
-    Object.keys(p.elo_axes||{}).map(k => `<span class="pill">${esc(k)} ${num(p.elo_axes[k])}</span>`).join("") +
-    (p.weirdchat_url ? `<a class="pill" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>` : "") + `</div>`;
-  if (p.group_summary) h += `<div class="card">${esc(p.group_summary)}</div>`;
-  h += `<h3>prompt (verbatim)</h3><pre class="block">${esc(p.prompt)}</pre>`;
-  if (p.rubric) h += `<details><summary>transcript rubric</summary><pre class="block">${esc(p.rubric)}</pre></details>`;
-  h += `<div id="heavy" data-key="${esc(key)}"><p class="none">loading <span class="kkey">${esc(dataUrl(key))}</span> …</p></div>`;
-  return h;
-}
+// ------------------------------------------------------------------- theme
+function toggleTheme(){ const dark = document.documentElement.getAttribute("data-theme") !== "dark"; document.documentElement.setAttribute("data-theme", dark ? "dark" : "light"); store("wc-theme", dark ? "dark" : "light"); }
 
-function fillHeavy(key, html){
-  const slot = document.getElementById("heavy");
-  if (slot && slot.dataset.key === key) slot.innerHTML = html;
-  return !!(slot && slot.dataset.key === key);
-}
-function failNotice(url, why){
-  return `<p class="none">could not load <span class="kkey">${esc(url)}</span> (${esc(why)}). ` +
-    `Browsers block fetch() from a file:// page — serve the site dir instead: <span class="kkey">python -m http.server</span> then open the printed URL (or build with <span class="kkey">single=true</span> for a self-contained file).</p>`;
-}
-function fetchJson(url){
-  if (typeof fetch !== "function") return Promise.reject(new Error("no fetch()"));
-  return fetch(url).then(r => { if (!r.ok) throw new Error(r.status + " " + r.statusText); return r.json(); });
-}
-function loadPattern(key, want){
-  const url = dataUrl(key);
-  const go = data => { const s = document.getElementById("heavy"); if (s && s.dataset.key === key) openViewer(key, data, want); };
-  if (D.heavy && D.heavy[key]) return go(D.heavy[key]);   // single-file build: everything inlined
-  if (heavyCache[key]) return go(heavyCache[key]);
-  // only the fetch is caught: a render bug must surface in the console, not as a "could not load"
-  fetchJson(url).then(data => { heavyCache[key] = data; return data; },
-                      err => { fillHeavy(key, failNotice(url, err && err.message ? err.message : String(err))); return null; })
-    .then(data => { if (data) go(data); });
-}
+// ---------------------------------------------------------------- splitter
+(function splitter(){
+  const sp = $("#split"), text = $("#text"), root = document.documentElement;
+  const saved = load("wc-split"); if (saved) root.style.setProperty("--split", saved);
+  sp.onpointerdown = e => { e.preventDefault(); sp.classList.add("on"); const main = $("#main").getBoundingClientRect();
+    const mv = ev => { const pctw = Math.min(85, Math.max(15, (ev.clientX - main.left) / main.width * 100)); root.style.setProperty("--split", pctw.toFixed(1) + "%"); };
+    const up = () => { sp.classList.remove("on"); store("wc-split", root.style.getPropertyValue("--split")); window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up); };
+    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up); };
+  sp.ondblclick = () => { root.style.setProperty("--split", "46%"); store("wc-split", null); };
+  if (text) text.style.width = "var(--split)";
+})();
 
-// ---- read indexing
-function indexRead(r){
-  r.rowByPos = {}; r.positions = []; r.aboutPos = null;
-  for (const row of r.rows || []){ r.rowByPos[row.pos] = row; r.positions.push(row.pos); if (row.region === "header") r.aboutPos = row.pos; }
-}
+// -------------------------------------------------------------------- data
+function fetchJson(url){ if (typeof fetch !== "function") return Promise.reject(new Error("no fetch()")); return fetch(url).then(r => { if (!r.ok) throw new Error(r.status + " " + r.statusText); return r.json(); }); }
+function indexRead(r){ r.rowByPos = {}; r.positions = []; r.aboutPos = null; for (const row of r.rows || []){ r.rowByPos[row.pos] = row; r.positions.push(row.pos); if (row.region === "header") r.aboutPos = row.pos; } }
 function prepareData(key, data){
   data.reads = data.reads || []; data.runs = data.runs || []; data.samples = data.samples || [];
   data.reads.forEach(indexRead);
-  data.byId = {}; data.byConv = {}; data.byTool = {};
-  for (const r of data.reads){ data.byId[r.id] = r; if (r.conv_id && (!data.byConv[r.conv_id] || (!data.byConv[r.conv_id].rows && !data.byConv[r.conv_id].deferred))) data.byConv[r.conv_id] = r; if (r.tool_index!=null) data.byTool[r.tool_index] = r; }
-  for (const r of data.reads){
-    // ids a mechanism can cite to mean this read: its conv id, or the agent's own read of the same rollout
-    r.mention_ids = r.conv_id ? [r.conv_id] : [];
-    for (const o of data.reads) if (o !== r && o.same_rollout_as === r.id && o.conv_id) r.mention_ids.push(o.conv_id);
-  }
-  data.mechs = [];
-  data.runs.forEach((run, ri) => (run.mechanisms||[]).forEach((m, mi) => data.mechs.push({...m, run: ri, i: mi, auditor: run.auditor, seed: run.seed})));
-  // fragments the agent quoted: split its cell citations / evidence on quotes, keep >= 25 chars
-  const frags = new Set();
-  for (const m of data.mechs) for (const f of ((m.readout_cells||"") + "\n" + (m.evidence||"")).split(/["'“”‘’;\n]/)){ const t = f.trim(); if (t.length >= 25) frags.add(t); }
-  for (const h of (D.highlights||[])) if (h.pattern_key === key && h.quote) frags.add(h.quote);   // build-verified quotes, so cards and cells agree
-  data.quotes = [...frags].sort((a,b) => b.length - a.length);
+  data.byId = {}; data.byConv = {}; data.byTool = {}; data.bySample = {};
+  for (const r of data.reads){ data.byId[r.id] = r; if (r.conv_id && (!data.byConv[r.conv_id] || (!data.byConv[r.conv_id].rows && !data.byConv[r.conv_id].deferred))) data.byConv[r.conv_id] = r; if (r.tool_index!=null) data.byTool[r.tool_index] = r; if (r.source==="diag" && r.sample_index!=null) data.bySample[r.sample_index] = r; }
+  for (const r of data.reads){ r.mention_ids = r.conv_id ? [r.conv_id] : []; for (const o of data.reads) if (o !== r && o.same_rollout_as === r.id && o.conv_id) r.mention_ids.push(o.conv_id); }
+  data.mechs = []; data.runs.forEach((run, ri) => (run.mechanisms||[]).forEach((m, mi) => data.mechs.push({...m, run: ri, i: mi, auditor: run.auditor, seed: run.seed})));
+  // verified highlight cells for this pattern: read → pos → [{layer, quote}]
+  data.hl = {}; for (const h of (D.highlights||[])) if (h.pattern_key === key){ (data.hl[h.read] = data.hl[h.read] || {}); (data.hl[h.read][h.pos] = data.hl[h.read][h.pos] || []).push(h); }
   data.key = key;
 }
-
-// ---- opening the viewer
-function openViewer(key, data, want){
-  if (!data.byId) prepareData(key, data);
-  V = {key, data, readId: null, pos: null, compare: []};
-  const reads = data.reads;
-  let h = `<h2>Lens reads</h2>`;
-  if (!reads.length) h += `<p class="none">no lens reads for this pattern yet (no diag file, no agent readouts).</p>`;
-  else {
-    h += `<p class="hint">A read is one OLens readout over one conversation: from the diagnostic pass (matched / unmatched study rollouts), or parsed back out of the agent's own <span class="kkey">readouts</span> tool pages (w###m/u = study rollouts it was seeded with; c### = conversations it created via chat). Left: the tokens that were read. Right: what the lens decoded at the selected token, every layer, one column per compared read.</p>`;
-    h += `<div class="recs" id="reads" style="margin:0 0 10px"></div><main class="two"><section id="left"></section><section id="right"></section></main>`;
-  }
-  h += belowViewer(data);
-  fillHeavy(key, h);
-  wireBelow(data);
-  if (!reads.length) return;
-  const diagM = reads.find(r => r.source==="diag" && r.label==="matched"), diagU = reads.find(r => r.source==="diag" && r.label==="unmatched");
-  if (diagM && diagU) V.compare = [diagM.id, diagU.id];
-  const start = (want && want.read && data.byId[want.read]) ? data.byId[want.read] : (diagM || reads.find(r => r.rows && r.rows.length) || reads[0]);
-  selectRead(start.id, want && want.pos!=null ? +want.pos : null);
-}
-
-function defaultPos(r){
-  if (!r.positions || !r.positions.length) return null;
-  if (r.fork_pos!=null && r.rowByPos[r.fork_pos]) return r.fork_pos;
-  if (r.aboutPos!=null) return r.aboutPos;
-  const reply = (r.rows||[]).find(row => row.region === "reply");
-  return reply ? reply.pos : r.positions[0];
-}
-
 function ensureAgentRows(read){
-  // deferred agent reads live in data/<key>.agent.json; fetch it once and merge rows by id
-  const data = V.data;
+  const data = S.data;
   if (!read.deferred || read.rows) return Promise.resolve();
-  if (!data.agentPromise){
-    data.agentPromise = fetchJson(data.agent_file).then(blob => {
-      for (const full of (blob.reads||[])){ const stub = data.byId[full.id]; if (stub){ stub.rows = full.rows; stub.layers = full.layers || stub.layers; stub.deferred = false; indexRead(stub); } }
-    });
-  }
+  if (!data.agentPromise) data.agentPromise = fetchJson(data.agent_file).then(blob => { for (const full of (blob.reads||[])){ const stub = data.byId[full.id]; if (stub){ stub.rows = full.rows; stub.layers = full.layers || stub.layers; stub.deferred = false; indexRead(stub); } } });
   return data.agentPromise;
 }
 
+// ------------------------------------------------------------------ opening
+function openPattern(key, want){
+  if (!byKey[key]){ $("#text").innerHTML = `<div class="status">no pattern ${esc(key)}</div>`; return; }
+  if (S.key === key && S.data){ if (want && want.read && S.data.byId[want.read]) selectRead(want.read, want.pos); return; }
+  S.key = key; S.data = null; S.read = null; S.pos = null; S.compare = []; S.find = ""; $("#find").value = "";
+  renderBar(); renderCtx(); renderHits(); renderNote();
+  $("#text").innerHTML = `<div class="status">loading ${esc(dataUrl(key))} …</div>`; $("#posbar").innerHTML = ""; $("#gridwrap").innerHTML = "";
+  const go = data => { if (S.key !== key) return; if (!data.byId) prepareData(key, data); S.data = data;
+    const dm = data.reads.find(r => r.source==="diag" && r.label==="matched"), du = data.reads.find(r => r.source==="diag" && r.label==="unmatched");
+    if (dm && du) S.compare = [dm.id, du.id];
+    if (!data.reads.length){ renderAll(); $("#text").innerHTML = `<div class="status">no lens reads for this pattern yet (no diag file, no agent readouts)</div>`; return; }
+    const start = (want && want.read && data.byId[want.read]) ? data.byId[want.read] : (dm || data.reads.find(r => r.rows && r.rows.length) || data.reads[0]);
+    selectRead(start.id, want && want.pos!=null ? +want.pos : null); };
+  if (D.heavy && D.heavy[key]) return go(D.heavy[key]);
+  if (heavyCache[key]) return go(heavyCache[key]);
+  fetchJson(dataUrl(key)).then(d => { heavyCache[key] = d; return d; }, err => { if (S.key === key) $("#text").innerHTML = `<div class="status">could not load ${esc(dataUrl(key))} (${esc(err && err.message || err)}). Browsers block fetch() from file:// — serve the site dir with <span class="kbd">python -m http.server</span>, or build with single=true.</div>`; return null; })
+    .then(d => { if (d) go(d); });
+}
+function defaultPos(r){ if (!r.positions || !r.positions.length) return null; if (r.fork_pos!=null && r.rowByPos[r.fork_pos]) return r.fork_pos; if (r.aboutPos!=null) return r.aboutPos; return r.positions[0]; }
 function selectRead(id, pos){
-  if (!V) return;
-  const r = V.data.byId[id]; if (!r) return;
-  V.readId = id;
-  if (!V.compare.includes(id)) V.compare = [id, ...V.compare];
-  const needs = [r, ...V.compare.map(c => V.data.byId[c]).filter(Boolean)].filter(x => x.deferred && !x.rows);
-  if (needs.length){
-    V.pos = pos;
-    renderChips();
-    const left = document.getElementById("left"), right = document.getElementById("right");
-    if (left) left.innerHTML = `<p class="none">loading the agent's reads (<span class="kkey">${esc(V.data.agent_file)}</span>) …</p>`;
-    if (right) right.innerHTML = "";
-    const key = V.key;
-    Promise.all(needs.map(ensureAgentRows)).then(() => { if (V && V.key === key && V.readId === id) selectRead(id, V.pos); })
-      .catch(err => { const l = document.getElementById("left"); if (V && V.key === key && l) l.innerHTML = failNotice(V.data.agent_file, err && err.message ? err.message : String(err)); });
-    return;
-  }
-  if (pos==null || !r.rowByPos || !r.rowByPos[pos]) pos = defaultPos(r);
-  V.pos = pos;
-  renderChips(); renderLeft(); renderRight();
-  try { history.replaceState(null, "", patUrl(V.key, id, pos)); } catch(e){}
+  const data = S.data; if (!data) return; const r = data.byId[id]; if (!r) return;
+  S.read = id; if (!S.compare.includes(id)) S.compare = [id, ...S.compare];
+  const needs = [r, ...S.compare.map(c => data.byId[c]).filter(Boolean)].filter(x => x.deferred && !x.rows);
+  if (needs.length){ S.pos = pos; renderBar(); $("#text").innerHTML = `<div class="status">loading the agent's reads (${esc(data.agent_file)}) …</div>`; const key = S.key;
+    Promise.all(needs.map(ensureAgentRows)).then(() => { if (S.key === key && S.read === id) selectRead(id, S.pos); })
+      .catch(err => { if (S.key === key) $("#text").innerHTML = `<div class="status">could not load ${esc(data.agent_file)} (${esc(err && err.message || err)})</div>`; }); return; }
+  if (pos==null || !r.rowByPos[pos]) pos = defaultPos(r);
+  S.pos = pos;
+  if (S.layer==null || !(r.layers||[]).includes(S.layer)) S.layer = (r.layers||[])[0];
+  renderAll();
+  try { history.replaceState(null, "", patUrl(S.key, id, pos)); } catch(e){}
 }
+function toggleCompare(id){ if (!S.data || id === S.read) return; S.compare = S.compare.includes(id) ? S.compare.filter(x => x !== id) : [...S.compare, id]; const r = S.data.byId[id]; if (r && r.deferred && !r.rows) return selectRead(S.read, S.pos); renderBar(); renderGrid(); renderText(); renderHits(); }
+function renderAll(){ renderBar(); renderCtx(); renderText(); renderGrid(); renderHits(); renderBelow(); renderNote(); }
 
-function toggleCompare(id){
-  if (id === V.readId) return;
-  V.compare = V.compare.includes(id) ? V.compare.filter(x => x !== id) : [...V.compare, id];
-  const r = V.data.byId[id];
-  if (r && r.deferred && !r.rows) return selectRead(V.readId, V.pos);  // loads, then re-renders
-  renderChips(); renderRight();
-}
-
+// --------------------------------------------------------------------- bar
 function readDot(r){ return r.parse_error ? "err" : (r.source==="diag" ? r.label : (r.label==="agent" ? "agent" : r.label)); }
-function readTitle(r){
-  const parts = [];
-  if (r.source==="diag") parts.push(`diagnostic pass · ${r.label} rollout · sample ${r.sample_index}`);
-  else parts.push(`agent read · tool call #${r.tool_index} · conversation ${r.conv_id}` + (r.same_rollout_as ? ` (same rollout as ${r.same_rollout_as}, different lens sample)` : ""));
-  if (r.parse_error) parts.push("could not parse: " + r.parse_error);
-  return parts.join(" · ");
+function readLabel(r){ return r.source==="diag" ? `diag ${r.label} · sample ${r.sample_index}` : `agent ${r.conv_id}${r.same_rollout_as ? " (= " + r.same_rollout_as.split(":")[1] + ")" : ""}${r.parse_error ? " ⚠ unparsed" : ""}`; }
+function renderBar(){
+  const p = byKey[S.key], bs = D.behaviors || [], bid = p ? p.behavior_id : (bs[0] ? bs[0].behavior_id : null);
+  $("#beh-select").innerHTML = bs.map(b => `<option value="${esc(b.behavior_id)}" ${b.behavior_id===bid?"selected":""}>${esc(b.behavior_name)} (${b.n_patterns})</option>`).join("");
+  const pats = patternsOf(bid);
+  $("#pat-select").innerHTML = pats.map(q => `<option value="${esc(q.key)}" ${q.key===S.key?"selected":""}>${esc(cut(q.group_summary || q.key, 60))} · ${pct(q.published_match_rate)}</option>`).join("");
+  const idx = pats.findIndex(q => q.key === S.key); $("#prev-item").disabled = idx <= 0; $("#next-item").disabled = idx < 0 || idx >= pats.length-1;
+  const reads = S.data ? S.data.reads : [];
+  $("#read-select").innerHTML = reads.length ? reads.map(r => `<option value="${esc(r.id)}" ${r.id===S.read?"selected":""}>${esc(readLabel(r))}</option>`).join("") : `<option>—</option>`;
+  $("#cmp-toggles").innerHTML = reads.filter(r => !r.parse_error).map((r, i) => `<button class="btn cmp" data-cmp="${esc(r.id)}" aria-pressed="${S.compare.includes(r.id)}" ${r.id===S.read?"disabled":""} title="${esc(r.id)} as a grid column (${i+1})"><i class="${readDot(r)}"></i>${esc(r.id.replace(/^diag:/, "").replace(/^agent:/, ""))}</button>`).join("");
+  $("#cmp-toggles").querySelectorAll("[data-cmp]").forEach(b => b.onclick = () => toggleCompare(b.dataset.cmp));
+  $("#ctx-toggle").setAttribute("aria-pressed", String(S.ctx)); $("#wrap-toggle").setAttribute("aria-pressed", String(S.compact)); $("#below-toggle").setAttribute("aria-pressed", String(S.below));
 }
 
-function renderChips(){
-  const box = document.getElementById("reads"); if (!box) return;
-  const reads = V.data.reads;
-  let h = `<div class="pick"><span class="lbl">read</span>` + reads.map(r =>
-    `<button class="chip" data-read="${esc(r.id)}" aria-pressed="${r.id===V.readId}" title="${esc(readTitle(r))}"><span class="g ${readDot(r)}"></span>${esc(r.id)}` +
-    `<span class="n">${r.parse_error ? "⚠ unparsed" : (r.positions && r.positions.length ? r.positions.length + " pos" : (r.deferred ? "lazy" : "0 pos"))}${r.tool_index!=null ? " · #"+r.tool_index : ""}</span></button>`).join("") + `</div>`;
-  h += `<div class="pick"><span class="lbl">compare</span>` + reads.filter(r => !r.parse_error).map(r =>
-    `<button class="tab" data-cmp="${esc(r.id)}" aria-pressed="${V.compare.includes(r.id)}" ${r.id===V.readId?"disabled":""} title="${r.id===V.readId?"the selected read is always a column":"toggle this read as a column in the layer table"}">${esc(r.id)}</button>`).join("") +
-    `<span class="hint" style="margin-left:6px">columns of the layer table, side by side at the selected position; the selected read is always included</span></div>`;
+// --------------------------------------------------------------------- ctx
+function clipbox(text, n){ const t = text || ""; if (t.length <= n) return `<div class="mono">${esc(t)}</div>`; return `<div class="clipbox"><div class="mono">${esc(t)}</div></div><button class="showall" data-showall>show all (${t.length} chars)</button>`; }
+function verifiedBadge(p){ if (!p || !p.cited_fragments) return `<span class="badge dim">no quoted cells</span>`; const k = p.cited_verified, n = p.cited_fragments; return `<span class="badge ${k===n?"hit":(k?"hold":"miss")}">cited cells verified ${k}/${n}</span>`; }
+function renderCtx(){
+  const box = $("#ctx"); box.hidden = !S.ctx; const p = byKey[S.key]; if (!p){ box.innerHTML = ""; return; }
+  const data = S.data, runs = p.runs || [], run = runs[0];
+  const mechs = run ? (run.mechanisms||[]) : [];
+  const top = mechs.slice().sort((a,b) => (b.confidence||0) - (a.confidence||0))[0];
+  let h = `<div class="pane"><h3>the case</h3><div style="font-weight:600">${esc(p.behavior_name)}</div><div class="dim" style="margin:2px 0 4px">${esc(p.group_summary)}</div>` +
+    `<div class="tags"><span class="tag">published match ${pct(p.published_match_rate)}</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${(p.n_samples||0)} rollouts in the contrast set</span><span class="tag">${p.n_reads||0} reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
+    `<div class="prompt">${esc(p.prompt)}</div></div>`;
+  h += `<div class="pane"><h3>primary hypothesis</h3>` + (top ? `<div>${esc(top.mechanism)} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span></div>` +
+    (top.would_test_by ? `<div class="dim" style="margin-top:4px"><span class="badge hold">not run</span> would test by: ${esc(top.would_test_by)}</div>` : "") + (mechs.length > 1 ? `<div class="dim" style="margin-top:4px">+${mechs.length-1} more in details</div>` : "") : `<div class="empty">no agent run for this pattern yet — no hypothesis.</div>`) + `</div>`;
+  h += `<div class="pane"><h3>agent summary</h3>` + (run ? `<div>${esc(run.summary || "(no summary)")}</div>` +
+    `<div class="vrow" style="margin-top:6px"><span class="name">tool calls</span><span>${run.n_tool_calls||0} · ${run.n_readouts||0} readouts · ${run.n_chat||0} chat probes</span></div>` +
+    `<div class="vrow"><span class="name">mechanisms</span><span>${mechs.length}</span></div>` +
+    `<div class="vrow"><span class="name">verification</span>${verifiedBadge(p)}</div>` +
+    `<div class="vrow"><span class="name">run</span><span class="dim">${esc(run.auditor)} s${run.seed} · stopped: ${esc(run.stopped_by||"?")}${runs.length>1?` · +${runs.length-1} more run(s)`:""}</span></div>` : `<div class="empty">no agent run for this pattern yet.</div>`) + `</div>`;
+  h += `<div class="pane"><h3>rubric</h3>${p.rubric ? clipbox(p.rubric, 320) : `<div class="empty">no rubric.</div>`}</div>`;
   box.innerHTML = h;
-  box.querySelectorAll("[data-read]").forEach(b => b.onclick = () => selectRead(b.dataset.read, null));
-  box.querySelectorAll("[data-cmp]").forEach(b => b.onclick = () => toggleCompare(b.dataset.cmp));
+  box.querySelectorAll("[data-showall]").forEach(b => b.onclick = () => { b.previousElementSibling.classList.add("open"); b.remove(); });
 }
 
-// ---- left: the token strip of the selected read
-const REGION_LABEL = {user: "user — the model is reading the request", header: "about to answer — identical for every rollout of this prompt", reply: "reply — the model is writing its answer", system: "system"};
-function tokHtml(s){
-  if (s === "") return `<span class="special">∅</span>`;
-  if (/^<\|.*\|>$/.test(s)) return `<span class="special">${esc(s)}</span>`;
-  return esc(s).replace(/\n/g, `<span class="nl">⏎</span>`).replace(/\t/g, `<span class="nl">⇥</span>`);
-}
-function flagPositions(r){
-  const set = new Set();
-  for (const m of V.data.mechs) for (const c of citations(m.readout_cells)) if (c.pos!=null && c.cid && r.mention_ids.includes(c.cid)) set.add(c.pos);
+// -------------------------------------------------------------------- text
+const REGION_LABEL = {user: "the model is reading the request", header: "about to answer — identical for every rollout of this prompt", reply: "the model is writing its answer", system: ""};
+function tokHtml(s){ if (s === "") return `<span class="nl">∅</span>`; return esc(s).replace(/\n/g, `<span class="nl">⏎</span>`).replace(/\t/g, `<span class="nl">⇥</span>`); }
+function findRx(){ return S.find ? new RegExp(rxEsc(S.find), "i") : null; }
+function cellsAt(r, pos){ const row = r.rowByPos && r.rowByPos[pos]; return row ? (row.samples||[]).reduce((a, ss) => a.concat(ss), []) : []; }
+function foundPositions(){
+  const rx = findRx(), set = new Set(); if (!rx || !S.data) return set;
+  const reads = S.compare.map(id => S.data.byId[id]).filter(r => r && r.rows);
+  const r0 = curRead(); for (const p of (r0.positions||[])) for (const r of reads) if (cellsAt(r, p).some(s => rx.test(s))){ set.add(p); break; }
   return set;
 }
-function renderLeft(){
-  const r = V.data.byId[V.readId], left = document.getElementById("left"); if (!left) return;
-  let h = `<div class="recmeta"><span class="badge ${readDot(r)}">${esc(r.source==="diag" ? r.label + " rollout" : "agent read · " + r.label)}</span>` +
-    `<span class="hint">${esc(r.id)} · ${(r.positions||[]).length} positions read · ${(r.layers||[]).length} layers` +
-    (r.claimed && r.claimed.positions!=null && r.claimed.positions !== (r.positions||[]).length ? ` (page header says ${r.claimed.positions})` : "") +
-    (r.tool_index!=null ? ` · tool call #${r.tool_index}` : "") +
-    (r.same_rollout_as ? ` · same rollout as <span class="kkey">${esc(r.same_rollout_as)}</span>, different lens sample` : "") +
-    (r.aboutPos!=null ? ` · about-to-speak = ${r.aboutPos}` : "") + `</span></div>`;
-  if (r.parse_error) h += `<div class="notice"><b>could not parse this readout page:</b> ${esc(r.parse_error)}</div>`;
-  h += `<div class="legend"><span><i style="outline:1px solid var(--swept);outline-offset:-1px"></i>read position (click)</span><span><i style="background:var(--mark)"></i>cited by a mechanism</span><span><i style="background:var(--sel)"></i>selected</span>` +
-    `<span><i style="box-shadow:0 2px 0 var(--ink)"></i>about to speak (last header token)</span>` +
-    (r.fork_pos!=null ? `<span><i style="border-bottom:2px dotted var(--ink)"></i>fork: first word where the matched and unmatched replies diverge (≈)</span>` : "") +
-    `<span><i></i>‥ = positions not read</span><span>keys <kbd>←</kbd> <kbd>→</kbd></span></div>`;
-  const msgs = (r.messages||[]).map(m => `<div class="block"><div class="role"><span>${esc(m.role)}</span></div><pre class="clip">${esc(m.content)}</pre></div>`).join("");
-  h += `<details><summary>text that was read (${r.text_source==="tool page" ? "from the agent's page, clipped to 900 chars" : "full, " + esc(r.text_source)})</summary>${msgs}` +
-    `<div class="block reply"><div class="role"><span>assistant reply</span></div><pre class="clip">${esc(r.completion||"(empty)")}</pre></div></details>`;
-  const rows = r.rows || [], flags = flagPositions(r);
-  if (!rows.length) h += `<p class="none">no positions in this read.</p>`;
-  let i = 0;
+function renderText(){
+  const r = curRead(), box = $("#text"); if (!r){ return; }
+  const hl = S.data.hl[r.id] || {}, found = foundPositions();
+  let h = "";
+  if (r.parse_error) h += `<div class="notice">this readout page did not parse: ${esc(r.parse_error)}</div>`;
+  const rows = r.rows || []; let i = 0;
+  if (!rows.length) h += `<div class="status">no positions in this read.</div>`;
   while (i < rows.length){
     const region = rows[i].region; let inner = ""; let prev = null;
     for (; i < rows.length && rows[i].region === region; i++){
       const row = rows[i];
-      if (prev!=null && row.pos - prev > 1) inner += `<span class="gap" title="${row.pos - prev - 1} positions not read">‥</span>`;
+      if (prev!=null && row.pos - prev > 1) inner += `<span class="tok nodata" title="${row.pos-prev-1} positions not read">‥</span>`;
       prev = row.pos;
-      const cls = ["tok","swept", flags.has(row.pos)?"flag":"", row.pos===V.pos?"sel":"", row.pos===r.aboutPos?"r1":"", row.pos===r.fork_pos?"fork":""].join(" ");
-      inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}${flags.has(row.pos)?" · cited by a mechanism":""}">${tokHtml(row.tok)}</span>`;
+      const cls = ["tok", row.pos===S.pos?"cur":"", row.pos===r.aboutPos?"read":"", hl[row.pos]?"hit":"", found.has(row.pos)?"found":"", row.pos===r.fork_pos?"mark":""].join(" ");
+      inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}${hl[row.pos]?" · a quoted phrase verifies here":""}${row.pos===r.aboutPos?" · about to speak":""}${row.pos===r.fork_pos?" · fork":""}">${tokHtml(row.tok)}</span>`;
     }
-    h += `<div class="block ${esc(region)}"><div class="role"><span>${esc(region)}</span><span class="rl">${esc(REGION_LABEL[region]||"")}</span></div><pre>${inner}</pre></div>`;
+    h += `<div class="blk ${esc(region)}"><div class="role"><span>${esc(region==="header"?"about to answer":region)}</span><span class="lbl2">${esc(REGION_LABEL[region]||"")}</span></div><div class="toks">${inner}</div></div>`;
   }
-  left.innerHTML = h;
-  left.querySelectorAll(".tok.swept").forEach(el => el.onclick = () => selectRead(V.readId, +el.dataset.pos));
-  const sel = left.querySelector(".tok.sel"); if (sel && sel.scrollIntoView) sel.scrollIntoView({block:"nearest"});
+  // the other rollouts of the contrast set, compact, clickable when a read exists for them
+  const others = (S.data.samples||[]).filter(s => !(r.source==="diag" && s.sample_index===r.sample_index));
+  if (others.length){
+    h += `<div class="rolls"><h3>other rollouts in the contrast set (${others.length})</h3>` + others.map(s => { const rd = S.data.bySample[s.sample_index];
+      return `<button class="roll ${s.matched?"matched":"unmatched"}" ${rd?`data-read="${esc(rd.id)}"`:"disabled"} title="${rd?"open this rollout's read":"no lens read of this rollout"}"><span class="lab">${s.matched?"matched":"unmatched"} · sample ${s.sample_index}${rd?"":" · no read"}</span><span class="snip">${esc(cut((s.text||"").replace(/\s+/g," "), 160))}</span></button>`; }).join("") + `</div>`;
+  }
+  box.innerHTML = h;
+  box.querySelectorAll(".tok[data-pos]").forEach(t => t.onclick = () => selectRead(S.read, +t.dataset.pos));
+  box.querySelectorAll(".roll[data-read]").forEach(b => b.onclick = () => selectRead(b.dataset.read, null));
+  const cur = box.querySelector(".tok.cur"); if (cur && cur.scrollIntoView) cur.scrollIntoView({block:"nearest"});
 }
 
-// ---- citations inside a mechanism's readout_cells: "w001u L36 pos 87 …" → [{cid, pos}]
-function citations(text){
-  const out = []; let cid = null;
-  const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m;
-  text = text || "";
-  while ((m = re.exec(text))){
-    if (m[1]){ if (V.data.byConv[m[1]]) cid = m[1]; out.push({cid: V.data.byConv[m[1]] ? m[1] : null, pos: null, index: m.index, len: m[0].length}); }
-    else out.push({cid, pos: +m[2], index: m.index, len: m[0].length});
-  }
-  return out;
-}
-function mechsAt(r, pos){
-  const out = [];
-  for (const m of V.data.mechs){
-    const here = citations(m.readout_cells).filter(c => c.pos === pos && c.cid && r.mention_ids.includes(c.cid));
-    if (here.length) out.push({m, via: here[0].cid});
-  }
-  return out;
-}
-function markQuotes(text, quotes){
-  let html = esc(text), hit = false;
-  for (const q of quotes){ const e = esc(q); if (html.includes(e)){ html = html.split(e).join(`<mark>${e}</mark>`); hit = true; } }
-  return [html, hit];
-}
+// -------------------------------------------------------------------- grid
+function citations(text){ const out = []; let cid = null; const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m; text = text || "";
+  while ((m = re.exec(text))){ if (m[1]){ if (S.data.byConv[m[1]]) cid = m[1]; out.push({cid: S.data.byConv[m[1]] ? m[1] : null, pos: null, index: m.index, len: m[0].length}); } else out.push({cid, pos: +m[2], index: m.index, len: m[0].length}); }
+  return out; }
+function mechsAt(r, pos){ const out = []; for (const m of S.data.mechs){ const here = citations(m.readout_cells).filter(c => c.pos === pos && c.cid && r.mention_ids.includes(c.cid)); if (here.length) out.push({m, via: here[0].cid}); } return out; }
 function whereText(r, row){
-  if (row.region === "header") return row.pos === r.aboutPos
-    ? "about to speak: the model has read the request and written nothing — identical for every rollout"
-    : "the chat boundary before the reply — identical for every rollout of this prompt";
+  if (row.region === "header") return row.pos === r.aboutPos ? "about to speak: the model has read the request and written nothing — identical for every rollout" : "the chat boundary before the reply — identical for every rollout of this prompt";
   if (row.region === "user") return "inside the user turn: the model is reading the request and has written nothing";
-  if (row.region === "reply") return "inside the reply: the model is writing its answer" + (row.pos === r.fork_pos ? " — the fork, where the matched and unmatched replies first diverge" : "");
+  if (row.region === "reply") return (row.pos === r.fork_pos ? "on the fork: " : "inside the reply: ") + "the model is writing its answer" + (row.pos === r.fork_pos ? " — the first word where the matched and unmatched rollouts diverge (≈)" : "");
   return row.region;
 }
-
-// ---- right: the selected position, every layer, one column per compared read
-function renderRight(){
-  const r = V.data.byId[V.readId], right = document.getElementById("right"); if (!right) return;
-  const p = V.pos, row = r.rowByPos ? r.rowByPos[p] : null;
-  if (row == null){ right.innerHTML = `<p class="none">${r.parse_error ? "nothing to show — this page did not parse." : "no position selected."}</p>`; return; }
-  const idx = r.positions.indexOf(p);
-  let h = `<div class="poshdr"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="hint">${esc(row.region)} · ${esc(row.kind)}</span>` +
-    `<span class="navb"><button id="prev" ${idx<=0?"disabled":""}>← prev</button><button id="next" ${idx>=r.positions.length-1?"disabled":""}>next →</button></span></div>`;
-  h += `<div class="where">${esc(whereText(r, row))}</div>`;
-  let sofar = ""; for (const x of r.rows){ if (x.pos > p) break; if (x.pos < p) sofar += x.tok; }
-  h += `<div class="local">${esc(sofar.slice(-200))}<b>${esc(row.tok)}</b><span class="hint">   ← read tokens so far (this token last; only read positions, so gaps are elided)</span></div>`;
+function markCell(text, quotes, qrx){
+  let html = esc(text);
+  for (const q of quotes){ const e = esc(q); if (html.includes(e)) html = html.split(e).join(`<mark>${e}</mark>`); }
+  if (qrx) html = html.replace(new RegExp("(" + rxEsc(esc(S.find)) + ")(?![^<]*>)", "gi"), `<mark class="find">$1</mark>`);
+  return html;
+}
+function renderGrid(){
+  const r = curRead(), posbar = $("#posbar"), wrap = $("#gridwrap"); if (!r) return;
+  const p = S.pos, row = r.rowByPos[p];
+  if (!row){ posbar.innerHTML = `<div class="status">${r.parse_error ? "nothing to show — this page did not parse." : "no position selected."}</div>`; wrap.innerHTML = ""; return; }
   const fl = mechsAt(r, p);
-  h += `<div class="flags"><h3>mechanisms citing this position (${fl.length}) — unverified hypotheses</h3>`;
-  if (!fl.length) h += `<p class="none">none — no reported mechanism cites <span class="kkey">${esc(r.mention_ids.join(" / ")||r.id)}</span> at pos ${p}.</p>`;
-  for (const f of fl) h += `<div class="flag ${f.via===r.conv_id?"":"other"}"><span class="cat">mechanism ${f.m.i+1}</span><span class="cell">${esc(f.m.auditor)} s${f.m.seed}${f.m.confidence==null?"":" · confidence "+num(f.m.confidence)}${f.via!==r.conv_id?" · cited on "+esc(f.via)+" (same rollout, different lens sample)":""}</span><div class="why">${esc(f.m.mechanism)}</div><q>${esc(cut(f.m.readout_cells, 400))}</q></div>`;
-  h += `</div>`;
-  const cols = V.compare.map(id => V.data.byId[id]).filter(Boolean);
-  const layers = [...new Set(cols.reduce((acc, c) => acc.concat(c.layers||[]), []))].sort((a,b) => a-b);
-  const toks = cols.map(c => c.rowByPos && c.rowByPos[p] ? c.rowByPos[p].tok : null);
-  const present = toks.filter(t => t!=null);
+  let h = `<div class="row"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="wherenote">${esc(whereText(r, row))} · ${esc(row.kind)}</span></div>`;
+  if (fl.length) h += `<div class="mcards">` + fl.map((f, i) => `<button class="mcard ${f.via===r.conv_id?"":"other"}" data-mc="${i}"><div class="hd"><span class="txt">${esc(cut(f.m.mechanism, 160))}</span><span class="badge ${f.m.confidence>=0.7?"miss":(f.m.confidence>=0.4?"hold":"dim")}">conf ${num(f.m.confidence)}</span></div><div class="more"><div>${esc(f.m.mechanism)}</div><div class="quote">${esc(f.m.readout_cells)}</div>${f.via!==r.conv_id?`<div class="dim">cited on ${esc(f.via)} — same rollout, different lens sample</div>`:""}</div></button>`).join("") + `</div>`;
+  else h += `<div class="dim" style="font-size:11.5px">no reported mechanism cites ${esc(r.mention_ids.join(" / ") || r.id)} at pos ${p}.</div>`;
+  posbar.innerHTML = h;
+  posbar.querySelectorAll("[data-mc]").forEach(b => b.onclick = () => b.classList.toggle("open"));
+  // the table
+  wrap.innerHTML = "";
+  document.documentElement.style.setProperty("--rowmax", S.compact ? "150px" : "none");
+  const cols = S.compare.map(id => S.data.byId[id]).filter(c => c && c.rows);
+  const layers = [...new Set(cols.reduce((a, c) => a.concat(c.layers||[]), []))].sort((a,b) => a-b);
+  const toks = cols.map(c => c.rowByPos[p] ? c.rowByPos[p].tok : null), present = toks.filter(t => t!=null);
   const identical = cols.length > 1 && present.length === cols.length && present.every(t => t === present[0]);
-  const differ = cols.length > 1 && !identical;
-  h += `<div class="grid"><h3>every readout at this token (verbatim, unedited; italic EN lines are translations) — ${cols.length} read${cols.length===1?"":"s"}</h3>`;
-  if (identical) h += `<div class="notice">identical prefix — same activation, different lens samples${row.region==="reply"?" (the replies still agree at this position)":""}</div>`;
-  h += `<table class="reads"><thead><tr><th>layer</th>`;
-  cols.forEach((c, j) => { h += `<th class="${esc(readDot(c))}">${esc(c.id)}${differ ? `<span class="own">${toks[j]==null ? "not read at pos "+p : esc(JSON.stringify(toks[j]))}</span>` : ""}</th>`; });
-  h += `</tr></thead><tbody>`;
+  if (identical) wrap.appendChild(el("div", "notice", "identical prefix — same activation, different lens samples" + (row.region==="reply" ? " (the replies still agree at this position)" : "")));
+  const colw = Math.max(260, Math.floor((wrap.clientWidth - 58) / Math.max(1, cols.length)) - 1); wrap.style.setProperty("--col", colw + "px");
+  const table = el("table"), thead = el("thead"), hr = el("tr"); hr.appendChild(el("th", "layer", "layer"));
+  cols.forEach((c, j) => { const th = el("th", readDot(c), c.id); if (!identical && cols.length > 1) th.appendChild(el("span", "own", toks[j]==null ? "not read at pos " + p : JSON.stringify(toks[j])));
+    if (S.colw[c.id]) th.style.width = S.colw[c.id] + "px";
+    const grip = el("div", "grip-x"); grip.title = "drag to resize this column (double-click resets)";
+    grip.onpointerdown = e => { e.preventDefault(); const x0 = e.clientX, w0 = th.getBoundingClientRect().width; const mv = ev => { S.colw[c.id] = Math.max(140, w0 + ev.clientX - x0); th.style.width = S.colw[c.id] + "px"; }; const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); };
+    grip.ondblclick = () => { delete S.colw[c.id]; renderGrid(); }; th.appendChild(grip); hr.appendChild(th); });
+  thead.appendChild(hr); table.appendChild(thead);
+  const tbody = el("tbody"), qrx = findRx();
   for (const L of layers){
-    h += `<tr><td class="L">L${L}</td>`;
+    const tr = el("tr"); if (L === S.layer) tr.className = "focus";
+    const th = el("th", "layer", `L${L}`); th.onclick = () => { S.layer = L; renderGrid(); };
+    if (S.rowh[L]) tr.style.setProperty("--rowmax", S.rowh[L] + "px");
+    const grip = el("div", "grip-y"); grip.title = "drag to resize this layer's row (double-click resets)";
+    grip.onpointerdown = e => { e.preventDefault(); e.stopPropagation(); const y0 = e.clientY, h0 = tr.getBoundingClientRect().height; const mv = ev => { S.rowh[L] = Math.max(40, h0 + ev.clientY - y0); tr.style.setProperty("--rowmax", S.rowh[L] + "px"); }; const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); };
+    grip.ondblclick = e => { e.stopPropagation(); delete S.rowh[L]; renderGrid(); }; th.appendChild(grip); tr.appendChild(th);
     for (const c of cols){
-      const li = (c.layers||[]).indexOf(L), crow = c.rowByPos ? c.rowByPos[p] : null;
+      const td = el("td"), li = (c.layers||[]).indexOf(L), crow = c.rowByPos[p];
       const samples = (crow && li >= 0 && crow.samples) ? (crow.samples[li] || []) : null;
-      h += `<td>`;
-      if (samples === null) h += `<span class="none">${crow ? "—" : "not read at this position"}</span>`;
-      else if (!samples.length) h += `<span class="none">—</span>`;
-      else for (const s of samples){ const [sh, hit] = markQuotes(s.trim(), V.data.quotes); const en = D.en && D.en[s]; h += `<div class="samp ${hit?"hit":""}">${sh}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>`; }
-      h += `</td>`;
+      if (samples === null) td.appendChild(el("div", "none", crow ? "—" : "not read at this position"));
+      else if (!samples.length) td.appendChild(el("div", "none", "—"));
+      else { const quotes = ((S.data.hl[c.id]||{})[p]||[]).filter(x => x.layer === L).map(x => x.quote); if (quotes.length) td.className = "hit";
+        const d = el("div", "cell"); d.innerHTML = samples.map(s => { const en = D.en && D.en[s]; return `<div class="samp">${markCell(s.trim(), quotes, qrx)}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>`; }).join(""); td.appendChild(d); }
+      tr.appendChild(td);
     }
-    h += `</tr>`;
+    tbody.appendChild(tr);
   }
-  h += `</tbody></table></div>`;
-  if (V.data.quotes.length) h += `<p class="hint" style="margin-top:8px"><mark>marked</mark> = text the agent quoted in a mechanism's evidence or cell citation (fragments of ≥ 25 chars, verbatim).</p>`;
-  right.innerHTML = h;
-  right.scrollTop = 0;
-  const pv = document.getElementById("prev"), nx = document.getElementById("next");
-  if (pv) pv.onclick = () => selectRead(r.id, r.positions[idx-1]);
-  if (nx) nx.onclick = () => selectRead(r.id, r.positions[idx+1]);
+  table.appendChild(tbody); wrap.appendChild(table);
 }
 
-document.addEventListener("keydown", e => {
-  if (!V || !V.readId) return;
-  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
-  const r = V.data.byId[V.readId]; if (!r || !r.positions) return;
-  const idx = r.positions.indexOf(V.pos);
-  if (e.key === "ArrowLeft" && idx > 0){ e.preventDefault(); selectRead(r.id, r.positions[idx-1]); }
-  if (e.key === "ArrowRight" && idx >= 0 && idx < r.positions.length-1){ e.preventDefault(); selectRead(r.id, r.positions[idx+1]); }
-});
-
-// ---- below the viewer: contrast rollouts, transcript, ranked mechanisms
-function rollout(s){
-  const cls = s.matched ? "matched" : "unmatched";
-  return `<div class="roll ${cls}"><div class="hd"><span>${s.matched?"matched":"unmatched"}</span>` +
-    `<span class="kkey">sample ${s.sample_index==null?"?":s.sample_index}</span></div>` + expandable(s.text, 800, "show full rollout") + `</div>`;
+// ------------------------------------------------------------------- search
+function renderHits(){
+  const box = $("#hits"), r = curRead(); if (!r || !S.find){ box.hidden = true; box.innerHTML = ""; return; }
+  const found = [...foundPositions()].sort((a,b) => a-b);
+  box.hidden = false;
+  box.innerHTML = `<span class="lbl">${found.length} token${found.length===1?"":"s"} with “${esc(S.find)}” in their cells</span>` + found.slice(0, 80).map(p => `<button class="hitchip" data-pos="${p}" title="position ${p}">${p} ${esc(JSON.stringify(r.rowByPos[p].tok))}</button>`).join("") + (found.length > 80 ? `<span class="dim">+${found.length-80} more</span>` : "");
+  box.querySelectorAll("[data-pos]").forEach(b => b.onclick = () => selectRead(S.read, +b.dataset.pos));
 }
-function linkCells(text, data){
-  // every "pos N" that resolves to a read of this pattern becomes a link selecting read@position
-  let out = "", last = 0, cid = null;
-  const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m;
-  text = text || "";
-  while ((m = re.exec(text))){
-    out += esc(text.slice(last, m.index));
-    if (m[1]){
-      const r = data.byConv[m[1]]; if (r) cid = m[1];
-      out += r ? `<a href="${patUrl(data.key, r.id, null)}" title="${esc(readTitle(r))}">${esc(m[0])}</a>` : esc(m[0]);
-    } else {
-      const r = cid ? data.byConv[cid] : null, pos = +m[2];
-      const ok = r && (r.deferred || (r.rowByPos && r.rowByPos[pos]));
-      out += ok ? `<a href="${patUrl(data.key, r.id, pos)}" title="open ${esc(r.id)} at position ${pos}">${esc(m[0])}</a>` : esc(m[0]);
-    }
-    last = m.index + m[0].length;
+function firstCell(text){ let cid = null; const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m; while ((m = re.exec(text||""))){ if (m[1]) cid = m[1]; else if (cid) return {read: "agent:" + cid, pos: +m[2]}; } return null; }
+function renderResults(){
+  const box = $("#results"); const q = S.query.trim(); if (!q){ box.hidden = true; box.innerHTML = ""; return; }
+  const rx = new RegExp(rxEsc(q), "i"), rows = [];
+  const snip = t => { const i = t.search(rx); return cut(t.slice(Math.max(0, i - 40)).replace(/\s+/g, " "), 160); };
+  for (const p of D.patterns || []){
+    if (rx.test(p.group_summary||"")) rows.push({p, where: "summary", snip: snip(p.group_summary)});
+    if (rx.test(p.prompt||"")) rows.push({p, where: "prompt", snip: snip(p.prompt)});
+    (p.runs||[]).forEach((run, ri) => { if (rx.test(run.summary||"")) rows.push({p, where: `run ${ri} summary`, snip: snip(run.summary)});
+      (run.mechanisms||[]).forEach((m, mi) => { const t = [m.mechanism, m.evidence, m.readout_cells].join(" · "); if (rx.test(t)) rows.push({p, where: `mechanism ${mi+1}`, snip: snip(t), cell: firstCell(m.readout_cells)}); }); });
   }
-  return out + esc(text.slice(last));
+  box.hidden = false;
+  box.innerHTML = `<h4>${rows.length} hit${rows.length===1?"":"s"} for “${esc(q)}”</h4>` + rows.slice(0, 60).map((x, i) => `<button class="res" data-i="${i}"><span class="fam">${esc(x.p.behavior_name)}</span><span class="where">${esc(cut(x.p.group_summary||x.p.key, 34))} · ${esc(x.where)}</span><span class="snip">${esc(x.snip)}</span></button>`).join("") + (rows.length > 60 ? `<div class="dim">+${rows.length-60} more</div>` : "");
+  box.querySelectorAll("[data-i]").forEach(b => b.onclick = () => { const x = rows[+b.dataset.i]; location.hash = x.cell ? patUrl(x.p.key, x.cell.read, x.cell.pos) : patUrl(x.p.key); });
 }
-function stepBlock(s, i, data){
-  const rd = s.tool_index!=null ? data.byTool[s.tool_index] : null;
-  let h = `<div class="step ${esc(s.name||"")}"><div class="hd"><span class="nm">${esc(s.name||"assistant")}</span><span>#${i+1}${s.meta?" · "+esc(s.meta):""}</span>` +
-    (rd ? `<a href="${patUrl(data.key, rd.id, null)}" data-open="${esc(rd.id)}">open this read → ${esc(rd.id)}${rd.parse_error?" (unparsed)":""}</a>` : "") + `</div>`;
+
+// ------------------------------------------------------------------- drawer
+function linkCells(text, data){ let out = "", last = 0, cid = null; const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m; text = text || "";
+  while ((m = re.exec(text))){ out += esc(text.slice(last, m.index));
+    if (m[1]){ const r = data.byConv[m[1]]; if (r) cid = m[1]; out += r ? `<a href="${patUrl(data.key, r.id, null)}">${esc(m[0])}</a>` : esc(m[0]); }
+    else { const r = cid ? data.byConv[cid] : null, pos = +m[2]; const ok = r && (r.deferred || (r.rowByPos && r.rowByPos[pos])); out += ok ? `<a href="${patUrl(data.key, r.id, pos)}" title="open ${esc(r.id)} at position ${pos}">${esc(m[0])}</a>` : esc(m[0]); }
+    last = m.index + m[0].length; }
+  return out + esc(text.slice(last)); }
+function mechBlock(m, i, data){ return `<div class="mech"><div><span class="n">${i+1}.</span>${esc(m.mechanism)}${m.confidence==null?"":` <span class="badge ${m.confidence>=0.7?"miss":(m.confidence>=0.4?"hold":"dim")}">confidence ${num(m.confidence)}</span>`}</div>` + (m.evidence ? `<div class="ev">${esc(m.evidence)}</div>` : "") + (m.readout_cells ? `<div class="cells">cells: ${linkCells(m.readout_cells, data)}</div>` : "") + (m.would_test_by ? `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>` : "") + `</div>`; }
+function stepBlock(s, i, data){ const rd = s.tool_index!=null ? data.byTool[s.tool_index] : null;
+  let h = `<div class="step ${esc(s.name||"")}"><div class="hd"><span class="nm">${esc(s.name||"assistant")}</span><span>#${i+1}${s.meta?" · "+esc(s.meta):""}</span>${rd ? `<a href="${patUrl(data.key, rd.id, null)}">open this read → ${esc(rd.id)}${rd.parse_error?" (unparsed)":""}</a>` : ""}</div>`;
   if (s.think) h += `<div class="think">${esc(s.think)}</div>`;
-  if (s.name === "chat") h += `<div class="call"><span class="k">user →</span> <span class="usr">${esc(s.user)}</span></div>` + (s.args ? `<div class="call"><span class="k">${esc(s.args)}</span></div>` : "");
-  else if (s.name) h += `<div class="call">${esc(s.name)}(${esc(s.args)})</div>`;
-  if (s.output){
-    const o = s.output, isRead = s.name === "readouts", label = s.name === "chat" ? "reply" : "result";
-    h += `<pre class="block" style="margin-top:6px">${esc(o.slice(0,600))}${o.length>600?" …":""}</pre>`;
-    if (o.length > 600) h += `<details><summary>show full ${label} (${o.length} chars${isRead?", clipped for the viewer; the structured read is in the strip above":""})</summary><pre class="block">${esc(o)}</pre></details>`;
-  }
-  return h + `</div>`;
+  if (s.name === "chat") h += `<div class="call">user → <span class="usr">${esc(s.user)}</span></div>`; else if (s.name) h += `<div class="call">${esc(s.name)}(${esc(s.args)})</div>`;
+  if (s.output){ const o = s.output; h += `<pre class="block">${esc(o.slice(0,500))}${o.length>500?" …":""}</pre>`; if (o.length > 500) h += `<details><summary>show full ${s.name==="chat"?"reply":"result"} (${o.length} chars)</summary><pre class="block">${esc(o)}</pre></details>`; }
+  return h + `</div>`; }
+function renderBelow(){
+  const box = $("#below"); box.hidden = !S.below; if (!S.below) return;
+  const data = S.data, tabs = [["mechanisms", "ranked mechanisms"], ["transcript", "agent transcript"], ["highlights", "highlights"]];
+  $("#tabs").innerHTML = tabs.map(([k, l]) => `<button class="btn" data-tab="${k}" aria-pressed="${S.tab===k}">${l}</button>`).join("") + `<span class="sub" style="margin-left:8px">unverified hypotheses — nothing here was tested</span>`;
+  $("#tabs").querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { S.tab = b.dataset.tab; renderBelow(); });
+  let h = "";
+  if (!data) h = `<div class="status">no pattern loaded.</div>`;
+  else if (S.tab === "mechanisms"){ if (!data.runs.length) h = `<div class="empty">no agent run for this pattern yet.</div>`;
+    data.runs.forEach((run, ri) => { h += `<div class="sub" style="margin:${ri?"12px":"0"} 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${esc(run.summary||"")}</div>`; const ms = (run.mechanisms||[]).slice().sort((a,b) => (b.confidence||0)-(a.confidence||0)); if (!ms.length) h += `<div class="empty">no mechanisms reported.</div>`; ms.forEach((m, i) => { h += mechBlock(m, i, data); }); }); }
+  else if (S.tab === "transcript"){ if (!data.runs.length) h = `<div class="empty">no agent run for this pattern yet.</div>`;
+    data.runs.forEach(run => { h += `<div class="sub" style="margin:0 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${(run.steps||[]).length} steps · stopped: ${esc(run.stopped_by||"?")}</div>`; (run.steps||[]).forEach((s, i) => { h += stepBlock(s, i, data); }); if ((run.notes||[]).length){ h += `<div class="sub" style="margin:8px 0 4px">scratch notes</div>`; run.notes.forEach(n => { h += `<pre class="block">${esc(n)}</pre>`; }); } }); }
+  else { const items = D.highlights || []; const mine = items.filter(x => x.pattern_key === S.key), rest = items.filter(x => x.pattern_key !== S.key);
+    h = `<div class="sub" style="margin:0 0 6px">${mine.length} on this pattern · ${rest.length} elsewhere — lens cells a mechanism quotes that verify verbatim at build time; click to jump</div><div class="hlgrid">` + [...mine, ...rest].map(x => { const idx = items.indexOf(x);
+      const smp = esc(x.sample.trim()).split(esc(x.quote)).join(`<mark>${esc(x.quote)}</mark>`), loc = esc(x.local.slice(0, x.local.length - x.token.length)) + `<b>${esc(x.token)}</b>`;
+      return `<button class="hlc ${esc(x.region)}" data-hl="${idx}"><div class="where"><b>${esc(x.behavior)}</b> ${esc(cut(x.summary, 50))} · ${esc(x.read)} · pos ${x.pos} · L${x.layer}${x.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div><div class="loc">${loc}</div><div class="q">${smp}</div><div class="n">${esc(x.note)}</div></button>`; }).join("") + `</div>`; }
+  $("#drawer").innerHTML = h;
+  $("#drawer").querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { const x = (D.highlights||[])[+b.dataset.hl]; location.hash = patUrl(x.pattern_key, x.read, x.pos); });
 }
-function mechBlock(m, i, data){
-  let h = `<div class="mech"><div class="txt"><span class="n">${i+1}.</span>${esc(m.mechanism)}` + (m.confidence==null ? "" : ` <span class="conf">confidence ${num(m.confidence)}</span>`) + `</div>`;
-  if (m.evidence) h += `<div class="ev">${esc(m.evidence)}</div>`;
-  if (m.readout_cells) h += `<div class="cells">cells: ${linkCells(m.readout_cells, data)}</div>`;
-  if (m.would_test_by) h += `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>`;
-  return h + `</div>`;
-}
-function runBlock(r, data){
-  let h = `<div class="card"><b>${esc(r.auditor)}</b> <span class="kkey">seed ${r.seed==null?"?":r.seed}</span>` +
-    ` <span class="crumb">· ${(r.steps||[]).length} steps` + (r.cells_served ? ` · ${r.cells_served} cells served` : "") + (r.output_tokens ? ` · ${r.output_tokens} tok` : "") +
-    (r.server_calls ? ` · ${r.server_calls} server calls` : "") + (r.server_seconds ? ` · ${num(r.server_seconds,1)}s server` : "") + (r.stopped_by ? ` · stopped: ${esc(r.stopped_by)}` : "") + `</span>`;
-  if (r.summary) h += `<div style="margin-top:6px">${esc(r.summary)}</div>`;
-  h += `</div><h3>transcript</h3>`;
-  if (!(r.steps||[]).length) h += `<p class="none">no turns recorded.</p>`;
-  (r.steps||[]).forEach((s,i) => { h += stepBlock(s, i, data); });
-  if ((r.notes||[]).length){ h += `<h3>scratch notes (${r.notes.length})</h3>`; r.notes.forEach(n => { h += `<pre class="block small" style="margin-bottom:6px">${esc(n)}</pre>`; }); }
-  h += `<h3>ranked mechanisms (${(r.mechanisms||[]).length}) — unverified hypotheses</h3>`;
-  if (!(r.mechanisms||[]).length) h += `<p class="none">this run reported no mechanisms.</p>`;
-  (r.mechanisms||[]).forEach((m,i) => { h += mechBlock(m, i, data); });
-  return h;
-}
-function belowViewer(data){
-  let h = `<h2>Contrast rollouts</h2>`;
-  const mt = data.samples.filter(s => s.matched), um = data.samples.filter(s => !s.matched);
-  if (!data.samples.length) h += `<p class="none">no samples recorded.</p>`;
-  else h += `<div class="cols"><div><h3>matched (${mt.length})</h3>${mt.length ? mt.map(rollout).join("") : `<p class="none">none</p>`}</div>` +
-    `<div><h3>unmatched (${um.length})</h3>${um.length ? um.map(rollout).join("") : `<p class="none">none</p>`}</div></div>`;
-  if (data.fork && (data.fork.prefix_chars!=null || data.fork.note))
-    h += `<div class="card"><b>fork</b> <span class="kkey">shared prefix ${data.fork.prefix_words==null?"?":data.fork.prefix_words} words / ${data.fork.prefix_chars==null?"?":data.fork.prefix_chars} chars</span>` +
-      (data.fork.note ? `<div style="margin-top:4px">${esc(data.fork.note)}</div>` : "") + `</div>`;
-  h += `<h2>Agent runs</h2>`;
-  if (!data.runs.length) h += `<p class="none">no agent runs for this pattern yet.</p>`;
-  data.runs.forEach(r => { h += runBlock(r, data); });
-  return h;
-}
-function wireBelow(data){
-  document.querySelectorAll("#heavy [data-open]").forEach(a => a.onclick = ev => {
-    ev.preventDefault(); selectRead(a.dataset.open, null);
-    const m = document.querySelector("main.two"); if (m && m.scrollIntoView) m.scrollIntoView({block:"start", behavior:"smooth"});
-  });
+function renderNote(){
+  const r = curRead(), p = byKey[S.key];
+  $("#note").innerHTML = (p ? `<span class="mono" style="font-size:11px">${esc(p.key)}</span>` : "") + (r ? `<span>${esc(r.id)} · ${(r.positions||[]).length} positions read${r.claimed && r.claimed.positions!=null && r.claimed.positions!==(r.positions||[]).length ? ` (page header says ${r.claimed.positions})` : ""} · ${(r.layers||[]).length} layers · positions were thinned (every 4th token + punctuation + boundaries; ‥ marks gaps)</span>` : "") +
+    `<span class="spacer"></span><span><span class="kbd">← →</span> token · <span class="kbd">p</span> about to speak · <span class="kbd">/</span> find · <span class="kbd">?</span> keys</span>`;
 }
 
 // ------------------------------------------------------------------- themes
-function renderThemes(){
+function renderThemes(focus){
   const cl = D.clusters || [];
-  let h = `<h2 style="margin-top:4px">Themes — mechanism clusters</h2>`;
-  if (!cl.length) return h + `<p class="none">no synth.json yet — clusters appear once the synthesis pass runs.</p>`;
-  cl.forEach((k,i) => {
-    h += `<div class="card"><a href="#/cluster/${i}"><b>${esc(k.name)}</b></a><div class="crumb">${k.members.length} pattern${k.members.length===1?"":"s"} · ${k.behavior_ids.length} behavior${k.behavior_ids.length===1?"":"s"}</div>` +
-      (k.description ? `<div style="margin-top:5px">${esc(k.description)}</div>` : "") + `</div>`;
-  });
-  return h;
-}
-function renderCluster(i){
-  const k = (D.clusters||[])[i];
-  if (!k) return `<p class="none">no cluster ${esc(i)}.</p>`;
-  let h = `<h2 style="margin-top:4px">${esc(k.name)}</h2>`;
-  if (k.description) h += `<div class="card">${esc(k.description)}</div>`;
-  h += `<h3>behaviors spanned (${k.behavior_ids.length})</h3><div>` + (k.behavior_ids.length ? k.behavior_ids.map(b => `<span class="pill">${esc(b)}</span>`).join("") : `<span class="none">none listed</span>`) + `</div>`;
-  h += `<h3>members (${k.members.length}) — unverified mechanisms</h3>`;
-  if (!k.members.length) h += `<p class="none">no members listed.</p>`;
-  for (const m of k.members){
-    const p = byKey[m.pattern_key];
-    h += `<div class="mech"><div class="txt"><a href="${patUrl(m.pattern_key)}">${esc(p ? p.behavior_name : m.pattern_key)}</a> <span class="kkey">${esc(m.pattern_key)}</span>${p?"":` <span class="tag n">not in this build</span>`}</div>` +
-      (m.mechanism ? `<div class="ev">${esc(m.mechanism)}</div>` : "") + (m.evidence ? `<div class="cells">${esc(m.evidence)}</div>` : "") + `</div>`;
-  }
-  return h;
+  $("#themes-body").innerHTML = cl.length ? cl.map((k, i) => `<div class="theme" id="theme-${i}" style="${i===focus?"border-color:var(--accent)":""}"><div style="font-weight:600">${esc(k.name)}</div><div class="dim">${k.members.length} pattern${k.members.length===1?"":"s"} · ${k.behavior_ids.map(esc).join(", ")}</div>${k.description?`<div style="margin:4px 0">${esc(k.description)}</div>`:""}` +
+    k.members.map(m => { const p = byKey[m.pattern_key]; return `<div class="mem"><a href="${patUrl(m.pattern_key)}">${esc(p ? p.behavior_name + " · " + cut(p.group_summary, 40) : m.pattern_key)}</a>${p?"":' <span class="badge dim">not in this build</span>'} — ${esc(m.mechanism)}</div>`; }).join("") + `</div>`).join("")
+    : `<div class="empty">no synth.json yet — clusters appear once the synthesis pass runs.</div>`;
+  const d = $("#themes"); if (d && !d.open && d.showModal) d.showModal();
+  if (focus!=null){ const t = document.getElementById("theme-" + focus); if (t && t.scrollIntoView) t.scrollIntoView({block:"start"}); }
 }
 
-// --------------------------------------------------------------------- route
-function parseHash(){
-  const raw = (location.hash || "#/").replace(/^#\/?/, "");
-  const [pathPart, query] = raw.split("?");
-  const parts = pathPart.split("/");
-  const q = {};
-  (query||"").split("&").forEach(kv => { if (!kv) return; const [k, v] = kv.split("="); q[decodeURIComponent(k)] = v==null ? "" : decodeURIComponent(v); });
-  return {parts, q};
-}
-function openPatternPage(key, want){
-  const app = document.getElementById("app");
-  const slot = document.getElementById("heavy");
-  if (V && V.key === key && slot && slot.dataset.key === key){
-    // same page: a deep link from a highlight, mechanism or transcript — just move the selection
-    if (want.read && V.data.byId[want.read]){ selectRead(want.read, want.pos); const m = document.querySelector("main.two"); if (m && m.scrollIntoView) m.scrollIntoView({block:"start"}); }
-    return;
-  }
-  V = null;
-  renderPickers(key);
-  app.innerHTML = renderPattern(key);
-  if (byKey[key]) loadPattern(key, want);
-}
+// ------------------------------------------------------------------- route
+function parseHash(){ const raw = (location.hash || "#/").replace(/^#\/?/, ""); const [pathPart, query] = raw.split("?"); const parts = pathPart.split("/"); const q = {};
+  (query||"").split("&").forEach(kv => { if (!kv) return; const [k, v] = kv.split("="); q[decodeURIComponent(k)] = v==null ? "" : decodeURIComponent(v); }); return {parts, q}; }
 function route(){
   const {parts, q} = parseHash();
-  const app = document.getElementById("app");
-  if (parts[0] === "pattern" && parts.length > 1){
-    openPatternPage(decodeURIComponent(parts.slice(1).join("/")), {read: q.read || null, pos: q.pos!=null && q.pos!=="" ? +q.pos : null});
-    return;
-  }
-  if (parts[0] === "cluster" && parts.length > 1){
-    V = null; renderPickers(null);
-    app.innerHTML = `<p class="crumb"><a href="#/themes">themes</a> › cluster</p>` + renderCluster(parseInt(parts[1], 10));
-    window.scrollTo(0, 0); return;
-  }
-  if (parts[0] === "themes"){ V = null; renderPickers(null); app.innerHTML = renderThemes(); window.scrollTo(0, 0); return; }
-  // "#/" = the first behavior's first pattern
+  if (parts[0] === "pattern" && parts.length > 1){ const d = $("#themes"); if (d && d.open) d.close(); openPattern(decodeURIComponent(parts.slice(1).join("/")), {read: q.read || null, pos: q.pos!=null && q.pos!=="" ? +q.pos : null}); return; }
+  if (parts[0] === "themes" || parts[0] === "cluster"){ if (!S.key){ const k = firstKey(); if (k) openPattern(k, {}); } renderThemes(parts[0] === "cluster" ? parseInt(parts[1], 10) : null); return; }
   const key = firstKey();
-  if (!key){ V = null; renderPickers(null); app.innerHTML = `<p class="none">no patterns found under <span class="kkey">${esc(D.source)}</span>.</p>`; return; }
-  openPatternPage(key, {read: null, pos: null});
+  if (!key){ $("#text").innerHTML = `<div class="status">no patterns found under ${esc(D.source)}.</div>`; renderBar(); return; }
+  openPattern(key, {read: null, pos: null});
 }
-renderOverviewTables();
-renderHighlights();
+
+// -------------------------------------------------------------------- wiring
+function stepPattern(d){ const p = byKey[S.key]; if (!p) return; const pats = patternsOf(p.behavior_id); const i = pats.findIndex(x => x.key === S.key) + d; if (i >= 0 && i < pats.length) location.hash = patUrl(pats[i].key); }
+function stepBehavior(d){ const p = byKey[S.key], bs = D.behaviors || []; const i = bs.findIndex(b => b.behavior_id === (p ? p.behavior_id : null)) + d; if (i >= 0 && i < bs.length){ const q = patternsOf(bs[i].behavior_id)[0]; if (q) location.hash = patUrl(q.key); } }
+function stepPos(d){ const r = curRead(); if (!r || !r.positions.length) return; const i = Math.max(0, Math.min(r.positions.length-1, r.positions.indexOf(S.pos) + d)); selectRead(r.id, r.positions[i]); }
+function stepLayer(d){ const r = curRead(); if (!r) return; const ls = r.layers || []; const i = Math.max(0, Math.min(ls.length-1, ls.indexOf(S.layer) + d)); S.layer = ls[i]; renderGrid(); }
+$("#beh-select").onchange = e => { const q = patternsOf(e.target.value)[0]; if (q) location.hash = patUrl(q.key); e.target.blur(); };
+$("#pat-select").onchange = e => { location.hash = patUrl(e.target.value); e.target.blur(); };
+$("#read-select").onchange = e => { selectRead(e.target.value, null); e.target.blur(); };
+$("#prev-item").onclick = () => stepPattern(-1); $("#next-item").onclick = () => stepPattern(1);
+$("#keys").onclick = () => $("#help").showModal(); $("#manual-btn").onclick = () => $("#manual").showModal();
+$("#ctx-toggle").onclick = () => { S.ctx = !S.ctx; renderBar(); renderCtx(); };
+$("#wrap-toggle").onclick = () => { S.compact = !S.compact; renderBar(); renderGrid(); };
+$("#below-toggle").onclick = () => { S.below = !S.below; renderBar(); renderBelow(); };
+$("#theme").onclick = toggleTheme;
+$("#search").addEventListener("input", e => { S.query = e.target.value; renderResults(); });
+$("#find").addEventListener("input", e => { S.find = e.target.value.trim(); renderText(); renderGrid(); renderHits(); });
+for (const id of ["search", "find"]) $("#" + id).addEventListener("keydown", e => { if (e.key === "Escape"){ e.target.value = ""; if (id === "find"){ S.find = ""; renderText(); renderGrid(); renderHits(); } else { S.query = ""; renderResults(); } e.target.blur(); } });
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA"){ if (e.key === "Escape") e.target.blur(); return; }
+  const k = e.key;
+  if (k === "ArrowLeft"){ stepPos(e.shiftKey ? -10 : -1); e.preventDefault(); }
+  else if (k === "ArrowRight"){ stepPos(e.shiftKey ? 10 : 1); e.preventDefault(); }
+  else if (k === "Home"){ const r = curRead(); if (r && r.positions.length) selectRead(r.id, r.positions[0]); e.preventDefault(); }
+  else if (k === "End"){ const r = curRead(); if (r && r.positions.length) selectRead(r.id, r.positions[r.positions.length-1]); e.preventDefault(); }
+  else if (k === "ArrowUp"){ stepLayer(-1); e.preventDefault(); }
+  else if (k === "ArrowDown"){ stepLayer(1); e.preventDefault(); }
+  else if (k === "j") stepPattern(1); else if (k === "k") stepPattern(-1);
+  else if (k === "]") stepBehavior(1); else if (k === "[") stepBehavior(-1);
+  else if (k === "p"){ const r = curRead(); if (r && r.aboutPos!=null) selectRead(r.id, r.aboutPos); }
+  else if (k === "c") $("#ctx-toggle").click(); else if (k === "w") $("#wrap-toggle").click();
+  else if (k === "/"){ $("#find").focus(); e.preventDefault(); }
+  else if (k === ";"){ $("#search").focus(); e.preventDefault(); }
+  else if (k === "?") $("#help").showModal(); else if (k === "m") $("#manual").showModal(); else if (k === "t") toggleTheme();
+  else if (/^[1-9]$/.test(k) && S.data){ const r = S.data.reads.filter(x => !x.parse_error)[+k-1]; if (r) toggleCompare(r.id); }
+});
+for (const d of document.querySelectorAll("dialog")) d.addEventListener("click", e => { if (e.target === d) d.close(); });
+window.addEventListener("resize", () => { if (S.data) renderGrid(); });
 window.addEventListener("hashchange", route);
 route();
 </script>
