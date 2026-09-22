@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+The agent loop can host another benchmark; every addition is opt-in and existing callers see
+the same behaviour (`docs/extending.md` § Hosting another benchmark).
+
+* `agent/loop.py::run_tool_loop_async` is now the loop body: `backend` may be sync or async
+  (`AsyncBackend`), and so may `tools.call`. `run_tool_loop` is the sync wrapper (a private
+  event loop; a worker thread when called from inside a running loop).
+* `agent/backends.py::async_openai_compatible_backend` (over `openai.AsyncOpenAI`; `effort=`,
+  `provider=`; usage reports `prompt_tokens` and `cached_tokens`);
+  `make_backend_factory(kind, async_client=True)`.
+* `Limits` (`limits=`): per-tool execution caps (`BUDGET: …` past the cap) and unlock gates
+  (`LOCKED: …` until a prerequisite tool has run k times), additive to `Budget`; when every
+  capped tool is spent the loop runs the forced reduction (`stopped_by = "limits"` if the model
+  still does not finish).
+* A `ValueError` from `tools.call` is returned as `ERROR: …` and not counted toward `Limits`
+  (a turn, not a call); other exceptions propagate as before. `LiveTools.call` is unchanged:
+  it never raises and logs every call, errors included.
+* `FORCE_ANY = "*"` → `tool_choice="required"` in both backends. The idle path is now: nudge,
+  then (two prose turns in a row) the reduction with `FORCE_ANY`, then a nudge, then
+  `stopped_by = "idle"` on the fourth. Before, a model that never called a tool was nudged
+  forever (until its tokens exhausted the budget).
+* `terminal=` (default `"finish"`) names the tool the reduction forces; `prompts.
+  REDUCTION_TEMPLATE` / `IDLE_NUDGE` are the parametrized texts (`REDUCTION` is unchanged).
+  `FakeBackend(steps, terminal=)` honours `FORCE_ANY`.
+* `run_many(jobs, concurrency)`: semaphore-bounded `asyncio.gather`, results in job order.
+
 ## 0.1.0 — initial extraction (2026-09-22)
 
 Extracted from the `auditbench` package of a research monorepo (the in-the-loop / "live"

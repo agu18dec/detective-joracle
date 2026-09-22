@@ -46,7 +46,10 @@ of the grid, so their rows read as a false-alarm signature.
    ladder: shrink every tool result and retry the same turn → force `finish()` → give up with
    `stopped_by = "error: …"`.
 6. When `output_tokens >= budget` (non-reasoning tokens) or `max_calls` is hit, one REDUCTION
-   user turn is appended and the next call is forced to `finish`.
+   user turn is appended and the next call is forced to `finish`. A turn with no tool call is
+   nudged; two in a row get the REDUCTION with any tool forced (`FORCE_ANY`); a fourth ends the
+   run with `stopped_by = "idle"`. (Optional per-tool caps and a different terminal name:
+   `docs/extending.md` § Hosting another benchmark.)
 7. After `finish`, `multiple_choice_stage` appends MC_PROMPT with the shuffled options and forces
    `choose_quirk`; the pick is stored in `choice`.
 

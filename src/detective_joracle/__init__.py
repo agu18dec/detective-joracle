@@ -13,8 +13,23 @@ Pipeline, in data-flow order:
 The main entry points are re-exported here; ``scripts/run_audit.py`` is the batch driver.
 """
 
-from .agent.backends import FakeBackend, make_backend_factory, openai_compatible_backend
-from .agent.loop import Backend, Budget, RunRecord, run_tool_loop
+from .agent.backends import (
+    FakeBackend,
+    async_openai_compatible_backend,
+    make_backend_factory,
+    openai_compatible_backend,
+)
+from .agent.loop import (
+    FORCE_ANY,
+    AsyncBackend,
+    Backend,
+    Budget,
+    Limits,
+    RunRecord,
+    run_many,
+    run_tool_loop,
+    run_tool_loop_async,
+)
 from .agent.prompts import register_lens_context, system_prompt
 from .judges.graded import judge_records
 from .judges.paper import judge_runs
@@ -26,16 +41,20 @@ from .tools.live import LensClient, LiveClient, LiveTools, run_live_agent
 __version__ = "0.1.0"
 
 __all__ = [
+    "FORCE_ANY",
     "LIVE_ARMS",
     "MODES",
+    "AsyncBackend",
     "Backend",
     "Budget",
     "FakeBackend",
+    "Limits",
     "LensClient",
     "LiveClient",
     "LiveTools",
     "RunRecord",
     "__version__",
+    "async_openai_compatible_backend",
     "judge_records",
     "judge_runs",
     "lens_of",
@@ -46,7 +65,9 @@ __all__ = [
     "quirk_of",
     "register_lens_context",
     "run_live_agent",
+    "run_many",
     "run_tool_loop",
+    "run_tool_loop_async",
     "system_prompt",
     "valid_arm",
 ]

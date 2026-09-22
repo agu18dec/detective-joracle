@@ -169,3 +169,20 @@ def test_openai_compatible_backend_parses_tool_calls_and_usage() -> None:
     assert comp.kw["tool_choice"] == {"type": "function", "function": {"name": "chat"}}
     assert comp.kw["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert comp.kw["extra_body"] == {"k": 1}
+
+
+def test_anthropic_backend_kind(monkeypatch: object) -> None:
+    import os
+
+    import pytest
+
+    from detective_joracle.agent.backends import make_backend_factory
+
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+    with pytest.raises(SystemExit):
+        make_backend_factory("anthropic")
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+    try:
+        assert callable(make_backend_factory("anthropic")("claude-opus-5"))
+    finally:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
