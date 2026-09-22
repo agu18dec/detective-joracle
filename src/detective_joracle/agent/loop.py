@@ -141,6 +141,7 @@ def run_tool_loop(
     backend: Backend,
     budget: Budget,
     rec: RunRecord,
+    reduction: str = REDUCTION,
 ) -> list[dict[str, Any]]:
     """The paper's agent loop over any tools object exposing ``call``, ``finished``, ``log``:
     tool calls until ``finish``, the budget (output tokens or calls), then one forced
@@ -170,7 +171,7 @@ def run_tool_loop(
                 continue
             if failures == 2 and not reduced:
                 reduced = True
-                messages.append({"role": "user", "content": REDUCTION})
+                messages.append({"role": "user", "content": reduction})
                 force = "finish"
                 continue
             rec.stopped_by = f"error: {salvaged}"
@@ -206,7 +207,7 @@ def run_tool_loop(
         over = rec.output_tokens >= budget.output_tokens or n_calls >= budget.max_calls
         if over and not reduced:
             reduced = True
-            messages.append({"role": "user", "content": REDUCTION})
+            messages.append({"role": "user", "content": reduction})
             force = "finish"  # the paper's reduction step: the next turn MUST be finish()
             continue
         if over and reduced:

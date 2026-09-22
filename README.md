@@ -273,6 +273,31 @@ schema is in `docs/architecture.md`.
   their black-box fails (Haiku 4.5: +4.0, +5.5 on two organisms) and find it in fewer probes.
 * Harness faults worth knowing before trusting a number: `docs/faults.md`.
 
+## Explain mode: WeirdChat behaviors in the stock model
+
+The game above asks *what* was planted. `explain` mode asks *why* a behavior the released model
+already has happens. It runs on [WeirdChat](https://weirdchat.transluce.org) (Transluce): for
+Qwen3.6-27B, 11 behaviors over 225 patterns, each pattern carrying the prompt, the judge rubric,
+and ~64 rollouts labelled for whether the behavior appeared — so the same prompt comes with
+rollouts that show it and rollouts that do not.
+
+The investigator is told the behavior, is handed that contrast set already loaded as readable
+conversations, and returns ranked MECHANISMS, each with its evidence, the lens cells it cites and
+the experiment that would test it. There is no planted quirk, no judge and no closed-set stage,
+because there is no ground truth for *why*: the output is hypotheses with citations, and the
+viewer says so on every page.
+
+```
+P=scripts/weirdchat/run_weirdchat.py
+python $P stage=data per_behavior=3 min_rate=0.15
+python $P stage=diagnose server='https://<ws>--auditbench-organism-organism-'
+OPENROUTER_API_KEY=sk-or-… python $P stage=agent server=$S auditor=anthropic/claude-opus-5
+OPENROUTER_API_KEY=sk-or-… python $P stage=synth,site
+```
+
+`docs/weirdchat.md` is the full description; `scripts/weirdchat/run_weirdchat.sh` runs the
+pipeline in tmux with a timestamped log.
+
 ## Bring your own lens / target
 
 * **Lens:** implement `POST readout` (and optionally `fixed`) per the contract; register the
@@ -294,9 +319,11 @@ src/detective_joracle/
   agent/       loop.py (RunRecord, Budget, run_tool_loop)  backends.py  prompts.py
   tools/       live.py (LiveClient, LiveTools, run_live_agent, stage 2)  arms.py  positions.py  fake.py
   presentation/select.py       judges/paper.py  judges/graded.py
+  weirdchat/   data.py (the WeirdChat API) prompts.py explain.py diagnostics.py synth.py
   registry/    quirks.py + data/{quirk_registry,distractors,held_out_prompts}.json
   llm/         client.py (async_json)  openrouter.py  route.py      stats.py  util/text.py
 scripts/       run_audit.py  run_loop.sh  run_grid.sh  build_viewer.py  plot.py  serve_viewer_modal.py
+  weirdchat/   run_weirdchat.py  run_weirdchat.sh  build_site.py   (explain mode)
 servers/       reference GPU servers (need the private lens stack)   examples/  mock target + e2e
 docs/          architecture · contracts · extending · troubleshooting · harness · design · results · faults
 tests/         offline (FakeClient / FakeBackend / the mock over HTTP)
