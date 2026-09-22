@@ -2,7 +2,8 @@
 
 The one look every readout viewer in this family should have (Agam, 2026-09-22). Reference
 implementation of the design system: the wsbench viewer
-(https://need-c10-a-camila-agam--wsbench-viewer-web.modal.run/). Reference for the interaction
+(https://need-c10-a-camila-agam--wsbench-viewer-web.modal.run/; source
+`/workspace/agam/wsbench-runs/viz/site/index.html`, built by `wsbench-runs/scripts/build_viz_bundle.py`). Reference for the interaction
 model — clickable read tokens, a sticky per-layer grid at the selected position, arrow keys — the
 lie-detection sweep viewer. `scripts/weirdchat/build_site.py` implements this contract for
 WeirdChat.
