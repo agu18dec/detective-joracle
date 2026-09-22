@@ -26,4 +26,4 @@ jobs:
       - name: pytest
         run: .venv/bin/python -m pytest -q
       - name: end-to-end against the mock target
-        run: examples/run_end_to_end.sh
+        run: bash examples/run_end_to_end.sh
