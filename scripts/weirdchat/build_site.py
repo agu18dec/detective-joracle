@@ -10,8 +10,15 @@ Walks ``<out_root>/{patterns,diag,runs}`` plus an optional ``synth.json`` and wr
     data/<pattern_key>.agent.json   only when the pattern's file would blow the per-file budget:
                                the agent's own lens reads, fetched when one is first selected
 
-    python scripts/weirdchat/build_site.py [out=outputs/weirdchat] [site=<dir>]
+    python scripts/weirdchat/build_site.py [out=outputs/weirdchat] [site=<dir>] [single=true]
+        [translations=<cache.json>] [highlights=<hand_picks.json>]
     cd outputs/weirdchat/site && python -m http.server 8905
+
+``single=true`` inlines every pattern into ONE self-contained index.html (no data/ dir, no
+fetch). ``translations`` is a ``{sample_text: english}`` cache rendered under each sample;
+the build also writes ``cells_to_translate.json`` (every non-Latin-script sample) for the
+script that fills it. ``highlights`` adds hand-picked cells; one that does not verify verbatim
+against the read is a build error. Auto highlights are every mechanism-quoted cell that does.
 
 The pattern page follows the lie-detection sweep viewer: left, the read tokens of one lens
 read grouped by region, every token clickable; right, that position's readout at every layer,
@@ -535,6 +542,15 @@ HEAVY_PATTERN_KEYS = ("samples", "reads", "fork")
 HEAVY_RUN_KEYS = ("steps", "notes")
 
 
+def grade_of(pat: dict[str, Any]) -> str:
+    """run = an agent run reported ≥1 mechanism; diag = diagnostics only; data = neither."""
+    if any(r["mechanisms"] for r in pat["runs"]):
+        return "run"
+    if any(r["source"] == "diag" for r in pat["reads"]):
+        return "diag"
+    return "data"
+
+
 def light_pattern(pat: dict[str, Any]) -> dict[str, Any]:
     """What index.html carries per pattern: metadata, flags, and every run's mechanisms."""
     light = {k: v for k, v in pat.items() if k not in HEAVY_PATTERN_KEYS}
@@ -543,6 +559,7 @@ def light_pattern(pat: dict[str, Any]) -> dict[str, Any]:
     light["n_reads"] = len(pat["reads"])
     light["n_samples"] = len(pat["samples"])
     light["n_runs"] = len(pat["runs"])
+    light["grade"] = grade_of(pat)
     return light
 
 
@@ -604,18 +621,250 @@ def report_reads(patterns: list[dict[str, Any]]) -> None:
     print(f"  {clean}/{len(agent)} parsed cleanly (positions and layers match the header)")
 
 
+# -------------------------------------------------------------- highlights
+# a highlight = one lens cell a mechanism quotes that verifies verbatim against the read
+QUOTE_RES = (
+    re.compile(r"“([^”]{20,})”"),
+    re.compile(r'"([^"]{20,})"'),
+    re.compile(r"(?<!\w)'(.{20,}?)'(?!\w)"),
+)
+CID_RE = re.compile(r"\b([wc]\d+[mu]?)\b")
+POSREF_RE = re.compile(r"\bpos\s*~?\s*(\d+)")
+LAYERREF_RE = re.compile(r"\bL(\d+)(?:\s*[-–]\s*L?(\d+))?")
+WS_RE = re.compile(r"\s+")
+
+
+STRAY_QUOTE_RE = re.compile(r"[\"“”]|(?<!\w)'|'(?!\w)")
+CITATION_RE = re.compile(r"\bpos\s*~?\s*\d+|\bL\d\d\b")
+ELLIPSIS_RE = re.compile(r"…|\.\.\.")
+
+
+def quoted_fragments(text: str) -> list[tuple[int, str]]:
+    """(offset, fragment) for every quoted run of ≥ 20 chars, in text order.
+
+    A span that itself contains a stray quote mark or citation syntax (pos N / LNN) is the
+    scanner bridging two mismatched quotes, not something the agent quoted — dropped."""
+    found: set[tuple[int, str]] = set()
+    for rx in QUOTE_RES:
+        for m in rx.finditer(text):
+            q = m.group(1).strip()
+            if len(q) >= 20 and not STRAY_QUOTE_RE.search(q) and not CITATION_RE.search(q):
+                found.add((m.start(1), q))
+    return sorted(found)
+
+
+def last_match(rx: re.Pattern[str], text: str) -> re.Match[str] | None:
+    last = None
+    for m in rx.finditer(text):
+        last = m
+    return last
+
+
+def reads_by_conv(pat: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """conv id → the read that actually parsed (a failed retry of the same id never wins)."""
+    out: dict[str, dict[str, Any]] = {}
+    for r in pat["reads"]:
+        if r["conv_id"] and r["rows"] and r["conv_id"] not in out:
+            out[r["conv_id"]] = r
+    return out
+
+
+def local_text(read: dict[str, Any], pos: int, n_tokens: int = 22) -> str:
+    """The read tokens up to and including `pos` (thinned, so approximate), last n_tokens."""
+    toks = [row["tok"] for row in read["rows"] if row["pos"] <= pos]
+    return "".join(toks[-n_tokens:])
+
+
+def find_sample(
+    read: dict[str, Any], row: dict[str, Any], layers: list[int] | None, quote: str
+) -> tuple[int, str] | None:
+    """(layer, sample) of the first sample at this position containing `quote` verbatim."""
+    for li, layer in enumerate(read["layers"]):
+        if layers is not None and layer not in layers:
+            continue
+        for sample in row["samples"][li] if li < len(row["samples"]) else []:
+            if quote in sample:
+                return layer, sample
+    return None
+
+
+def layer_range(m: re.Match[str] | None) -> list[int] | None:
+    if m is None:
+        return None
+    lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+    return list(range(min(lo, hi), max(lo, hi) + 1))
+
+
+def card_of(
+    pat: dict[str, Any],
+    read: dict[str, Any],
+    row: dict[str, Any],
+    layer: int,
+    sample: str,
+    quote: str,
+    note: str,
+    kind: str,
+) -> dict[str, Any]:
+    return {
+        "pattern_key": pat["key"],
+        "behavior": pat["behavior_name"],
+        "summary": pat["group_summary"],
+        "read": read["id"],
+        "pos": row["pos"],
+        "layer": layer,
+        "region": row["region"],
+        "token": row["tok"],
+        "local": local_text(read, row["pos"]),
+        "sample": sample,
+        "quote": quote,
+        "note": clip(note, 200),
+        "kind": kind,
+    }
+
+
+def auto_highlights(patterns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Every quoted fragment in every mechanism's readout_cells, verified against the cited cell."""
+    cards: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {
+        "fragments": 0,
+        "verified": 0,
+        "failed": 0,
+        "ws_only": 0,
+        "unresolved": 0,
+        "ellipsis": 0,
+        "failures": [],
+    }
+    seen: set[tuple[str, str, int, int, str]] = set()
+    for pat in patterns:
+        by_conv = reads_by_conv(pat)
+        for run in pat["runs"]:
+            for mi, mech in enumerate(run["mechanisms"]):
+                text = mech["readout_cells"]
+                for start, quote in quoted_fragments(text):
+                    stats["fragments"] += 1
+                    prefix = text[:start]
+                    cid, posm, laym = (
+                        last_match(CID_RE, prefix),
+                        last_match(POSREF_RE, prefix),
+                        last_match(LAYERREF_RE, prefix),
+                    )
+                    read = by_conv.get(cid.group(1)) if cid else None
+                    row = None
+                    if read is not None and posm is not None:
+                        pos = int(posm.group(1))
+                        row = next((r for r in read["rows"] if r["pos"] == pos), None)
+                    where = f"{pat['key']} run{run['run_index']} mech{mi + 1}: {cid.group(1) if cid else '?'} pos {posm.group(1) if posm else '?'} {laym.group(0) if laym else ''}"
+                    if row is None:
+                        stats["failed"] += 1
+                        stats["unresolved"] += 1
+                        stats["failures"].append(
+                            f"{where} — cited read/position not in the build: {quote[:80]!r}"
+                        )
+                        continue
+                    hit = find_sample(read, row, layer_range(laym), quote)
+                    if hit is None and laym is not None:
+                        hit = find_sample(
+                            read, row, None, quote
+                        )  # the layer was wrong, the position right
+                        if hit is not None:
+                            where += f" (found at L{hit[0]}, not the cited layer)"
+                    if hit is None:
+                        stats["failed"] += 1
+                        if ELLIPSIS_RE.search(quote):
+                            stats["ellipsis"] += 1
+                            where += " (the quote contains an ellipsis — agent-side truncation)"
+                        norm_q = WS_RE.sub(" ", quote)
+                        if any(norm_q in WS_RE.sub(" ", s) for ss in row["samples"] for s in ss):
+                            stats["ws_only"] += 1
+                            where += " (matches after whitespace normalisation)"
+                        stats["failures"].append(
+                            f"{where} — not verbatim in any sample at that position: {quote[:80]!r}"
+                        )
+                        continue
+                    stats["verified"] += 1
+                    layer, sample = hit
+                    sig = (pat["key"], read["id"], row["pos"], layer, quote)
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    cards.append(
+                        card_of(pat, read, row, layer, sample, quote, mech["mechanism"], "auto")
+                    )
+    return cards, stats
+
+
+def hand_highlights(patterns: list[dict[str, Any]], path: Path) -> list[dict[str, Any]]:
+    """Hand-picked items; one that does not verify verbatim is a build error."""
+    by_key = {p["key"]: p for p in patterns}
+    cards = []
+    for item in as_list((read_json(path) or {}).get("items")):
+        item = as_dict(item)
+        pat = by_key.get(as_text(item.get("pattern_key")))
+        if pat is None:
+            raise ValueError(f"highlight pattern missing: {item}")
+        read = next((r for r in pat["reads"] if r["id"] == as_text(item.get("read"))), None)
+        if read is None or not read["rows"]:
+            raise ValueError(f"highlight read missing or unparsed: {item}")
+        pos = as_int(item.get("pos"))
+        row = next((r for r in read["rows"] if r["pos"] == pos), None)
+        if row is None:
+            raise ValueError(f"highlight position not read: {item}")
+        layer = as_int(item.get("layer"))
+        quote = as_text(item.get("quote"))
+        hit = find_sample(read, row, [layer] if layer is not None else None, quote)
+        if hit is None:
+            raise ValueError(f"highlight quote not found verbatim: {item}")
+        cards.append(
+            card_of(pat, read, row, hit[0], hit[1], quote, as_text(item.get("note")), "hand")
+        )
+    return cards
+
+
+# ------------------------------------------------------------ translations
+NONLATIN_RE = re.compile("[Ѐ-ӿ؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ　-ヿ㐀-䶿一-鿿가-힯＀-￯]")
+
+
+def all_samples(patterns: list[dict[str, Any]]) -> set[str]:
+    return {
+        s
+        for p in patterns
+        for r in p["reads"]
+        for row in r["rows"] or []
+        for ss in row["samples"]
+        for s in ss
+    }
+
+
 # ------------------------------------------------------------------------ main
-def build_site(out_root: Path, site_dir: Path) -> Path:
-    """Collect everything under ``out_root``; write ``site_dir/index.html`` + ``data/*.json``."""
+def build_site(
+    out_root: Path,
+    site_dir: Path,
+    *,
+    single: bool = False,
+    translations: Path | None = None,
+    highlights: Path | None = None,
+) -> Path:
+    """Collect everything under ``out_root``; write ``site_dir/index.html`` (+ ``data/*.json``)."""
     pattern_dir = out_root / "patterns"
     paths = sorted(pattern_dir.glob("*.json")) if pattern_dir.is_dir() else []
     patterns = [pattern_of(p, out_root) for p in paths]
     patterns.sort(key=lambda p: (p["behavior_name"], p["key"]))
+
+    cards, hl_stats = auto_highlights(patterns)
+    hand = hand_highlights(patterns, highlights) if highlights else []
+    cards = hand + cards
+    samples = all_samples(patterns)
+    cache = read_json(translations) if translations else None
+    en = {s: as_text(e) for s, e in (cache or {}).items() if s in samples and as_text(e)}
+    to_translate = sorted(s for s in samples if NONLATIN_RE.search(s))
+
     data = {
         "patterns": [light_pattern(p) for p in patterns],
         "behaviors": behaviors_of(patterns),
         "clusters": clusters_of(out_root),
         "synth": synth_meta(out_root),
+        "highlights": cards,
+        "en": en,
         "counts": {
             "patterns": len(patterns),
             "behaviors": len({p["behavior_id"] for p in patterns}),
@@ -625,34 +874,56 @@ def build_site(out_root: Path, site_dir: Path) -> Path:
             "mechanisms": sum(p["n_mechanisms"] for p in patterns),
         },
         "source": str(out_root),
+        "single": single,
     }
     site_dir.mkdir(parents=True, exist_ok=True)
-    data_dir = site_dir / "data"
-    data_dir.mkdir(exist_ok=True)
     sizes: list[tuple[str, int]] = []
     warnings: list[str] = []
-    for pat in patterns:
-        for name, size in write_pattern_files(pat, data_dir):
-            sizes.append((name, size))
-            if size > DATA_FILE_BUDGET:
-                warnings.append(f"{name} is {mb(size)} > {mb(DATA_FILE_BUDGET)} budget")
+    if single:
+        data["heavy"] = {p["key"]: p for p in patterns}
+    else:
+        data_dir = site_dir / "data"
+        data_dir.mkdir(exist_ok=True)
+        for pat in patterns:
+            for name, size in write_pattern_files(pat, data_dir):
+                sizes.append((name, size))
+                if size > DATA_FILE_BUDGET:
+                    warnings.append(f"{name} is {mb(size)} > {mb(DATA_FILE_BUDGET)} budget")
 
     payload = dumps(data).replace("</", "<\\/")
     out = site_dir / "index.html"
     out.write_text(TEMPLATE.replace("/*__DATA__*/", payload))
     sizes.insert(0, ("index.html", out.stat().st_size))
+    cells_path = site_dir / "cells_to_translate.json"
+    cells_path.write_text(json.dumps(to_translate, ensure_ascii=False, indent=0))
+    cells_size = cells_path.stat().st_size
     total = sum(s for _, s in sizes)
     if total > TOTAL_BUDGET:
-        warnings.append(f"site total is {mb(total)} > {mb(TOTAL_BUDGET)} budget")
+        warnings.append(f"site total is {mb(total)} > {mb(TOTAL_BUDGET)} budget (informational)")
 
     for name, size in sizes:
         print(f"{mb(size):>10}  {name}")
     report_reads(patterns)
+    print(
+        f"quoted cell fragments in mechanisms: {hl_stats['fragments']} · verified verbatim "
+        f"{hl_stats['verified']} · FAILED {hl_stats['failed']} "
+        f"({hl_stats['unresolved']} cite a read/position not in the build, "
+        f"{hl_stats['ellipsis']} contain an ellipsis = agent-side truncation, "
+        f"{hl_stats['ws_only']} match only after whitespace normalisation)"
+    )
+    for line in hl_stats["failures"]:
+        print(f"  unverified: {line}")
+    print(f"{len(cards)} highlights ({len(cards) - len(hand)} auto, {len(hand)} hand-picked)")
+    print(
+        f"{len(to_translate)} cells to translate (non-Latin script) → {cells_path.name} "
+        f"({mb(cells_size)}, a work file — not counted in the site total); "
+        f"{len(en)} translations attached from the cache"
+    )
     c = data["counts"]
     print(
         f"{len(patterns)} patterns · {c['behaviors']} behaviors · {c['runs']} agent runs · "
         f"{c['reads']} reads · {c['mechanisms']} mechanisms · {len(data['clusters'])} clusters "
-        f"· total {mb(total)} in {len(sizes)} files"
+        f"· {'single self-contained file' if single else 'split'} · total {mb(total)} in {len(sizes)} files"
     )
     for warning in warnings:
         print(f"WARNING: {warning}")
@@ -664,7 +935,13 @@ def main() -> None:
     args: dict[str, str] = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
     out_root = Path(args.get("out", "outputs/weirdchat"))
     site_dir = Path(args["site"]) if "site" in args else out_root / "site"
-    build_site(out_root, site_dir)
+    build_site(
+        out_root,
+        site_dir,
+        single=args.get("single", "").lower() in ("1", "true", "yes"),
+        translations=Path(args["translations"]) if args.get("translations") else None,
+        highlights=Path(args["highlights"]) if args.get("highlights") else None,
+    )
 
 
 # plain text (no quotes/backslashes): it is injected into a JS string and set via textContent
@@ -677,7 +954,7 @@ BANNER = (
 TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WeirdChat — why does it do that?</title>
+<title>WeirdChat × OLens: why Qwen3.6-27B does it</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
 :root{
@@ -699,47 +976,69 @@ TEMPLATE = r"""<!doctype html>
 *{box-sizing:border-box}
 body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;margin:0}
 a{color:inherit}
-header{padding:16px 28px 12px;border-bottom:1px solid var(--line);background:var(--card)}
+header{padding:18px 28px 12px;border-bottom:1px solid var(--line);background:var(--card)}
 h1{font-family:var(--serif);font-weight:600;font-size:24px;margin:0 0 4px;letter-spacing:-.01em;text-wrap:balance}
 h1 a{text-decoration:none}
+.sub{color:var(--ink2);max-width:100ch;margin:0}
+.sub code{font-family:var(--mono);font-size:12.5px;background:var(--line2);padding:0 4px;border-radius:3px}
 h2{font-family:var(--serif);font-weight:600;font-size:19px;margin:22px 0 8px;letter-spacing:-.01em}
 h3{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:16px 0 6px;font-weight:500}
-.crumb{font-size:12.5px;color:var(--mute)}
-.crumb a{color:var(--ink2)}
+.crumb{font-size:12.5px;color:var(--mute)} .crumb a{color:var(--ink2)}
 .banner{background:var(--claims-bg);color:var(--claims);border:1px solid var(--claims);border-radius:6px;padding:8px 12px;margin:10px 0 0;font-size:12.5px;max-width:120ch}
 .banner b{letter-spacing:.04em}
 .page{padding:18px 28px 80px;max-width:1500px}
-.counts{color:var(--ink2);font-size:13px;margin:0 0 4px}
-.counts b{color:var(--ink)}
 .kkey{font-family:var(--mono);font-size:11.5px;color:var(--ink2)}
 .hint{color:var(--mute);font-size:12.5px}
 .none{color:var(--mute);font-size:13px}
 kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:3px;padding:0 4px;background:var(--card)}
-table.t{border-collapse:separate;border-spacing:0;width:100%;background:var(--card);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+table.t{border-collapse:separate;border-spacing:0;width:100%;background:var(--card);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:6px 0 10px}
 table.t th{text-align:left;font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--mute);font-weight:500;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 table.t td{padding:7px 10px;border-bottom:1px solid var(--line2);vertical-align:top;font-size:13px}
 table.t tr:last-child td{border-bottom:none}
 table.t tr.click{cursor:pointer} table.t tr.click:hover td{background:var(--s3d-bg)}
 td.num,th.num{text-align:right;font-family:var(--mono);font-size:12px;white-space:nowrap}
 .tag{font-size:11px;border-radius:4px;padding:1px 6px;font-family:var(--mono)}
-.tag.y{background:var(--discl-bg);color:var(--discl)} .tag.n{background:var(--line2);color:var(--mute)} .tag.w{background:var(--silent-bg);color:var(--silent)}
+.tag.y{background:var(--discl-bg);color:var(--discl)} .tag.n{background:var(--line2);color:var(--mute)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:0 0 10px}
 pre.block{font-family:var(--mono);font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;margin:0;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px 12px;color:var(--ink)}
 pre.small{font-size:11.5px;color:var(--ink2);border:none;padding:0;background:none}
 details{margin:6px 0} summary{cursor:pointer;color:var(--s3d);font-size:12.5px} summary::marker{color:var(--mute)}
+details.alltbl{margin:10px 0 0} details.alltbl summary{color:var(--mute)}
 .pill{display:inline-block;font-size:11.5px;color:var(--ink2);background:var(--line2);border-radius:999px;padding:1px 9px;margin:0 5px 5px 0;font-family:var(--mono)}
-/* --- read picker (chips), as in the sweep viewer --- */
-.recs{display:flex;flex-direction:column;gap:8px;margin:12px 0 6px}
+/* --- pickers, as in the sweep viewer --- */
+.recs{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .pick{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .pick .lbl{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);min-width:64px}
 .tab{font:inherit;font-family:var(--mono);font-size:12px;border:1px solid var(--line);background:var(--card);border-radius:5px;padding:3px 9px;cursor:pointer;color:var(--ink2)}
 .tab:hover{border-color:var(--ink2)} .tab[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
 .tab:disabled{opacity:.55;cursor:default}
-.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:3px 10px;font-size:12.5px;cursor:pointer;display:inline-flex;gap:6px;align-items:center;font-family:var(--sans);color:var(--ink2)}
+.tab .cnt{color:var(--mute);margin-left:4px}
+.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:3px 10px;font-size:12.5px;cursor:pointer;display:inline-flex;gap:6px;align-items:center;font-family:var(--sans);color:var(--ink2);max-width:100%}
 .chip:hover{border-color:var(--ink2)} .chip[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
 .chip .g{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.g.run{background:var(--claims)} .g.diag{background:var(--silent)} .g.data{background:var(--swept)}
 .g.matched{background:var(--claims)} .g.unmatched{background:var(--discl)} .g.agent{background:var(--swept)} .g.err{background:var(--silent)}
 .chip .n{color:var(--mute);font-family:var(--mono);font-size:11.5px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin:6px 0 12px}
+.legend span i{display:inline-block;width:14px;height:12px;vertical-align:-2px;margin-right:5px;border-radius:2px;background:var(--card)}
+.legend span i.dot{width:8px;height:8px;border-radius:50%;vertical-align:0}
+/* --- highlights --- */
+#hl{padding:14px 28px 6px;border-bottom:1px solid var(--line);background:var(--paper)}
+.hlhead{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}
+.hlhead h2{font-family:var(--serif);font-weight:600;font-size:18px;margin:0}
+.hlhead button{margin-left:auto}
+.hlgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:10px}
+.hlgrid[hidden]{display:none}
+.hlc{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--claims);border-radius:6px;padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:6px}
+.hlc:hover{border-color:var(--ink2);border-left-color:inherit}
+.hlc.header{border-left-color:var(--silent)} .hlc.user{border-left-color:var(--discl)}
+.hlc .where{font-family:var(--mono);font-size:11.5px;color:var(--mute);display:flex;gap:8px;flex-wrap:wrap}
+.hlc .where b{color:var(--ink2);font-weight:500}
+.hlc .q{font-family:var(--mono);font-size:12.5px;color:var(--ink);line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.hlc .loc{font-family:var(--mono);font-size:11.5px;color:var(--ink2);white-space:pre-wrap;word-break:break-word}
+.hlc .loc b{background:var(--mark);font-weight:500}
+.hlc .n{font-size:12.5px;color:var(--ink2)}
+.hlc .hand{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--s3d)}
 /* --- two-column viewer --- */
 main.two{display:grid;grid-template-columns:minmax(380px,46%) 1fr;gap:0;border:1px solid var(--line);border-radius:6px;background:var(--paper);min-height:60vh}
 @media (max-width:980px){main.two{grid-template-columns:1fr}}
@@ -751,7 +1050,6 @@ main.two{display:grid;grid-template-columns:minmax(380px,46%) 1fr;gap:0;border:1
 .block{margin:0 0 10px;border:1px solid var(--line2);border-radius:6px;background:var(--card)}
 .block .role{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);padding:6px 10px 0;display:flex;justify-content:space-between;gap:8px;align-items:baseline}
 .block .role .rl{letter-spacing:0;text-transform:none;color:var(--ink2);font-size:11.5px}
-.block .role button{font:inherit;letter-spacing:0;text-transform:none;background:none;border:1px solid var(--line);border-radius:4px;padding:0 6px;cursor:pointer;color:var(--ink2)}
 .block pre{margin:0;padding:6px 10px 10px;font-family:var(--mono);font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word;color:var(--ink2)}
 .block pre.clip{max-height:120px;overflow:hidden;position:relative}
 .block pre.clip::after{content:"";position:absolute;left:0;right:0;bottom:0;height:40px;background:linear-gradient(transparent,var(--card))}
@@ -762,17 +1060,17 @@ main.two{display:grid;grid-template-columns:minmax(380px,46%) 1fr;gap:0;border:1
 .tok.swept.flag{background:var(--mark)}
 .tok.sel{background:var(--sel)!important;color:var(--selfg);outline-color:var(--sel)}
 .tok.r1{box-shadow:0 2px 0 var(--ink)}
+.tok.fork{border-bottom:2px dotted var(--ink)}
 .special{color:var(--mute)}
 .nl{color:var(--mute);font-size:10.5px}
 .gap{color:var(--mute);font-size:10px;letter-spacing:-1px;padding:0 2px;cursor:default}
-.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin:6px 0 12px}
-.legend span i{display:inline-block;width:14px;height:12px;vertical-align:-2px;margin-right:5px;border-radius:2px;background:var(--card)}
 .poshdr{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .poshdr h2{margin:0 0 4px}
 .poshdr .navb{margin-left:auto;display:flex;gap:4px}
 .navb button{font:inherit;background:var(--card);border:1px solid var(--line);border-radius:4px;padding:2px 9px;cursor:pointer;color:var(--ink)}
 .navb button:hover{border-color:var(--ink2)} .navb button:disabled{opacity:.4;cursor:default}
 .tokbox{font-family:var(--mono);background:var(--sel);color:var(--selfg);padding:1px 6px;border-radius:3px;font-size:12.5px}
+.where{font-size:13px;color:var(--ink2);margin:4px 0 0}
 .local{font-family:var(--mono);font-size:12px;color:var(--ink2);background:var(--card);border:1px solid var(--line2);border-radius:6px;padding:8px 10px;margin:10px 0 12px;white-space:pre-wrap;word-break:break-word}
 .local b{color:var(--ink);background:var(--mark);font-weight:500}
 .flags{margin:0 0 14px}
@@ -790,6 +1088,8 @@ table.reads td{vertical-align:top;padding:8px 8px 10px;border-bottom:1px solid v
 table.reads td.L{font-family:var(--sans);font-weight:500;color:var(--ink2);width:52px;white-space:nowrap}
 .samp{padding:2px 0 6px;border-left:2px solid var(--line2);padding-left:8px;margin:0 0 6px}
 .samp.hit{border-color:var(--flagdot)}
+.en{color:var(--ink2);font-style:italic;margin-top:2px;font-family:var(--sans);font-size:12px}
+.en::before{content:"EN  ";font-style:normal;font-size:10px;letter-spacing:.06em;color:var(--mute)}
 mark{background:var(--mark);color:inherit;padding:0 1px}
 .notice{font-size:12.5px;color:var(--ink2);background:var(--card);border:1px solid var(--line2);border-radius:6px;padding:6px 10px;margin:0 0 8px}
 /* --- below the viewer --- */
@@ -818,10 +1118,16 @@ mark{background:var(--mark);color:inherit;padding:0 1px}
 </style>
 
 <header>
-  <h1><a href="#/">WeirdChat — why does it do that?</a></h1>
-  <div class="crumb" id="crumb"></div>
+  <h1><a href="#/">WeirdChat × OLens: why Qwen3.6-27B does it</a></h1>
+  <p class="sub">An investigator agent (Claude Opus 5) was told each WeirdChat-catalogued behavior of Qwen3.6-27B and asked <em>why</em> the model does it, with chat probes plus an OLens readout of the model's own activations. Pick a behavior, then one of its prompts; click any read token to see what the lens decoded there at every layer, side by side across reads.</p>
   <div class="banner"><b>UNVERIFIED HYPOTHESES.</b> <span id="banner"></span></div>
+  <div class="recs" id="recs"></div>
+  <details class="alltbl"><summary>every pattern as a table</summary><div id="alltbl"></div></details>
 </header>
+<section id="hl">
+  <div class="hlhead"><h2>Highlights</h2><span class="hint">lens cells a mechanism quotes that verify verbatim against the read at build time — click one to jump to that pattern, read and position. Red = inside the reply, amber = about to answer (header), green = inside the user turn.</span><button id="hltoggle" class="tab">collapse</button></div>
+  <div id="hlgrid" class="hlgrid"></div>
+</section>
 <div class="page" id="app"></div>
 
 <script>
@@ -829,7 +1135,9 @@ const D = /*__DATA__*/;
 const BANNER = "__BANNER__";
 const esc = s => (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const num = (v,d) => v==null ? "—" : Number(v).toFixed(d==null?2:d);
+const pct = v => v==null ? "—" : Math.round(Number(v)*100) + "%";
 const byKey = {}; (D.patterns||[]).forEach(p => byKey[p.key] = p);
+const GLABEL = {run: "agent run with mechanisms", diag: "diagnostics only", data: "data only"};
 document.getElementById("banner").textContent = BANNER;
 
 function cut(s, n){ s = s==null ? "" : String(s); return s.length<=n ? s : s.slice(0,n) + " …"; }
@@ -838,6 +1146,11 @@ function patUrl(key, read, pos){
   let h = "#/pattern/" + encodeURIComponent(key);
   if (read) h += "?read=" + encodeURIComponent(read) + (pos==null ? "" : "&pos=" + pos);
   return h;
+}
+function firstKey(){
+  const b = (D.behaviors||[])[0]; if (!b) return null;
+  const p = (D.patterns||[]).find(p => p.behavior_id === b.behavior_id) || D.patterns[0];
+  return p ? p.key : null;
 }
 
 // text shown up to `n` chars, with the remainder behind a disclosure
@@ -849,54 +1162,61 @@ function expandable(text, n, label){
     `<details><summary>${esc(label||"show full")} (${t.length} chars)</summary><pre class="block">${esc(t)}</pre></details>`;
 }
 
-// ------------------------------------------------------------------ overview
-function renderOverview(){
-  const c = D.counts || {};
-  let h = `<p class="counts"><b>${c.patterns||0}</b> patterns · <b>${c.behaviors||0}</b> behaviors · ` +
-    `<b>${c.runs||0}</b> agent runs · <b>${c.with_diag||0}</b> with OLens diagnostics · <b>${c.reads||0}</b> lens reads · ` +
-    `<b>${c.mechanisms||0}</b> reported mechanisms` +
-    (D.synth && D.synth.model ? ` · synthesis by <span class="kkey">${esc(D.synth.model)}</span>` : "") + `</p>`;
-  h += `<p class="crumb">source: <span class="kkey">${esc(D.source)}</span></p>`;
-
-  h += `<h2>Behaviors</h2>`;
+// ------------------------------------------------------------ header pickers
+function renderPickers(curKey){
+  const box = document.getElementById("recs"); if (!box) return;
+  const cur = curKey ? byKey[curKey] : null;
   const bs = D.behaviors || [];
-  if (!bs.length) h += `<p class="none">no patterns found.</p>`;
-  else {
-    h += `<table class="t"><thead><tr><th>behavior</th><th>id</th><th class="num">patterns</th>` +
-      `<th class="num">mean published match</th><th class="num">agent runs</th></tr></thead><tbody>`;
-    for (const b of bs)
-      h += `<tr><td>${esc(b.behavior_name)}</td><td class="kkey">${esc(b.behavior_id)}</td>` +
-        `<td class="num">${b.n_patterns}</td><td class="num">${num(b.mean_match_rate)}</td>` +
-        `<td class="num">${b.n_runs}</td></tr>`;
-    h += `</tbody></table>`;
-  }
+  const curB = cur ? cur.behavior_id : (bs[0] ? bs[0].behavior_id : null);
+  let h = `<div class="pick"><span class="lbl">behavior</span>` + bs.map(b =>
+    `<button class="tab" data-beh="${esc(b.behavior_id)}" aria-pressed="${b.behavior_id===curB}">${esc(b.behavior_name)}<span class="cnt">${b.n_patterns}</span></button>`).join("") +
+    `<a class="hint" href="#/themes" style="margin-left:auto">themes (${(D.clusters||[]).length} mechanism clusters) →</a></div>`;
+  const pats = (D.patterns||[]).filter(p => p.behavior_id === curB);
+  h += `<div class="pick"><span class="lbl">prompt</span>` + pats.map(p =>
+    `<button class="chip" data-key="${esc(p.key)}" aria-pressed="${cur && p.key===cur.key}" title="${esc(p.key)} · ${esc(GLABEL[p.grade]||p.grade)}"><span class="g ${esc(p.grade)}"></span>${esc(cut(p.group_summary || p.key, 70))}<span class="n">${pct(p.published_match_rate)}</span></button>`).join("") + `</div>`;
+  h += `<div class="legend"><span><i class="dot" style="background:var(--claims)"></i>agent run with ≥1 mechanism</span><span><i class="dot" style="background:var(--silent)"></i>diagnostics only</span><span><i class="dot" style="background:var(--swept)"></i>data only</span><span class="hint">% = WeirdChat's published match rate for the prompt</span></div>`;
+  box.innerHTML = h;
+  box.querySelectorAll("[data-beh]").forEach(b => b.onclick = () => { const p = (D.patterns||[]).find(p => p.behavior_id === b.dataset.beh); if (p) location.hash = patUrl(p.key); });
+  box.querySelectorAll("[data-key]").forEach(b => b.onclick = () => { location.hash = patUrl(b.dataset.key); });
+}
 
-  h += `<h2>Patterns</h2>`;
-  if ((D.patterns||[]).length){
-    h += `<table class="t"><thead><tr><th>behavior</th><th>group summary</th><th class="num">match</th>` +
-      `<th class="num">elo</th><th>diag</th><th>reads</th><th>runs</th><th class="num">mechanisms</th></tr></thead><tbody>`;
-    for (const p of D.patterns)
-      h += `<tr class="click" data-go="${patUrl(p.key)}">` +
-        `<td>${esc(p.behavior_name)}<div class="kkey">${esc(p.key)}</div></td>` +
-        `<td>${esc(cut(p.group_summary, 160))}</td>` +
-        `<td class="num">${num(p.published_match_rate)}</td>` +
-        `<td class="num">${num(p.elo, 0)}</td>` +
-        `<td><span class="tag ${p.has_diag?"y":"n"}">${p.has_diag?"yes":"none"}</span></td>` +
-        `<td><span class="tag ${p.n_reads?"y":"n"}">${p.n_reads||"none"}</span></td>` +
-        `<td><span class="tag ${p.n_runs?"y":"n"}">${p.n_runs||"none"}</span></td>` +
-        `<td class="num">${p.n_mechanisms}</td></tr>`;
-    h += `</tbody></table>`;
-  }
+function renderOverviewTables(){
+  const box = document.getElementById("alltbl"); if (!box) return;
+  const c = D.counts || {};
+  let h = `<p class="hint"><b>${c.patterns||0}</b> patterns · <b>${c.behaviors||0}</b> behaviors · <b>${c.runs||0}</b> agent runs · <b>${c.with_diag||0}</b> with OLens diagnostics · <b>${c.reads||0}</b> lens reads · <b>${c.mechanisms||0}</b> reported mechanisms · source <span class="kkey">${esc(D.source)}</span></p>`;
+  const bs = D.behaviors || [];
+  if (!bs.length) return box.innerHTML = h + `<p class="none">no patterns found.</p>`;
+  h += `<table class="t"><thead><tr><th>behavior</th><th>id</th><th class="num">patterns</th><th class="num">mean published match</th><th class="num">agent runs</th></tr></thead><tbody>`;
+  for (const b of bs) h += `<tr><td>${esc(b.behavior_name)}</td><td class="kkey">${esc(b.behavior_id)}</td><td class="num">${b.n_patterns}</td><td class="num">${num(b.mean_match_rate)}</td><td class="num">${b.n_runs}</td></tr>`;
+  h += `</tbody></table>`;
+  h += `<table class="t"><thead><tr><th>behavior</th><th>group summary</th><th class="num">match</th><th class="num">elo</th><th>grade</th><th>reads</th><th>runs</th><th class="num">mechanisms</th></tr></thead><tbody>`;
+  for (const p of D.patterns)
+    h += `<tr class="click" data-go="${patUrl(p.key)}"><td>${esc(p.behavior_name)}<div class="kkey">${esc(p.key)}</div></td><td>${esc(cut(p.group_summary, 160))}</td>` +
+      `<td class="num">${num(p.published_match_rate)}</td><td class="num">${num(p.elo, 0)}</td><td><span class="g ${esc(p.grade)}" style="display:inline-block;width:8px;height:8px;border-radius:50%"></span> ${esc(GLABEL[p.grade]||p.grade)}</td>` +
+      `<td><span class="tag ${p.n_reads?"y":"n"}">${p.n_reads||"none"}</span></td><td><span class="tag ${p.n_runs?"y":"n"}">${p.n_runs||"none"}</span></td><td class="num">${p.n_mechanisms}</td></tr>`;
+  h += `</tbody></table>`;
+  box.innerHTML = h;
+  box.querySelectorAll("tr[data-go]").forEach(tr => { tr.onclick = () => { location.hash = tr.dataset.go; }; });
+}
 
-  h += `<h2>Mechanism clusters</h2>`;
-  const cl = D.clusters || [];
-  if (!cl.length) h += `<p class="none">no synth.json yet — clusters appear once the synthesis pass runs.</p>`;
-  cl.forEach((k,i) => {
-    h += `<div class="card"><a href="#/cluster/${i}"><b>${esc(k.name)}</b></a>` +
-      `<div class="crumb">${k.members.length} pattern${k.members.length===1?"":"s"} · ${k.behavior_ids.length} behavior${k.behavior_ids.length===1?"":"s"}</div>` +
-      (k.description ? `<div style="margin-top:5px">${esc(k.description)}</div>` : "") + `</div>`;
-  });
-  return h;
+// ---------------------------------------------------------------- highlights
+function renderHighlights(){
+  const g = document.getElementById("hlgrid"), sec = document.getElementById("hl"); if (!g) return;
+  const items = D.highlights || [];
+  if (!items.length){ sec.querySelector(".hint").textContent = "none yet — a highlight is a lens cell a mechanism quotes that verifies verbatim against the read; none of the current citations do."; g.innerHTML = ""; }
+  g.innerHTML = items.map((h, i) => {
+    const smp = esc(h.sample.trim()).split(esc(h.quote)).join(`<mark>${esc(h.quote)}</mark>`);
+    const loc = esc(h.local.slice(0, h.local.length - h.token.length)) + `<b>${esc(h.token)}</b>`;
+    const en = D.en && D.en[h.sample];
+    return `<div class="hlc ${esc(h.region)}" data-i="${i}">
+      <div class="where"><b>${esc(h.behavior)}</b> ${esc(cut(h.summary, 60))} · <span>${esc(h.read)}</span> · pos ${h.pos} · L${h.layer}${h.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div>
+      <div class="loc">${loc}</div>
+      <div class="q">${smp}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>
+      <div class="n">${esc(h.note)}</div></div>`;
+  }).join("");
+  g.querySelectorAll(".hlc").forEach(c => c.onclick = () => { const h = items[+c.dataset.i]; location.hash = patUrl(h.pattern_key, h.read, h.pos); const m = document.getElementById("app"); if (m && m.scrollIntoView) m.scrollIntoView({behavior:"smooth", block:"start"}); });
+  const tg = document.getElementById("hltoggle");
+  if (tg) tg.onclick = () => { g.hidden = !g.hidden; tg.textContent = g.hidden ? "show" : "collapse"; };
 }
 
 // ------------------------------------------------------------------- pattern
@@ -909,15 +1229,11 @@ function renderPattern(key){
   if (!p) return `<p class="none">no pattern <span class="kkey">${esc(key)}</span>.</p>`;
   let h = `<h2 style="margin-top:4px">${esc(p.behavior_name)}</h2>` +
     `<p class="crumb"><span class="kkey">${esc(p.key)}</span>` +
-    (p.entry_id ? ` · entry ${esc(p.entry_id)}` : "") +
-    (p.group_id ? ` · group ${esc(p.group_id)}` : "") +
-    (p.n_group_members!=null ? ` · ${p.n_group_members} group members` : "") + `</p>`;
-  h += `<div>` +
-    `<span class="pill">published match ${num(p.published_match_rate)}</span>` +
-    `<span class="pill">elo ${num(p.elo,0)}</span>` +
+    (p.entry_id ? ` · entry ${esc(p.entry_id)}` : "") + (p.group_id ? ` · group ${esc(p.group_id)}` : "") +
+    (p.n_group_members!=null ? ` · ${p.n_group_members} group members` : "") + ` · ${esc(GLABEL[p.grade]||p.grade)}</p>`;
+  h += `<div><span class="pill">published match ${pct(p.published_match_rate)}</span><span class="pill">elo ${num(p.elo,0)}</span>` +
     Object.keys(p.elo_axes||{}).map(k => `<span class="pill">${esc(k)} ${num(p.elo_axes[k])}</span>`).join("") +
-    (p.weirdchat_url ? `<a class="pill" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>` : "") +
-    `</div>`;
+    (p.weirdchat_url ? `<a class="pill" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>` : "") + `</div>`;
   if (p.group_summary) h += `<div class="card">${esc(p.group_summary)}</div>`;
   h += `<h3>prompt (verbatim)</h3><pre class="block">${esc(p.prompt)}</pre>`;
   if (p.rubric) h += `<details><summary>transcript rubric</summary><pre class="block">${esc(p.rubric)}</pre></details>`;
@@ -932,7 +1248,7 @@ function fillHeavy(key, html){
 }
 function failNotice(url, why){
   return `<p class="none">could not load <span class="kkey">${esc(url)}</span> (${esc(why)}). ` +
-    `Browsers block fetch() from a file:// page — serve the site dir instead: <span class="kkey">python -m http.server</span> then open the printed URL.</p>`;
+    `Browsers block fetch() from a file:// page — serve the site dir instead: <span class="kkey">python -m http.server</span> then open the printed URL (or build with <span class="kkey">single=true</span> for a self-contained file).</p>`;
 }
 function fetchJson(url){
   if (typeof fetch !== "function") return Promise.reject(new Error("no fetch()"));
@@ -940,7 +1256,8 @@ function fetchJson(url){
 }
 function loadPattern(key, want){
   const url = dataUrl(key);
-  const go = data => { if (document.getElementById("heavy") && document.getElementById("heavy").dataset.key === key) openViewer(key, data, want); };
+  const go = data => { const s = document.getElementById("heavy"); if (s && s.dataset.key === key) openViewer(key, data, want); };
+  if (D.heavy && D.heavy[key]) return go(D.heavy[key]);   // single-file build: everything inlined
   if (heavyCache[key]) return go(heavyCache[key]);
   // only the fetch is caught: a render bug must surface in the console, not as a "could not load"
   fetchJson(url).then(data => { heavyCache[key] = data; return data; },
@@ -950,14 +1267,14 @@ function loadPattern(key, want){
 
 // ---- read indexing
 function indexRead(r){
-  r.rowByPos = {}; r.positions = [];
-  for (const row of r.rows || []){ r.rowByPos[row.pos] = row; r.positions.push(row.pos); }
+  r.rowByPos = {}; r.positions = []; r.aboutPos = null;
+  for (const row of r.rows || []){ r.rowByPos[row.pos] = row; r.positions.push(row.pos); if (row.region === "header") r.aboutPos = row.pos; }
 }
 function prepareData(key, data){
   data.reads = data.reads || []; data.runs = data.runs || []; data.samples = data.samples || [];
   data.reads.forEach(indexRead);
   data.byId = {}; data.byConv = {}; data.byTool = {};
-  for (const r of data.reads){ data.byId[r.id] = r; if (r.conv_id && !data.byConv[r.conv_id]) data.byConv[r.conv_id] = r; if (r.tool_index!=null) data.byTool[r.tool_index] = r; }
+  for (const r of data.reads){ data.byId[r.id] = r; if (r.conv_id && (!data.byConv[r.conv_id] || (!data.byConv[r.conv_id].rows && !data.byConv[r.conv_id].deferred))) data.byConv[r.conv_id] = r; if (r.tool_index!=null) data.byTool[r.tool_index] = r; }
   for (const r of data.reads){
     // ids a mechanism can cite to mean this read: its conv id, or the agent's own read of the same rollout
     r.mention_ids = r.conv_id ? [r.conv_id] : [];
@@ -968,6 +1285,7 @@ function prepareData(key, data){
   // fragments the agent quoted: split its cell citations / evidence on quotes, keep >= 25 chars
   const frags = new Set();
   for (const m of data.mechs) for (const f of ((m.readout_cells||"") + "\n" + (m.evidence||"")).split(/["'“”‘’;\n]/)){ const t = f.trim(); if (t.length >= 25) frags.add(t); }
+  for (const h of (D.highlights||[])) if (h.pattern_key === key && h.quote) frags.add(h.quote);   // build-verified quotes, so cards and cells agree
   data.quotes = [...frags].sort((a,b) => b.length - a.length);
   data.key = key;
 }
@@ -978,11 +1296,10 @@ function openViewer(key, data, want){
   V = {key, data, readId: null, pos: null, compare: []};
   const reads = data.reads;
   let h = `<h2>Lens reads</h2>`;
-  if (!reads.length){
-    h += `<p class="none">no lens reads for this pattern yet (no diag file, no agent readouts).</p>`;
-  } else {
-    h += `<p class="hint">A read is one OLens readout over one conversation: from the diagnostic pass (matched / unmatched study rollouts), or parsed back out of the agent's own <span class="kkey">readouts</span> tool pages (w###m/u = the study rollouts it was seeded with — same text, a different lens sample; c### = conversations it created via chat). Left: the tokens that were read. Right: what the lens decoded at the selected token, every layer, one column per compared read.</p>`;
-    h += `<div class="recs" id="recs"></div><main class="two"><section id="left"></section><section id="right"></section></main>`;
+  if (!reads.length) h += `<p class="none">no lens reads for this pattern yet (no diag file, no agent readouts).</p>`;
+  else {
+    h += `<p class="hint">A read is one OLens readout over one conversation: from the diagnostic pass (matched / unmatched study rollouts), or parsed back out of the agent's own <span class="kkey">readouts</span> tool pages (w###m/u = study rollouts it was seeded with; c### = conversations it created via chat). Left: the tokens that were read. Right: what the lens decoded at the selected token, every layer, one column per compared read.</p>`;
+    h += `<div class="recs" id="reads" style="margin:0 0 10px"></div><main class="two"><section id="left"></section><section id="right"></section></main>`;
   }
   h += belowViewer(data);
   fillHeavy(key, h);
@@ -990,13 +1307,14 @@ function openViewer(key, data, want){
   if (!reads.length) return;
   const diagM = reads.find(r => r.source==="diag" && r.label==="matched"), diagU = reads.find(r => r.source==="diag" && r.label==="unmatched");
   if (diagM && diagU) V.compare = [diagM.id, diagU.id];
-  let start = (want && want.read && data.byId[want.read]) ? data.byId[want.read] : (diagM || reads.find(r => r.rows && r.rows.length) || reads[0]);
+  const start = (want && want.read && data.byId[want.read]) ? data.byId[want.read] : (diagM || reads.find(r => r.rows && r.rows.length) || reads[0]);
   selectRead(start.id, want && want.pos!=null ? +want.pos : null);
 }
 
 function defaultPos(r){
   if (!r.positions || !r.positions.length) return null;
   if (r.fork_pos!=null && r.rowByPos[r.fork_pos]) return r.fork_pos;
+  if (r.aboutPos!=null) return r.aboutPos;
   const reply = (r.rows||[]).find(row => row.region === "reply");
   return reply ? reply.pos : r.positions[0];
 }
@@ -1022,11 +1340,12 @@ function selectRead(id, pos){
   if (needs.length){
     V.pos = pos;
     renderChips();
-    document.getElementById("left").innerHTML = `<p class="none">loading the agent's reads (<span class="kkey">${esc(V.data.agent_file)}</span>) …</p>`;
-    document.getElementById("right").innerHTML = "";
+    const left = document.getElementById("left"), right = document.getElementById("right");
+    if (left) left.innerHTML = `<p class="none">loading the agent's reads (<span class="kkey">${esc(V.data.agent_file)}</span>) …</p>`;
+    if (right) right.innerHTML = "";
     const key = V.key;
     Promise.all(needs.map(ensureAgentRows)).then(() => { if (V && V.key === key && V.readId === id) selectRead(id, V.pos); })
-      .catch(err => { if (V && V.key === key) document.getElementById("left").innerHTML = failNotice(V.data.agent_file, err && err.message ? err.message : String(err)); });
+      .catch(err => { const l = document.getElementById("left"); if (V && V.key === key && l) l.innerHTML = failNotice(V.data.agent_file, err && err.message ? err.message : String(err)); });
     return;
   }
   if (pos==null || !r.rowByPos || !r.rowByPos[pos]) pos = defaultPos(r);
@@ -1053,7 +1372,7 @@ function readTitle(r){
 }
 
 function renderChips(){
-  const box = document.getElementById("recs"); if (!box) return;
+  const box = document.getElementById("reads"); if (!box) return;
   const reads = V.data.reads;
   let h = `<div class="pick"><span class="lbl">read</span>` + reads.map(r =>
     `<button class="chip" data-read="${esc(r.id)}" aria-pressed="${r.id===V.readId}" title="${esc(readTitle(r))}"><span class="g ${readDot(r)}"></span>${esc(r.id)}` +
@@ -1084,16 +1403,16 @@ function renderLeft(){
     `<span class="hint">${esc(r.id)} · ${(r.positions||[]).length} positions read · ${(r.layers||[]).length} layers` +
     (r.claimed && r.claimed.positions!=null && r.claimed.positions !== (r.positions||[]).length ? ` (page header says ${r.claimed.positions})` : "") +
     (r.tool_index!=null ? ` · tool call #${r.tool_index}` : "") +
-    (r.same_rollout_as ? ` · same rollout as <span class="kkey">${esc(r.same_rollout_as)}</span>, different lens sample` : "") + `</span></div>`;
+    (r.same_rollout_as ? ` · same rollout as <span class="kkey">${esc(r.same_rollout_as)}</span>, different lens sample` : "") +
+    (r.aboutPos!=null ? ` · about-to-speak = ${r.aboutPos}` : "") + `</span></div>`;
   if (r.parse_error) h += `<div class="notice"><b>could not parse this readout page:</b> ${esc(r.parse_error)}</div>`;
   h += `<div class="legend"><span><i style="outline:1px solid var(--swept);outline-offset:-1px"></i>read position (click)</span><span><i style="background:var(--mark)"></i>cited by a mechanism</span><span><i style="background:var(--sel)"></i>selected</span>` +
-    (r.fork_pos!=null ? `<span><i style="box-shadow:0 2px 0 var(--ink)"></i>fork: first word where the matched and unmatched replies diverge (≈, from the read tokens)</span>` : "") +
+    `<span><i style="box-shadow:0 2px 0 var(--ink)"></i>about to speak (last header token)</span>` +
+    (r.fork_pos!=null ? `<span><i style="border-bottom:2px dotted var(--ink)"></i>fork: first word where the matched and unmatched replies diverge (≈)</span>` : "") +
     `<span><i></i>‥ = positions not read</span><span>keys <kbd>←</kbd> <kbd>→</kbd></span></div>`;
-  // the exact text that was read, clipped
   const msgs = (r.messages||[]).map(m => `<div class="block"><div class="role"><span>${esc(m.role)}</span></div><pre class="clip">${esc(m.content)}</pre></div>`).join("");
   h += `<details><summary>text that was read (${r.text_source==="tool page" ? "from the agent's page, clipped to 900 chars" : "full, " + esc(r.text_source)})</summary>${msgs}` +
     `<div class="block reply"><div class="role"><span>assistant reply</span></div><pre class="clip">${esc(r.completion||"(empty)")}</pre></div></details>`;
-  // blocks by region, in position order
   const rows = r.rows || [], flags = flagPositions(r);
   if (!rows.length) h += `<p class="none">no positions in this read.</p>`;
   let i = 0;
@@ -1103,8 +1422,8 @@ function renderLeft(){
       const row = rows[i];
       if (prev!=null && row.pos - prev > 1) inner += `<span class="gap" title="${row.pos - prev - 1} positions not read">‥</span>`;
       prev = row.pos;
-      const cls = ["tok","swept", flags.has(row.pos)?"flag":"", row.pos===V.pos?"sel":"", row.pos===r.fork_pos?"r1":""].join(" ");
-      inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}">${tokHtml(row.tok)}</span>`;
+      const cls = ["tok","swept", flags.has(row.pos)?"flag":"", row.pos===V.pos?"sel":"", row.pos===r.aboutPos?"r1":"", row.pos===r.fork_pos?"fork":""].join(" ");
+      inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}${flags.has(row.pos)?" · cited by a mechanism":""}">${tokHtml(row.tok)}</span>`;
     }
     h += `<div class="block ${esc(region)}"><div class="role"><span>${esc(region)}</span><span class="rl">${esc(REGION_LABEL[region]||"")}</span></div><pre>${inner}</pre></div>`;
   }
@@ -1116,7 +1435,7 @@ function renderLeft(){
 // ---- citations inside a mechanism's readout_cells: "w001u L36 pos 87 …" → [{cid, pos}]
 function citations(text){
   const out = []; let cid = null;
-  const re = /\b([wc]\d+[mu]?)\b|\bpos\s*(\d+)/g; let m;
+  const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m;
   text = text || "";
   while ((m = re.exec(text))){
     if (m[1]){ if (V.data.byConv[m[1]]) cid = m[1]; out.push({cid: V.data.byConv[m[1]] ? m[1] : null, pos: null, index: m.index, len: m[0].length}); }
@@ -1137,6 +1456,14 @@ function markQuotes(text, quotes){
   for (const q of quotes){ const e = esc(q); if (html.includes(e)){ html = html.split(e).join(`<mark>${e}</mark>`); hit = true; } }
   return [html, hit];
 }
+function whereText(r, row){
+  if (row.region === "header") return row.pos === r.aboutPos
+    ? "about to speak: the model has read the request and written nothing — identical for every rollout"
+    : "the chat boundary before the reply — identical for every rollout of this prompt";
+  if (row.region === "user") return "inside the user turn: the model is reading the request and has written nothing";
+  if (row.region === "reply") return "inside the reply: the model is writing its answer" + (row.pos === r.fork_pos ? " — the fork, where the matched and unmatched replies first diverge" : "");
+  return row.region;
+}
 
 // ---- right: the selected position, every layer, one column per compared read
 function renderRight(){
@@ -1144,26 +1471,23 @@ function renderRight(){
   const p = V.pos, row = r.rowByPos ? r.rowByPos[p] : null;
   if (row == null){ right.innerHTML = `<p class="none">${r.parse_error ? "nothing to show — this page did not parse." : "no position selected."}</p>`; return; }
   const idx = r.positions.indexOf(p);
-  const where = row.region === "header" ? "about to answer — the chat boundary, identical for every rollout" : row.region === "user" ? "reading the request; nothing written yet" : row.region === "reply" ? "writing the answer" : row.region;
-  let h = `<div class="poshdr"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="hint">${esc(where)} · ${esc(row.kind)}${p===r.fork_pos?" · fork":""}</span>` +
+  let h = `<div class="poshdr"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="hint">${esc(row.region)} · ${esc(row.kind)}</span>` +
     `<span class="navb"><button id="prev" ${idx<=0?"disabled":""}>← prev</button><button id="next" ${idx>=r.positions.length-1?"disabled":""}>next →</button></span></div>`;
-  // text so far: the read tokens up to and including this one (thinned, so approximate)
+  h += `<div class="where">${esc(whereText(r, row))}</div>`;
   let sofar = ""; for (const x of r.rows){ if (x.pos > p) break; if (x.pos < p) sofar += x.tok; }
   h += `<div class="local">${esc(sofar.slice(-200))}<b>${esc(row.tok)}</b><span class="hint">   ← read tokens so far (this token last; only read positions, so gaps are elided)</span></div>`;
-  // mechanisms citing this read at this position (the flags analogue)
   const fl = mechsAt(r, p);
   h += `<div class="flags"><h3>mechanisms citing this position (${fl.length}) — unverified hypotheses</h3>`;
   if (!fl.length) h += `<p class="none">none — no reported mechanism cites <span class="kkey">${esc(r.mention_ids.join(" / ")||r.id)}</span> at pos ${p}.</p>`;
   for (const f of fl) h += `<div class="flag ${f.via===r.conv_id?"":"other"}"><span class="cat">mechanism ${f.m.i+1}</span><span class="cell">${esc(f.m.auditor)} s${f.m.seed}${f.m.confidence==null?"":" · confidence "+num(f.m.confidence)}${f.via!==r.conv_id?" · cited on "+esc(f.via)+" (same rollout, different lens sample)":""}</span><div class="why">${esc(f.m.mechanism)}</div><q>${esc(cut(f.m.readout_cells, 400))}</q></div>`;
   h += `</div>`;
-  // the layer table
   const cols = V.compare.map(id => V.data.byId[id]).filter(Boolean);
   const layers = [...new Set(cols.reduce((acc, c) => acc.concat(c.layers||[]), []))].sort((a,b) => a-b);
   const toks = cols.map(c => c.rowByPos && c.rowByPos[p] ? c.rowByPos[p].tok : null);
   const present = toks.filter(t => t!=null);
   const identical = cols.length > 1 && present.length === cols.length && present.every(t => t === present[0]);
   const differ = cols.length > 1 && !identical;
-  h += `<div class="grid"><h3>every readout at this token (verbatim, unedited) — ${cols.length} read${cols.length===1?"":"s"}</h3>`;
+  h += `<div class="grid"><h3>every readout at this token (verbatim, unedited; italic EN lines are translations) — ${cols.length} read${cols.length===1?"":"s"}</h3>`;
   if (identical) h += `<div class="notice">identical prefix — same activation, different lens samples${row.region==="reply"?" (the replies still agree at this position)":""}</div>`;
   h += `<table class="reads"><thead><tr><th>layer</th>`;
   cols.forEach((c, j) => { h += `<th class="${esc(readDot(c))}">${esc(c.id)}${differ ? `<span class="own">${toks[j]==null ? "not read at pos "+p : esc(JSON.stringify(toks[j]))}</span>` : ""}</th>`; });
@@ -1176,7 +1500,7 @@ function renderRight(){
       h += `<td>`;
       if (samples === null) h += `<span class="none">${crow ? "—" : "not read at this position"}</span>`;
       else if (!samples.length) h += `<span class="none">—</span>`;
-      else for (const s of samples){ const [sh, hit] = markQuotes(s.trim(), V.data.quotes); h += `<div class="samp ${hit?"hit":""}">${sh}</div>`; }
+      else for (const s of samples){ const [sh, hit] = markQuotes(s.trim(), V.data.quotes); const en = D.en && D.en[s]; h += `<div class="samp ${hit?"hit":""}">${sh}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>`; }
       h += `</td>`;
     }
     h += `</tr>`;
@@ -1203,13 +1527,12 @@ document.addEventListener("keydown", e => {
 function rollout(s){
   const cls = s.matched ? "matched" : "unmatched";
   return `<div class="roll ${cls}"><div class="hd"><span>${s.matched?"matched":"unmatched"}</span>` +
-    `<span class="kkey">sample ${s.sample_index==null?"?":s.sample_index}</span></div>` +
-    expandable(s.text, 800, "show full rollout") + `</div>`;
+    `<span class="kkey">sample ${s.sample_index==null?"?":s.sample_index}</span></div>` + expandable(s.text, 800, "show full rollout") + `</div>`;
 }
 function linkCells(text, data){
   // every "pos N" that resolves to a read of this pattern becomes a link selecting read@position
   let out = "", last = 0, cid = null;
-  const re = /\b([wc]\d+[mu]?)\b|\bpos\s*(\d+)/g; let m;
+  const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m;
   text = text || "";
   while ((m = re.exec(text))){
     out += esc(text.slice(last, m.index));
@@ -1233,16 +1556,14 @@ function stepBlock(s, i, data){
   if (s.name === "chat") h += `<div class="call"><span class="k">user →</span> <span class="usr">${esc(s.user)}</span></div>` + (s.args ? `<div class="call"><span class="k">${esc(s.args)}</span></div>` : "");
   else if (s.name) h += `<div class="call">${esc(s.name)}(${esc(s.args)})</div>`;
   if (s.output){
-    const o = s.output, isRead = s.name === "readouts";
-    const label = s.name === "chat" ? "reply" : "result";
+    const o = s.output, isRead = s.name === "readouts", label = s.name === "chat" ? "reply" : "result";
     h += `<pre class="block" style="margin-top:6px">${esc(o.slice(0,600))}${o.length>600?" …":""}</pre>`;
     if (o.length > 600) h += `<details><summary>show full ${label} (${o.length} chars${isRead?", clipped for the viewer; the structured read is in the strip above":""})</summary><pre class="block">${esc(o)}</pre></details>`;
   }
   return h + `</div>`;
 }
 function mechBlock(m, i, data){
-  let h = `<div class="mech"><div class="txt"><span class="n">${i+1}.</span>${esc(m.mechanism)}` +
-    (m.confidence==null ? "" : ` <span class="conf">confidence ${num(m.confidence)}</span>`) + `</div>`;
+  let h = `<div class="mech"><div class="txt"><span class="n">${i+1}.</span>${esc(m.mechanism)}` + (m.confidence==null ? "" : ` <span class="conf">confidence ${num(m.confidence)}</span>`) + `</div>`;
   if (m.evidence) h += `<div class="ev">${esc(m.evidence)}</div>`;
   if (m.readout_cells) h += `<div class="cells">cells: ${linkCells(m.readout_cells, data)}</div>`;
   if (m.would_test_by) h += `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>`;
@@ -1250,19 +1571,13 @@ function mechBlock(m, i, data){
 }
 function runBlock(r, data){
   let h = `<div class="card"><b>${esc(r.auditor)}</b> <span class="kkey">seed ${r.seed==null?"?":r.seed}</span>` +
-    ` <span class="crumb">· ${(r.steps||[]).length} steps` +
-    (r.cells_served ? ` · ${r.cells_served} cells served` : "") + (r.output_tokens ? ` · ${r.output_tokens} tok` : "") +
-    (r.server_calls ? ` · ${r.server_calls} server calls` : "") + (r.server_seconds ? ` · ${num(r.server_seconds,1)}s server` : "") +
-    (r.stopped_by ? ` · stopped: ${esc(r.stopped_by)}` : "") + `</span>`;
+    ` <span class="crumb">· ${(r.steps||[]).length} steps` + (r.cells_served ? ` · ${r.cells_served} cells served` : "") + (r.output_tokens ? ` · ${r.output_tokens} tok` : "") +
+    (r.server_calls ? ` · ${r.server_calls} server calls` : "") + (r.server_seconds ? ` · ${num(r.server_seconds,1)}s server` : "") + (r.stopped_by ? ` · stopped: ${esc(r.stopped_by)}` : "") + `</span>`;
   if (r.summary) h += `<div style="margin-top:6px">${esc(r.summary)}</div>`;
-  h += `</div>`;
-  h += `<h3>transcript</h3>`;
+  h += `</div><h3>transcript</h3>`;
   if (!(r.steps||[]).length) h += `<p class="none">no turns recorded.</p>`;
   (r.steps||[]).forEach((s,i) => { h += stepBlock(s, i, data); });
-  if ((r.notes||[]).length){
-    h += `<h3>scratch notes (${r.notes.length})</h3>`;
-    r.notes.forEach(n => { h += `<pre class="block small" style="margin-bottom:6px">${esc(n)}</pre>`; });
-  }
+  if ((r.notes||[]).length){ h += `<h3>scratch notes (${r.notes.length})</h3>`; r.notes.forEach(n => { h += `<pre class="block small" style="margin-bottom:6px">${esc(n)}</pre>`; }); }
   h += `<h3>ranked mechanisms (${(r.mechanisms||[]).length}) — unverified hypotheses</h3>`;
   if (!(r.mechanisms||[]).length) h += `<p class="none">this run reported no mechanisms.</p>`;
   (r.mechanisms||[]).forEach((m,i) => { h += mechBlock(m, i, data); });
@@ -1283,30 +1598,35 @@ function belowViewer(data){
   return h;
 }
 function wireBelow(data){
-  // "open this read" jumps to the viewer as well as selecting the read
   document.querySelectorAll("#heavy [data-open]").forEach(a => a.onclick = ev => {
     ev.preventDefault(); selectRead(a.dataset.open, null);
     const m = document.querySelector("main.two"); if (m && m.scrollIntoView) m.scrollIntoView({block:"start", behavior:"smooth"});
   });
 }
 
-// ------------------------------------------------------------------- cluster
+// ------------------------------------------------------------------- themes
+function renderThemes(){
+  const cl = D.clusters || [];
+  let h = `<h2 style="margin-top:4px">Themes — mechanism clusters</h2>`;
+  if (!cl.length) return h + `<p class="none">no synth.json yet — clusters appear once the synthesis pass runs.</p>`;
+  cl.forEach((k,i) => {
+    h += `<div class="card"><a href="#/cluster/${i}"><b>${esc(k.name)}</b></a><div class="crumb">${k.members.length} pattern${k.members.length===1?"":"s"} · ${k.behavior_ids.length} behavior${k.behavior_ids.length===1?"":"s"}</div>` +
+      (k.description ? `<div style="margin-top:5px">${esc(k.description)}</div>` : "") + `</div>`;
+  });
+  return h;
+}
 function renderCluster(i){
   const k = (D.clusters||[])[i];
   if (!k) return `<p class="none">no cluster ${esc(i)}.</p>`;
   let h = `<h2 style="margin-top:4px">${esc(k.name)}</h2>`;
   if (k.description) h += `<div class="card">${esc(k.description)}</div>`;
-  h += `<h3>behaviors spanned (${k.behavior_ids.length})</h3><div>` +
-    (k.behavior_ids.length ? k.behavior_ids.map(b => `<span class="pill">${esc(b)}</span>`).join("") : `<span class="none">none listed</span>`) + `</div>`;
+  h += `<h3>behaviors spanned (${k.behavior_ids.length})</h3><div>` + (k.behavior_ids.length ? k.behavior_ids.map(b => `<span class="pill">${esc(b)}</span>`).join("") : `<span class="none">none listed</span>`) + `</div>`;
   h += `<h3>members (${k.members.length}) — unverified mechanisms</h3>`;
   if (!k.members.length) h += `<p class="none">no members listed.</p>`;
   for (const m of k.members){
     const p = byKey[m.pattern_key];
-    h += `<div class="mech"><div class="txt">` +
-      `<a href="${patUrl(m.pattern_key)}">${esc(p ? p.behavior_name : m.pattern_key)}</a>` +
-      ` <span class="kkey">${esc(m.pattern_key)}</span>${p?"":` <span class="tag n">not in this build</span>`}</div>` +
-      (m.mechanism ? `<div class="ev">${esc(m.mechanism)}</div>` : "") +
-      (m.evidence ? `<div class="cells">${esc(m.evidence)}</div>` : "") + `</div>`;
+    h += `<div class="mech"><div class="txt"><a href="${patUrl(m.pattern_key)}">${esc(p ? p.behavior_name : m.pattern_key)}</a> <span class="kkey">${esc(m.pattern_key)}</span>${p?"":` <span class="tag n">not in this build</span>`}</div>` +
+      (m.mechanism ? `<div class="ev">${esc(m.mechanism)}</div>` : "") + (m.evidence ? `<div class="cells">${esc(m.evidence)}</div>` : "") + `</div>`;
   }
   return h;
 }
@@ -1320,36 +1640,39 @@ function parseHash(){
   (query||"").split("&").forEach(kv => { if (!kv) return; const [k, v] = kv.split("="); q[decodeURIComponent(k)] = v==null ? "" : decodeURIComponent(v); });
   return {parts, q};
 }
-function route(){
-  const {parts, q} = parseHash();
-  const app = document.getElementById("app"), crumb = document.getElementById("crumb");
-  if (parts[0] === "pattern" && parts.length > 1){
-    const key = decodeURIComponent(parts.slice(1).join("/"));
-    const want = {read: q.read || null, pos: q.pos!=null && q.pos!=="" ? +q.pos : null};
-    if (V && V.key === key && document.getElementById("heavy") && document.getElementById("heavy").dataset.key === key){
-      // same page: a deep link from a mechanism or transcript — just move the selection
-      if (want.read && V.data.byId[want.read]){ selectRead(want.read, want.pos); const m = document.querySelector("main.two"); if (m && m.scrollIntoView) m.scrollIntoView({block:"start"}); }
-      return;
-    }
-    V = null;
-    crumb.innerHTML = `<a href="#/">overview</a> › pattern <span class="kkey">${esc(key)}</span>`;
-    app.innerHTML = renderPattern(key);
-    window.scrollTo(0, 0);
-    if (byKey[key]) loadPattern(key, want);
+function openPatternPage(key, want){
+  const app = document.getElementById("app");
+  const slot = document.getElementById("heavy");
+  if (V && V.key === key && slot && slot.dataset.key === key){
+    // same page: a deep link from a highlight, mechanism or transcript — just move the selection
+    if (want.read && V.data.byId[want.read]){ selectRead(want.read, want.pos); const m = document.querySelector("main.two"); if (m && m.scrollIntoView) m.scrollIntoView({block:"start"}); }
     return;
   }
   V = null;
-  if (parts[0] === "cluster" && parts.length > 1){
-    const i = parseInt(parts[1], 10), k = (D.clusters||[])[i];
-    crumb.innerHTML = `<a href="#/">overview</a> › cluster ${k ? esc(k.name) : esc(parts[1])}`;
-    app.innerHTML = renderCluster(i);
-  } else {
-    crumb.innerHTML = "overview";
-    app.innerHTML = renderOverview();
-  }
-  app.querySelectorAll("tr[data-go]").forEach(tr => { tr.onclick = () => { location.hash = tr.dataset.go; }; });
-  window.scrollTo(0, 0);
+  renderPickers(key);
+  app.innerHTML = renderPattern(key);
+  if (byKey[key]) loadPattern(key, want);
 }
+function route(){
+  const {parts, q} = parseHash();
+  const app = document.getElementById("app");
+  if (parts[0] === "pattern" && parts.length > 1){
+    openPatternPage(decodeURIComponent(parts.slice(1).join("/")), {read: q.read || null, pos: q.pos!=null && q.pos!=="" ? +q.pos : null});
+    return;
+  }
+  if (parts[0] === "cluster" && parts.length > 1){
+    V = null; renderPickers(null);
+    app.innerHTML = `<p class="crumb"><a href="#/themes">themes</a> › cluster</p>` + renderCluster(parseInt(parts[1], 10));
+    window.scrollTo(0, 0); return;
+  }
+  if (parts[0] === "themes"){ V = null; renderPickers(null); app.innerHTML = renderThemes(); window.scrollTo(0, 0); return; }
+  // "#/" = the first behavior's first pattern
+  const key = firstKey();
+  if (!key){ V = null; renderPickers(null); app.innerHTML = `<p class="none">no patterns found under <span class="kkey">${esc(D.source)}</span>.</p>`; return; }
+  openPatternPage(key, {read: null, pos: null});
+}
+renderOverviewTables();
+renderHighlights();
 window.addEventListener("hashchange", route);
 route();
 </script>

@@ -27,7 +27,7 @@ app = modal.App(os.environ.get("WEIRDCHAT_SITE_APP", "weirdchat-site"))
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("fastapi[standard]==0.115.12")
-    .add_local_dir(str(SITE), "/site")
+    .add_local_dir(str(SITE), "/site", ignore=["cells_to_translate.json"])
 )
 
 
