@@ -1,11 +1,18 @@
-"""Build the WeirdChat explanation viewer — one self-contained static page.
+"""Build the WeirdChat explanation viewer — a small index page plus per-pattern data files.
 
-Walks ``<out_root>/{patterns,diag,runs}`` plus an optional ``synth.json``, embeds everything as
-JSON in a single HTML file (CSS + JS inlined, no external assets) and writes
-``<site_dir>/index.html`` (default ``<out_root>/site``).
+Walks ``<out_root>/{patterns,diag,runs}`` plus an optional ``synth.json`` and writes into
+``<site_dir>`` (default ``<out_root>/site``):
+
+    index.html               page + JS + the small payload (pattern metadata, per-run
+                             mechanisms, behaviors table, synth clusters) — no samples/grids
+    data/<pattern_key>.json  the heavy payload (samples, OLens grids, full agent transcripts),
+                             fetched on demand when a pattern page opens
 
     python scripts/weirdchat/build_site.py [out=outputs/weirdchat] [site=<dir>]
     cd outputs/weirdchat/site && python -m http.server 8905
+
+Serve the directory: ``fetch()`` of ``data/…`` is blocked from a ``file://`` origin in most
+browsers (the page says so when it happens). The overview and cluster pages need no fetch.
 
 The experiment tells an investigator agent about a behavior WeirdChat catalogued in Qwen3.6-27B
 and asks it to explain *why* the model does it, using chat probes plus an OLens readout of the
@@ -21,10 +28,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# a single OLens cell keeps at most this much text (the title attribute holds the rest)
-CELL_CAP = 600
-# a tool result in the transcript keeps at most this much text, so the one file stays sane
-TOOL_OUTPUT_CAP = 20000
+# a single OLens cell keeps at most this much text (measured max is 431, so nothing is clipped)
+CELL_CAP = 450
+# a tool result / an assistant turn in the transcript keeps at most this much text
+TOOL_OUTPUT_CAP = 12000
+THINK_CAP = 6000
+# hard size budgets: each data/<key>.json, and everything written together
+# (the host caps a version at 64 MB and a file at 16 MB; 4 MB per file is a soft warning)
+DATA_FILE_BUDGET = 4 * 1024 * 1024
+TOTAL_BUDGET = 62 * 1024 * 1024
 
 
 # ------------------------------------------------------------------------- io
@@ -150,7 +162,7 @@ def steps_of(record: dict[str, Any]) -> list[dict[str, Any]]:
         turn = as_dict(turn)
         if as_text(turn.get("role")) == "tool":
             continue
-        think = as_text(turn.get("content")).strip()
+        think = clip(as_text(turn.get("content")).strip(), THINK_CAP)
         calls = [as_dict(c) for c in as_list(turn.get("tool_calls"))]
         if not calls:
             if think and think != "...":
@@ -327,15 +339,39 @@ def synth_meta(out_root: Path) -> dict[str, Any]:
     return {"model": as_text(synth.get("model")), "n_records": as_int(synth.get("n_records"))}
 
 
+# ------------------------------------------------------------------- split
+HEAVY_PATTERN_KEYS = ("samples", "reads", "fork")
+HEAVY_RUN_KEYS = ("steps", "notes")
+
+
+def light_pattern(pat: dict[str, Any]) -> dict[str, Any]:
+    """What index.html carries per pattern: metadata, flags, and every run's mechanisms."""
+    light = {k: v for k, v in pat.items() if k not in HEAVY_PATTERN_KEYS}
+    light["runs"] = [{k: v for k, v in r.items() if k not in HEAVY_RUN_KEYS} for r in pat["runs"]]
+    light["has_diag"] = bool(pat["reads"])
+    light["n_samples"] = len(pat["samples"])
+    light["n_runs"] = len(pat["runs"])
+    return light
+
+
+def heavy_pattern(pat: dict[str, Any]) -> dict[str, Any]:
+    """What data/<key>.json carries: the full pattern (samples, grids, whole transcripts)."""
+    return pat
+
+
+def mb(n_bytes: int) -> str:
+    return f"{n_bytes / 1048576:.2f} MB"
+
+
 # ------------------------------------------------------------------------ main
 def build_site(out_root: Path, site_dir: Path) -> Path:
-    """Collect everything under ``out_root`` and write ``site_dir/index.html``."""
+    """Collect everything under ``out_root``; write ``site_dir/index.html`` + ``data/*.json``."""
     pattern_dir = out_root / "patterns"
     paths = sorted(pattern_dir.glob("*.json")) if pattern_dir.is_dir() else []
     patterns = [pattern_of(p, out_root) for p in paths]
     patterns.sort(key=lambda p: (p["behavior_name"], p["key"]))
     data = {
-        "patterns": patterns,
+        "patterns": [light_pattern(p) for p in patterns],
         "behaviors": behaviors_of(patterns),
         "clusters": clusters_of(out_root),
         "synth": synth_meta(out_root),
@@ -348,17 +384,36 @@ def build_site(out_root: Path, site_dir: Path) -> Path:
         },
         "source": str(out_root),
     }
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    page = TEMPLATE.replace("/*__DATA__*/", payload)
     site_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = site_dir / "data"
+    data_dir.mkdir(exist_ok=True)
+    sizes: list[tuple[str, int]] = []
+    warnings: list[str] = []
+    for pat in patterns:
+        target = data_dir / f"{pat['key']}.json"
+        target.write_text(json.dumps(heavy_pattern(pat), ensure_ascii=False, separators=(",", ":")))
+        size = target.stat().st_size
+        sizes.append((f"data/{target.name}", size))
+        if size > DATA_FILE_BUDGET:
+            warnings.append(f"data/{target.name} is {mb(size)} > {mb(DATA_FILE_BUDGET)} budget")
+
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     out = site_dir / "index.html"
-    out.write_text(page)
-    size_mb = out.stat().st_size / 1048576
+    out.write_text(TEMPLATE.replace("/*__DATA__*/", payload))
+    sizes.insert(0, ("index.html", out.stat().st_size))
+    total = sum(s for _, s in sizes)
+    if total > TOTAL_BUDGET:
+        warnings.append(f"site total is {mb(total)} > {mb(TOTAL_BUDGET)} budget")
+
+    for name, size in sizes:
+        print(f"{mb(size):>10}  {name}")
     print(
         f"{len(patterns)} patterns · {data['counts']['behaviors']} behaviors · "
         f"{data['counts']['runs']} agent runs · {data['counts']['mechanisms']} mechanisms "
-        f"· {len(data['clusters'])} clusters ({size_mb:.1f} MB)"
+        f"· {len(data['clusters'])} clusters · total {mb(total)} in {len(sizes)} files"
     )
+    for warning in warnings:
+        print(f"WARNING: {warning}")
     print(out.resolve())
     return out
 
@@ -518,8 +573,8 @@ function renderOverview(){
         `<td>${esc(cut(p.group_summary, 160))}</td>` +
         `<td class="num">${num(p.published_match_rate)}</td>` +
         `<td class="num">${num(p.elo, 0)}</td>` +
-        `<td><span class="tag ${p.reads.length?"y":"n"}">${p.reads.length?p.reads.length+" reads":"none"}</span></td>` +
-        `<td><span class="tag ${p.runs.length?"y":"n"}">${p.runs.length?p.runs.length:"none"}</span></td>` +
+        `<td><span class="tag ${p.has_diag?"y":"n"}">${p.has_diag?"yes":"none"}</span></td>` +
+        `<td><span class="tag ${p.n_runs?"y":"n"}">${p.n_runs||"none"}</span></td>` +
         `<td class="num">${p.n_mechanisms}</td></tr>`;
     h += `</tbody></table>`;
   }
@@ -635,10 +690,19 @@ function renderPattern(key){
 
   h += `<h3>prompt (verbatim)</h3><pre class="block">${esc(p.prompt)}</pre>`;
   if (p.rubric) h += `<details><summary>transcript rubric</summary><pre class="block">${esc(p.rubric)}</pre></details>`;
+  // the heavy part (rollouts, grids, transcripts) is fetched from data/<key>.json by loadPattern
+  h += `<div id="heavy" data-key="${esc(key)}"><p class="none">loading <span class="kkey">${esc(dataUrl(key))}</span> …</p></div>`;
+  return h;
+}
 
-  h += `<h3>rollouts</h3>`;
-  const mt = p.samples.filter(s => s.matched), um = p.samples.filter(s => !s.matched);
-  if (!p.samples.length) h += `<p class="none">no samples recorded.</p>`;
+function dataUrl(key){ return "data/" + encodeURIComponent(key) + ".json"; }
+
+// rollouts + OLens grids + agent runs, from the per-pattern data file
+function patternBody(p){
+  let h = `<h3>rollouts</h3>`;
+  const samples = p.samples || [];
+  const mt = samples.filter(s => s.matched), um = samples.filter(s => !s.matched);
+  if (!samples.length) h += `<p class="none">no samples recorded.</p>`;
   else h += `<div class="cols"><div><h3>matched (${mt.length})</h3>` +
     (mt.length ? mt.map(rollout).join("") : `<p class="none">none</p>`) +
     `</div><div><h3>unmatched (${um.length})</h3>` +
@@ -648,13 +712,30 @@ function renderPattern(key){
   if (p.fork && (p.fork.position!=null || p.fork.note))
     h += `<div class="card"><b>fork</b> <span class="kkey">position ${p.fork.position==null?"—":p.fork.position}</span>` +
       (p.fork.note ? `<div style="margin-top:4px">${esc(p.fork.note)}</div>` : "") + `</div>`;
-  if (!p.reads.length) h += `<p class="none">no diagnostics for this pattern yet.</p>`;
-  p.reads.forEach(r => { h += gridBlock(r); });
+  const reads = p.reads || [], runs = p.runs || [];
+  if (!reads.length) h += `<p class="none">no diagnostics for this pattern yet.</p>`;
+  reads.forEach(r => { h += gridBlock(r); });
 
   h += `<h2>Agent runs</h2>`;
-  if (!p.runs.length) h += `<p class="none">no agent runs for this pattern yet.</p>`;
-  p.runs.forEach(r => { h += runBlock(r); });
+  if (!runs.length) h += `<p class="none">no agent runs for this pattern yet.</p>`;
+  runs.forEach(r => { h += runBlock(r); });
   return h;
+}
+
+const heavyCache = {};
+function fillHeavy(key, html){
+  const slot = document.getElementById("heavy");
+  if (slot && slot.dataset.key === key) slot.innerHTML = html;
+}
+function loadPattern(key){
+  if (heavyCache[key]) return fillHeavy(key, patternBody(heavyCache[key]));
+  const url = dataUrl(key);
+  const fail = why => fillHeavy(key, `<p class="none">could not load <span class="kkey">${esc(url)}</span> (${esc(why)}). ` +
+    `Browsers block fetch() from a file:// page — serve the site dir instead: <span class="kkey">python -m http.server</span> then open the printed URL.</p>`);
+  if (typeof fetch !== "function") return fail("no fetch()");
+  fetch(url).then(r => { if (!r.ok) throw new Error(r.status + " " + r.statusText); return r.json(); })
+    .then(full => { heavyCache[key] = full; fillHeavy(key, patternBody(full)); })
+    .catch(err => fail(err && err.message ? err.message : String(err)));
 }
 
 // ------------------------------------------------------------------- cluster
@@ -683,10 +764,11 @@ function route(){
   const raw = (location.hash || "#/").replace(/^#\/?/, "");
   const parts = raw.split("/");
   const app = document.getElementById("app"), crumb = document.getElementById("crumb");
-  let html = "", trail = "overview";
+  let html = "", trail = "overview", pending = null;
   if (parts[0] === "pattern" && parts.length > 1){
     const key = decodeURIComponent(parts.slice(1).join("/"));
     html = renderPattern(key);
+    if (byKey[key]) pending = key;
     trail = `<a href="#/">overview</a> › pattern <span class="kkey">${esc(key)}</span>`;
   } else if (parts[0] === "cluster" && parts.length > 1){
     const i = parseInt(parts[1], 10);
@@ -700,6 +782,7 @@ function route(){
   app.innerHTML = html;
   app.querySelectorAll("tr[data-go]").forEach(tr => { tr.onclick = () => { location.hash = tr.dataset.go; }; });
   window.scrollTo(0, 0);
+  if (pending) loadPattern(pending);
 }
 window.addEventListener("hashchange", route);
 route();
