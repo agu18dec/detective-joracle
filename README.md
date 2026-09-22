@@ -291,7 +291,7 @@ schema is in `docs/architecture.md`.
 
 ```
 src/detective_joracle/
-  agent/       loop.py (RunRecord, Budget, run_tool_loop)  backends.py  prompts.py
+  agent/       loop.py (RunRecord, Budget, Limits, run_tool_loop[_async], run_many)  backends.py  prompts.py
   tools/       live.py (LiveClient, LiveTools, run_live_agent, stage 2)  arms.py  positions.py  fake.py
   presentation/select.py       judges/paper.py  judges/graded.py
   registry/    quirks.py + data/{quirk_registry,distractors,held_out_prompts}.json
