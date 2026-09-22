@@ -15,7 +15,7 @@ jobs:
           python-version: "3.12"
       - name: install
         run: |
-          uv venv --python 3.12 .venv
+          uv venv --python 3.12 --clear .venv
           VIRTUAL_ENV=$PWD/.venv uv pip install -e ".[dev]"
       - name: ruff
         run: |
