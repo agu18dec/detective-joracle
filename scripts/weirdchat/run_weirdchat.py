@@ -268,15 +268,18 @@ def _run_path(runs: Path, key: str, auditor: str, seed: int) -> Path:
 
 
 def _done(p: Path) -> bool:
-    """A run counts as done only if the agent finished; one that died on a provider error is
-    kept on disk for inspection but re-run next pass."""
+    """A run counts as done only if the agent finished WITH mechanisms; one that died on a
+    provider error, or ended with an empty result, is kept on disk for inspection but re-run
+    next pass."""
     if not p.exists():
         return False
     try:
         rec = json.loads(p.read_text()).get("record") or {}
-        return not str(rec.get("stopped_by", "")).startswith("error")
     except (OSError, json.JSONDecodeError):
         return False
+    if str(rec.get("stopped_by", "")).startswith("error"):
+        return False
+    return bool((rec.get("result") or {}).get("mechanisms"))
 
 
 def _fan_out(cfg: Settings, todo: list[Any], one: Any, tag: str) -> None:

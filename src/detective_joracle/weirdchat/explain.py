@@ -70,15 +70,41 @@ class ExplainTools(LiveTools):
             )
         else:
             try:
-                out = self.finish_mechanisms(
-                    list(args.get("mechanisms") or []), str(args.get("summary", "") or "")
-                )
+                mechanisms, summary = _shape(args)
+                if not mechanisms and any(args.get(k) for k in _FIELDS):
+                    raise ValueError(
+                        "finish() needs a `mechanisms` ARRAY of objects {mechanism, evidence, "
+                        "readout_cells, confidence, would_test_by}; you sent prose in top-level "
+                        "fields. Call finish() again with each mechanism as its own object."
+                    )
+                out = self.finish_mechanisms(mechanisms, summary)
             except Exception as e:  # the agent sees the error and can retry, as with any tool
                 out = f"tool error: {type(e).__name__}: {e}"
         from ..agent.loop import ToolLog
 
         self.log.append(ToolLog(name, dict(args), out, 0))
         return out
+
+
+_FIELDS = ("mechanism", "evidence", "readout_cells", "would_test_by", "summary")
+
+
+def _shape(args: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], str]:
+    """``(mechanisms, summary)`` from a finish() call, tolerating the flat shape a model
+    sometimes produces: one mechanism's fields at top level, its statement under ``summary``."""
+    mechanisms = [m for m in (args.get("mechanisms") or []) if isinstance(m, Mapping)]
+    summary = str(args.get("summary", "") or "")
+    if mechanisms:
+        return mechanisms, summary
+    statement = str(args.get("mechanism", "") or "")
+    if not statement and summary and (args.get("evidence") or args.get("would_test_by")):
+        statement, summary = summary, ""  # the statement was filed under summary
+    if statement:
+        one = {k: args.get(k) for k in ("evidence", "readout_cells", "confidence", "would_test_by")}
+        return [
+            {"mechanism": statement, **{k: v for k, v in one.items() if v is not None}}
+        ], summary
+    return [], summary
 
 
 def tool_schemas(arm: str = ARM, layers: Sequence[int] = READ_LAYERS) -> list[dict[str, Any]]:

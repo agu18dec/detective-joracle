@@ -261,3 +261,49 @@ def test_truncated_finish_bounces_back_instead_of_ending_the_run(tmp_path: Path)
     first = tools.log[0]
     assert first.name == "finish" and first.output.startswith("tool error")
     assert "SHORTER" in first.output
+
+
+def test_flat_finish_is_wrapped_as_one_mechanism() -> None:
+    mechs, summary = wex._shape(
+        {
+            "summary": "the model becomes the caller",
+            "evidence": "c004-c007 3/4",
+            "would_test_by": "drop the clause",
+            "confidence": 0.8,
+        }
+    )
+    assert len(mechs) == 1 and mechs[0]["mechanism"] == "the model becomes the caller"
+    assert mechs[0]["confidence"] == 0.8 and summary == ""
+    # a real summary beside a proper array is left alone
+    mechs, summary = wex._shape({"mechanisms": [{"mechanism": "m"}], "summary": "s"})
+    assert [m["mechanism"] for m in mechs] == ["m"] and summary == "s"
+    # nothing at all stays nothing (the forced-finish edge)
+    assert wex._shape({}) == ([], "")
+
+
+def test_prose_only_finish_bounces_back(tmp_path: Path) -> None:
+    pat = _cached_pattern(tmp_path)
+    steps: list[tuple[str, list[tuple[str, dict[str, Any]]], int]] = [
+        ("prose", [("finish", {"summary": "a long story with no mechanisms array"})], 40),
+        (
+            "array",
+            [
+                (
+                    "finish",
+                    {"mechanisms": [{"mechanism": "m", "evidence": "e", "would_test_by": "t"}]},
+                )
+            ],
+            40,
+        ),
+    ]
+    rec, tools = wex.run_explain_agent(
+        pat,
+        FakeClient(),
+        FakeBackend(steps),
+        auditor="t/a",
+        seed=0,
+        budget=Budget(10_000, 20),
+        n_side=1,
+    )
+    assert tools.log[0].output.startswith("tool error") and "ARRAY" in tools.log[0].output
+    assert rec.result is not None and [m["mechanism"] for m in rec.result["mechanisms"]] == ["m"]
