@@ -1,0 +1,72 @@
+[project]
+name = "detective-joracle"
+version = "0.1.0"
+description = "Audit language models for hidden behaviors with an investigator agent that has black-box tools plus an interpretability-lens tool."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "detective-joracle contributors" }]
+keywords = ["interpretability", "auditing", "language-models", "agents", "evaluation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "requests>=2.31",
+    "openai>=1.40",
+    "numpy>=1.26",
+]
+
+[project.urls]
+Homepage = "https://github.com/agu18dec/detective-joracle"
+Documentation = "https://github.com/agu18dec/detective-joracle/tree/main/docs"
+Changelog = "https://github.com/agu18dec/detective-joracle/blob/main/CHANGELOG.md"
+"AuditBench (upstream)" = "https://github.com/safety-research/auditing-agents"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "types-requests"]
+plot = ["matplotlib>=3.8"]
+serve = ["modal>=1.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/detective_joracle"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+extend-exclude = ["servers"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["E501"]  # long strings in prompts/HTML are wrapped by hand where it matters
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/build_viewer.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true                 # includes disallow_untyped_defs, no_implicit_optional, ...
+warn_unused_ignores = true
+warn_unreachable = true
+files = ["src", "tests"]
+exclude = ["servers", "scripts", "examples"]
+
+[[tool.mypy.overrides]]
+module = ["openai", "openai.*", "requests", "requests.*", "matplotlib", "matplotlib.*", "modal", "modal.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

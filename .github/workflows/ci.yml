@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          uv venv --python 3.12 .venv
+          VIRTUAL_ENV=$PWD/.venv uv pip install -e ".[dev]"
+      - name: ruff
+        run: |
+          .venv/bin/ruff check src tests examples scripts
+          .venv/bin/ruff format --check src tests examples scripts
+      - name: mypy
+        run: .venv/bin/mypy
+      - name: pytest
+        run: .venv/bin/python -m pytest -q
+      - name: end-to-end against the mock target
+        run: examples/run_end_to_end.sh
