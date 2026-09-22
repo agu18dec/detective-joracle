@@ -239,7 +239,8 @@ def make_backend_factory(
     kind: str, *, async_client: bool = False
 ) -> Callable[[str], Backend] | Callable[[str], AsyncBackend]:
     """``openrouter`` -> an OpenAI client on OpenRouter (``OPENROUTER_API_KEY`` per command);
-    ``openai`` -> a plain client on ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``. ``async_client``
+    ``openai`` -> a plain client on ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``; ``anthropic`` ->
+    Anthropic's OpenAI-compatible endpoint on ``ANTHROPIC_API_KEY``. ``async_client``
     builds ``openai.AsyncOpenAI`` and the factory returns :class:`AsyncBackend` instances."""
     from openai import AsyncOpenAI, OpenAI
 
@@ -256,8 +257,19 @@ def make_backend_factory(
                 "OPENAI_API_KEY missing (pass it per command; OPENAI_BASE_URL optional)"
             )
         client = cls(max_retries=10)
+    elif kind == "anthropic":
+        # Anthropic's OpenAI-compatible endpoint: Claude auditors with no OpenRouter in the
+        # path. Tool calls, forced tools, tool-result turns and cache_control breakpoints all
+        # work on it. Model ids are Anthropic's own (claude-opus-5, claude-haiku-4-5-20251001).
+        akey = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not akey.startswith("sk-ant-"):
+            raise SystemExit("ANTHROPIC_API_KEY missing or malformed (pass it per command)")
+        client = cls(api_key=akey, base_url="https://api.anthropic.com/v1/", max_retries=6)
     else:
-        raise ValueError(f"unknown backend kind {kind!r} (openrouter | openai)")
+        raise ValueError(f"unknown backend kind {kind!r} (openrouter | openai | anthropic)")
+
+    def _is_claude(kind_: str, model: str) -> bool:
+        return kind_ == "anthropic" or model.startswith("anthropic/")
 
     def extra_for(model: str) -> dict[str, Any]:
         extra: dict[str, Any] = {"usage": {"include": True}} if kind == "openrouter" else {}
@@ -268,13 +280,13 @@ def make_backend_factory(
     def factory(model: str) -> Backend:
         """A :class:`Backend` for ``model`` on this client (provider extras chosen by model id)."""
         return openai_compatible_backend(
-            client, model, extra_body=extra_for(model), cache=model.startswith("anthropic/")
+            client, model, extra_body=extra_for(model), cache=_is_claude(kind, model)
         )
 
     def async_factory(model: str) -> AsyncBackend:
         """The :class:`AsyncBackend` twin of ``factory``."""
         return async_openai_compatible_backend(
-            client, model, extra_body=extra_for(model), cache=model.startswith("anthropic/")
+            client, model, extra_body=extra_for(model), cache=_is_claude(kind, model)
         )
 
     return async_factory if async_client else factory
