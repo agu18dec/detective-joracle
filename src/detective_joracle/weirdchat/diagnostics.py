@@ -22,6 +22,10 @@ from .data import Pattern
 LENS = "olens"
 READ_POSITIONS = "all"
 DEFAULT_K = 1
+# How much of a reply is read. The server thins positions to fit its cell cap, so reading a
+# 1400-token reply costs the same as a 400-token one but spreads the same cells thinner; the
+# commitment happens early, so read the opening at full resolution instead.
+COMPLETION_CHARS = 1500
 
 _WORD = re.compile(r"\S+\s*")
 
@@ -83,15 +87,17 @@ def diagnose(
     k: int = DEFAULT_K,
     n_side: int = 1,
     seed: int = 0,
+    completion_chars: int = COMPLETION_CHARS,
 ) -> dict[str, Any]:
     """The per-pattern diagnostic bundle: reads on both sides plus the fork between them."""
     reads: list[dict[str, Any]] = []
     for label, samples in (("matched", pattern.matched), ("unmatched", pattern.unmatched)):
         for s in samples[:n_side]:
+            text = s.text[:completion_chars]
             res = read_rollout(
                 client,
                 pattern.prompt,
-                s.text,
+                text,
                 layers=layers,
                 k=k,
                 seed=seed + s.sample_index,
@@ -102,7 +108,7 @@ def diagnose(
                     "sample_index": s.sample_index,
                     "conversation": {
                         "messages": [{"role": "user", "content": pattern.prompt}],
-                        "completion": s.text,
+                        "completion": text,
                     },
                     "readout": res,
                 }
@@ -113,4 +119,4 @@ def diagnose(
     return {"pattern_key": pattern.pattern_key, "lens": LENS, "reads": reads, "fork": fork}
 
 
-__all__ = ["DEFAULT_K", "LENS", "diagnose", "fork_of", "read_rollout"]
+__all__ = ["COMPLETION_CHARS", "DEFAULT_K", "LENS", "diagnose", "fork_of", "read_rollout"]

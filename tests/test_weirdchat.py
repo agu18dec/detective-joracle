@@ -230,3 +230,34 @@ def test_synth_collect_keeps_attribution(tmp_path: Path) -> None:
     assert items[0]["behavior_id"] == pat.behavior_id
     # no items -> no LLM call, no crash
     assert wsyn.cluster([])["clusters"] == []
+
+
+def test_truncated_finish_bounces_back_instead_of_ending_the_run(tmp_path: Path) -> None:
+    pat = _cached_pattern(tmp_path)
+    steps: list[tuple[str, list[tuple[str, dict[str, Any]]], int]] = [
+        ("cut off", [("finish", {"_raw": '{"summary": "the model adop'})], 40),
+        (
+            "shorter",
+            [
+                (
+                    "finish",
+                    {"mechanisms": [{"mechanism": "m", "evidence": "e", "would_test_by": "t"}]},
+                )
+            ],
+            40,
+        ),
+    ]
+    rec, tools = wex.run_explain_agent(
+        pat,
+        FakeClient(),
+        FakeBackend(steps),
+        auditor="test/auditor",
+        seed=0,
+        budget=Budget(output_tokens=10_000, max_calls=20),
+        n_side=1,
+    )
+    assert rec.stopped_by == "finish"
+    assert rec.result is not None and [m["mechanism"] for m in rec.result["mechanisms"]] == ["m"]
+    first = tools.log[0]
+    assert first.name == "finish" and first.output.startswith("tool error")
+    assert "SHORTER" in first.output

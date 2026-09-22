@@ -58,6 +58,9 @@ class Settings:
     seeds: int = 1
     budget_tokens: int = 25_000
     max_calls: int = 400
+    # output cap per turn; the finish() call carries every mechanism's evidence in one JSON
+    # object, and at 4000 a reasoning model's finish was cut mid-argument (0 mechanisms parsed)
+    max_tokens: int = 16_000
     select: str = "all"  # readout presentation (presentation.select)
     workers: int = 4  # parallel patterns (= server containers in use)
     limit: int = 0  # cap the patterns this invocation processes (0 = all)
@@ -192,7 +195,7 @@ def stage_diagnose(cfg: Settings) -> None:
 
 def stage_agent(cfg: Settings) -> None:
     """One explain run per (pattern, seed): the investigator with chat plus the lens."""
-    factory = make_backend_factory(cfg.backend)
+    factory = make_backend_factory(cfg.backend, max_tokens=cfg.max_tokens)
     layers = [int(x) for x in _csv(cfg.layers)]
     budget = Budget(output_tokens=cfg.budget_tokens, max_calls=cfg.max_calls)
     runs = root(cfg) / "runs"

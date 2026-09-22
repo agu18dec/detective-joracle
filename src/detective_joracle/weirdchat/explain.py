@@ -61,12 +61,20 @@ class ExplainTools(LiveTools):
         """Dispatch, intercepting ``finish`` (which carries mechanisms in this mode)."""
         if name != "finish":
             return super().call(name, args)
-        try:
-            out = self.finish_mechanisms(
-                list(args.get("mechanisms") or []), str(args.get("summary", "") or "")
+        if "_raw" in args:  # the backend could not parse the arguments: the turn was cut short
+            out = (
+                f"tool error: your finish() arguments were not valid JSON ({len(str(args['_raw']))} "
+                "characters received — the turn was truncated). Call finish() again with SHORTER "
+                "fields: one or two sentences of evidence per mechanism, cells as brief "
+                "references, and no more mechanisms than you have evidence for."
             )
-        except Exception as e:  # the agent sees the error and can retry, as with any tool
-            out = f"tool error: {type(e).__name__}: {e}"
+        else:
+            try:
+                out = self.finish_mechanisms(
+                    list(args.get("mechanisms") or []), str(args.get("summary", "") or "")
+                )
+            except Exception as e:  # the agent sees the error and can retry, as with any tool
+                out = f"tool error: {type(e).__name__}: {e}"
         from ..agent.loop import ToolLog
 
         self.log.append(ToolLog(name, dict(args), out, 0))
@@ -115,8 +123,8 @@ def run_explain_agent(
         select=select,
         allow_reference=False,
     )
-    rollouts = rollout_ids(pattern, n_side)
-    for cid, _, text in rollouts:
+    rollouts = [(cid, m, t[:rollout_chars]) for cid, m, t in rollout_ids(pattern, n_side)]
+    for cid, _, text in rollouts:  # the agent reads exactly the text it was shown
         tools.seed_conversation(cid, pattern.prompt, text)
     rec = RunRecord(ORGANISM, CONDITION, arm, auditor, seed)
     run_tool_loop(
@@ -130,7 +138,7 @@ def run_explain_agent(
             prompt=pattern.prompt,
             match_rate=pattern.published_match_rate,
             n_samples=len(pattern.samples),
-            rollouts=[(cid, m, t[:rollout_chars]) for cid, m, t in rollouts],
+            rollouts=rollouts,
         ),
         backend,
         budget or Budget(max_calls=400),
