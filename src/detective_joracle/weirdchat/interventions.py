@@ -220,12 +220,23 @@ def run_arms(
     }
 
 
-def rejudge(result: dict[str, Any], rubric: str, *, model: str, concurrency: int = 8) -> int:
+def rejudge(
+    result: dict[str, Any],
+    rubric: str,
+    *,
+    model: str,
+    concurrency: int = 8,
+    everything: bool = False,
+) -> int:
     """Retry the judge on every reply whose verdict is missing (a failed call), in place; returns
-    how many verdicts were filled. Rates, intervals and the Fisher test are recomputed."""
+    how many verdicts were filled. Rates, intervals and the Fisher test are recomputed.
+    ``everything=True`` re-judges every reply with ``model`` (a different judge, the same replies)
+    and records it as the result's ``judge_model``."""
     filled = 0
+    if everything:
+        result["judge_model"] = model
     for a in result["arms"]:
-        idx = [i for i, v in enumerate(a["verdicts"]) if v is None]
+        idx = [i for i, v in enumerate(a["verdicts"]) if everything or v is None]
         if not idx:
             continue
         v, e = judge(
