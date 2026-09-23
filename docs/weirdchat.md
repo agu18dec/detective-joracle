@@ -270,8 +270,9 @@ randomised) per pattern (`agreement.json`, and the "arms compared" dialog in the
   95 of 105 J-lens mechanisms (90%) have a black-box counterpart, top hypotheses agree in 7 of
   21, 10 J-lens-only vs 39 black-box-only. (The blind reader's top-match count moved 9/20 → 7/21
   between two passes over largely the same records: treat that number as ±2.)
-- **NLA (L42) vs black-box** (9 of 21 patterns — the NLA arm is slow, ~6 min per read on one
-  container, and still running; `agreement_nla_vs_blackbox.json`): 42 of 54 NLA mechanisms (78%)
+- **NLA (L42) vs black-box** (9 of 21 patterns — the NLA arm was stopped there: its verbalizer runs reference
+  kernels on one container, reads took 6–27 min, and stalled runs had to be killed and resumed
+  twice; `agreement_nla_vs_blackbox.json`. Resume with `stage=agent arm=nla nla=…` to finish.): 42 of 54 NLA mechanisms (78%)
   have a black-box counterpart, top hypotheses agree in 5 of 9, 12 NLA-only vs 14 black-box-only.
   NLA's themes on those 9 (`synth_nla.json`): persona/role capture from the framing premise ·
   capability self-check never triggered · genre completion from document templates · a single
