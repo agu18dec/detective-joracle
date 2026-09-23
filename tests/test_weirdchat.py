@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from detective_joracle.agent.backends import FakeBackend
 from detective_joracle.agent.loop import Budget
@@ -519,5 +519,6 @@ def test_prediction_scoring(monkeypatch: Any) -> None:
     )
     assert [r["verdict"] for r in out["arms"]] == ["right", "wrong", "not_predicted"]
     assert (out["right"], out["wrong"], out["not_predicted"]) == (1, 1, 1)
-    assert wpred.outcome(inter["arms"][2]) == "none" and wpred.outcome(inter["arms"][1]) == "down"
+    arms = cast(list[dict[str, Any]], inter["arms"])
+    assert wpred.outcome(arms[2]) == "none" and wpred.outcome(arms[1]) == "down"
     assert wpred.summarise([out])["arms"] == 3
