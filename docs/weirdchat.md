@@ -195,12 +195,18 @@ pattern and label:
 
 | judge | n | agreement | κ | tp / tn / fp / fn |
 |---|---|---|---|---|
-| **Claude Opus 5** (judge of record) | 286 | 0.83 | **0.66** | 104 / 134 / 12 / 36 |
+| **Gemma 4 31B** (the study's own judge; judge of record) | 294 | 0.84 | **0.69** | 117 / 131 / 16 / 30 |
+| Claude Opus 5 | 286 | 0.83 | 0.66 | 104 / 134 / 12 / 36 |
 | Gemini 3.8 Flash | 294 | 0.76 | 0.51 | 85 / 137 / 10 / 62 |
 | Claude Haiku 4.5 | 294 | 0.70 | 0.40 | 76 / 130 / 17 / 71 |
 
-All three under-flag relative to the study's judge (few false alarms, many misses), Opus least.
-Arm rates are therefore on a slightly conservative scale; deltas between arms are what to read.
+Gemma 4 31B is the model WeirdChat judged with (`google/gemma-4-31b-it` on OpenRouter); the
+residual disagreement is prompt and sampling differences from Transluce's judging code, not a
+different model. The others under-flag relative to it (few false alarms, many misses) — and
+**per rubric the gap can be large**: on the purging rubric Opus's recall against the study's
+labels was 3/20, so its 6% baseline there was a judge artifact (57 of 64 replies carried the
+concealment tips the study's judge counts). Every intervention arm is therefore judged with
+Gemma; the Opus tables are kept in the logs for comparison.
 `outputs/weirdchat/interventions/calibration_<model>.json` holds each table.
 
 **Reply-length caveat (found 2026-09-23).** The lens server's `chat` endpoint clamps replies at
