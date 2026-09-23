@@ -522,3 +522,15 @@ def test_prediction_scoring(monkeypatch: Any) -> None:
     arms = cast(list[dict[str, Any]], inter["arms"])
     assert wpred.outcome(arms[2]) == "none" and wpred.outcome(arms[1]) == "down"
     assert wpred.summarise([out])["arms"] == 3
+
+
+def test_finish_accepts_mechanisms_serialised_as_text() -> None:
+    as_text = json.dumps(
+        [{"mechanism": "m1", "evidence": "e", "would_test_by": "t"}, {"mechanism": "m2"}]
+    )
+    mechs, _ = wex._shape({"mechanisms": as_text, "summary": "s"})
+    assert [m["mechanism"] for m in mechs] == ["m1", "m2"]
+    mechs, _ = wex._shape({"mechanisms": ["just a statement", ""]})
+    assert [m["mechanism"] for m in mechs] == ["just a statement"]
+    mechs, _ = wex._shape({"mechanisms": "not json at all"})
+    assert [m["mechanism"] for m in mechs] == ["not json at all"]

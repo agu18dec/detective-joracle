@@ -93,7 +93,20 @@ _FIELDS = ("mechanism", "evidence", "readout_cells", "would_test_by", "summary")
 def _shape(args: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], str]:
     """``(mechanisms, summary)`` from a finish() call, tolerating the flat shape a model
     sometimes produces: one mechanism's fields at top level, its statement under ``summary``."""
-    mechanisms = [m for m in (args.get("mechanisms") or []) if isinstance(m, Mapping)]
+    raw = args.get("mechanisms") or []
+    if isinstance(raw, str):  # the array serialised as text — decode it, or treat it as one item
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = [{"mechanism": raw}]
+    if isinstance(raw, Mapping):
+        raw = [raw]
+    mechanisms: list[Mapping[str, Any]] = []
+    for m in raw if isinstance(raw, list) else []:
+        if isinstance(m, Mapping):
+            mechanisms.append(m)
+        elif isinstance(m, str) and m.strip():  # a list of statements
+            mechanisms.append({"mechanism": m})
     summary = str(args.get("summary", "") or "")
     if mechanisms:
         return mechanisms, summary
