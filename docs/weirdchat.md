@@ -242,7 +242,7 @@ significance); *not predicted* = the run said nothing about that arm. 16 arms ov
 |---|---|---|---|---|
 | OLens | **11** | 5 | 0 | 5 |
 | black-box | 10 | 3 | 3 | 5 |
-| J-lens (4 of 5 patterns done at time of writing) | 8 | 3 | 2 | 4 |
+| J-lens | 9 | 4 | 3 | 5 |
 
 Three caveats that matter more than the ordering. (1) The arms were written from the **OLens
 run's own** `would_test_by`, so OLens has a built-in coverage advantage (0 "not predicted") — a
@@ -265,9 +265,10 @@ randomised) per pattern (`agreement.json`, and the "arms compared" dialog in the
 - **14 mechanisms are lens-only** vs 35 black-box-only. The lens-only ones are almost all the
   boundary claims — "two co-existing reply plans at the identical prefix, resolved by sampling",
   "three competing openings at the chat boundary" — plus a few weak/secondary readings.
-- **J-lens vs black-box** (20 of 21 patterns at time of writing, `agreement_jlens_vs_blackbox.json`):
-  the same profile — 92 of 104 J-lens mechanisms (88%) have a black-box counterpart, top
-  hypotheses agree in 9 of 20, 12 J-lens-only vs 33 black-box-only.
+- **J-lens vs black-box** (21 patterns, `agreement_jlens_vs_blackbox.json`): the same profile —
+  95 of 105 J-lens mechanisms (90%) have a black-box counterpart, top hypotheses agree in 7 of
+  21, 10 J-lens-only vs 39 black-box-only. (The blind reader's top-match count moved 9/20 → 7/21
+  between two passes over largely the same records: treat that number as ±2.)
 
 Reading: with a strong investigator, neither lens changed what was concluded; they changed the
 evidence type, adding direct observations of the pre-commitment state that the black-box arm
