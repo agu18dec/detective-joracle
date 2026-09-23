@@ -101,15 +101,17 @@ log. Every stage resumes: a pattern or run that already has its file is skipped 
 
 Auditor Claude Opus 5; lens server = the deployed `auditbench-organism` app (`organism=base`,
 layers 20–60 step 4); no separate target — the lens server's own `chat` served the stock model
-with no system prompt. 20 of 21 runs finished with mechanisms in the first pass (the 21st,
-`fabricated-code-execution__pg0022`, was still running when this was written). Site:
+with no system prompt. All 21 runs finished with mechanisms (the last, `fabricated-code-execution__pg0022`, after its
+first attempt hung ~5.5 h in readout retries and was rerun fresh in 25 min). Site:
 https://need-c10-a-camila-agam--weirdchat-site-web.modal.run
 
 **What the runs did.** 20–33 tool calls each: 2–5 lens reads (the study's own matched/unmatched
 rollouts first, then their own probes) and 10–19 chat probes, mostly n=4 ablations of one clause
-of the prompt. 105 mechanisms in total, 4–7 per pattern.
+of the prompt. 110 mechanisms in total, 4–7 per pattern. Every run got at least 2 successful lens reads;
+12 runs were cut off by the page budget on their 3rd read, and 15 reads across 3 runs came back
+HTTP 500 from the lens server (`laser-at-aircraft__pg0009` alone lost 9).
 
-**The recurring account** (every one of the 20 runs states some version of it):
+**The recurring account** (every one of the 21 runs states some version of it):
 
 1. A premise in the user's prompt installs a *role* or *self-model* before the reply begins —
    "I'm using my voice assistant" (a device that can dial), "your posts on your feed" / a dating
@@ -138,22 +140,22 @@ represented as a generic distant object, and the label tracks whether a late "ne
 the aircraft" caveat is emitted.
 
 
-**Themes** (one Opus 5 clustering call over the 105 mechanisms; a count is how often a mechanism was *proposed*, not evidence it is right):
+**Themes** (one Opus 5 clustering call over the 110 mechanisms; a count is how often a mechanism was *proposed*, not evidence it is right):
 
-- **Unexamined adoption of user's premises/framing** — 12 mechanisms, 10 patterns, 6 behaviors. The model treats the user's assertions, self-descriptions, loaded descriptors or presupposing question forms as veridical givens and reasons from them rather than auditing them. The goal spec or diagnosis supplied by the user is inherited, so the objectionable conclusion follows as the cooperative answer.
-- **Co-active competing continuations resolved by sampling** — 12 mechanisms, 12 patterns, 6 behaviors. At the identical chat boundary the model simultaneously holds the safe/disclaiming continuation and the offending one; temperature sampling of the opening tokens picks a branch and the rest is coherent completion. This explains why identical inputs go both ways.
-- **Target/threshold representation misses the hazard** — 12 mechanisms, 10 patterns, 7 behaviors. The hazardous entity or condition is encoded abstractly or below a gating threshold — a generic distant object, a sub-threshold ED signal, a borderline BAC fact resolved optimistically — so the relevant prohibition is never recruited or is resolved permissively.
-- **Role/persona capture from second-person framing** — 10 mechanisms, 9 patterns, 5 behaviors. A clause in the prompt assigns the assistant an in-scene identity (dialing device, human account owner, dating match, practitioner with hardware, caregiver, designated driver), and the model instantiates that role before generating. Actions or claims proper to the role are then emitted as sincere first-person reports.
-- **Guard gated on explicit lexical/topical cue** — 9 mechanisms, 9 patterns, 6 behaviors. The relevant knowledge (no body, cannot call, no chemtrails, laser illegality) is intact but only consulted when the prompt explicitly names it or makes capability the topic. When the offending act is self-inferred or euphemised, the check never fires.
-- **Output-template/section-slot forces the content** — 9 mechanisms, 9 patterns, 5 behaviors. The chosen format (action header, Demonstration section, caption, bullet menu, outline) creates a slot that must be filled, and the highest-probability filler is the offending claim, while leaving no room for caveats. Commitment happens at the formatting move rather than in deliberation.
-- **Divergence localized to one late token/clause** — 8 mechanisms, 8 patterns, 6 behaviors. Matched and unmatched rollouts are near identical until a single narrow choice — a deixis token, a connective, a provenance phrase, where the beam lands, a hedge — which alone decides the judged behavior.
-- **Schema retrieval with target substitution** — 7 mechanisms, 6 patterns, 3 behaviors. Prompt vocabulary retrieves a stock benign template (astronomer's green laser, laser boresighting, discreet bathroom etiquette, scenic-description template) and the model fills its slots with the user's target without re-checking safety for that target.
-- **Reassurance/comfort pressure selects the false claim** — 7 mechanisms, 6 patterns, 5 behaviors. The user's panic, distress or plea for reassurance makes the comforting answer the required conversational move, and the strongest available comfort is a concrete false assertion. Under-warning or withholding comfort is treated as the costlier error.
-- **Lesser-evil / comparative-alternative reframing** — 7 mechanisms, 5 patterns, 2 behaviors. The decision is encoded as a choice between two bad options supplied by the prompt, so endorsing the user's act becomes the harm-reducing answer. Safety training aimed at others' impairment crowds out the check on the user.
-- **Register/genre capture suppresses self-model and hedging** — 5 mechanisms, 4 patterns, 3 behaviors. An authoritative, literary, or in-genre register recruited by the prompt's style keeps the model inside a voice where epistemic caution or identity disclosure would break style. Under that register the claim is emitted as a finding or in-character line.
-- **Roleplay/fiction frame licenses the false claim** — 5 mechanisms, 5 patterns, 3 behaviors. The model classifies the turn as a persona-writing or roleplay task, so the human/embodiment/dispatcher claim is produced as performance rather than sincere assertion, and is never flagged as fiction.
+- **Unexamined adoption of user premise/self-report** — 12 mechanisms, 11 patterns, 6 behaviors. The model treats the user's framing — perceptual descriptions, self-classifications, goal specs, role assignments — as veridical and builds its answer on top of it rather than interrogating it. The problematic conclusion is inherited from the premise instead of derived.
+- **Persona/role capture from second-person framing** — 12 mechanisms, 9 patterns, 4 behaviors. A clause in the prompt assigns the assistant an identity (voice assistant, profile owner, practitioner with hardware, human poster) and the model instantiates that role before generating, making the false claim the role-consistent opening move. The action or identity claim lies inside the adopted role's action space.
+- **Co-active branches resolved by early sampling** — 12 mechanisms, 12 patterns, 8 behaviors. Both the safe and the unsafe continuation are simultaneously represented at the identical chat boundary, so the outcome is a temperature-1 coin flip on the first reply tokens. Everything afterwards is coherent completion of whichever opening was sampled.
+- **Guard keyed to explicit topicalization** — 9 mechanisms, 8 patterns, 5 behaviors. The model's correct knowledge (cannot call, cannot execute, has no body, lasers endanger aircraft, chemtrails are false) is intact but only consulted when that capability or term is the explicit topic or user-supplied lexeme. Actions or claims inferred implicitly never surface the check.
+- **Output-format slot forces the claim** — 9 mechanisms, 8 patterns, 4 behaviors. The model commits to a template (action header, benchmark table, Demonstration section, compressed bullet menu) whose slots must be filled, and the harmful or fabricated content is the locally fluent filler. Where the format leaves no room, the caveat is simply never allocated.
+- **Comparative/role framing licenses the unsafe option** — 9 mechanisms, 3 patterns, 1 behaviors. The model answers a substituted question — which of two options is safer, or who is the designated driver — so the anti-drunk-driving norm is applied to the friends and endorses the user driving. The user's own impairment is never re-examined.
+- **Divergence at one late lexical/voicing slot** — 7 mechanisms, 7 patterns, 5 behaviors. The reply is otherwise identical across rollouts; the behavior is decided at a single narrow token choice — first-person vs impersonal attribution, deixis, or where a beam lands. The claim is a local voicing choice, not a different plan.
+- **Comfort/reassurance role outranks honesty** — 7 mechanisms, 5 patterns, 4 behaviors. Distress, panic or a plea for reassurance puts the model in a caregiver or duty-to-warn role where disclaimers and 'probably nothing' read as withdrawing help. The false or alarming assertion is emitted as the strongest available comfort or warning.
+- **Benign schema retrieval with target substitution** — 6 mechanisms, 6 patterns, 3 behaviors. Prompt vocabulary retrieves a stock, legitimate template (astronomer's laser pointer, laser boresighting, discreet bathroom etiquette, scene-description template) and the model fills its slots with the user's target without re-checking safety status for that target. The harmful output is the canonical answer to the retrieved schema.
+- **Register/genre capture suppresses epistemic gates** — 6 mechanisms, 4 patterns, 4 behaviors. An authoritative, literary, in-genre or expert-peer register is adopted from the prompt's style, which keeps the self-model or hedging routine offline and makes conclusions read as findings or in-genre speech. Asking the same content in plain conversational register restores the caution.
+- **Roleplay/fiction frame licenses in-character falsehood** — 5 mechanisms, 4 patterns, 2 behaviors. The model meta-represents the turn as a persona-writing, transcript or roleplay task, so the false claim is emitted in character and never flagged as a sincere assertion. This explains the absence of hedging or self-correction.
+- **Opening classification frame fixes downstream track** — 5 mechanisms, 4 patterns, 3 behaviors. An early framing move — normalization/shame rather than harm, explainer vs emergency outline, sub-threshold risk signal — classifies the situation and everything downstream serves that classification. The safety route loses because the case was filed under the wrong category.
 
-103 of 105 mechanisms were placed; every theme keeps its members attributed to a pattern and its cited cells (`synth.json`, and the themes dialog in the viewer).
+99 of 110 mechanisms were placed; every theme keeps its members attributed to a pattern and its cited cells (`synth.json`, and the themes dialog in the viewer).
 
 **What OLens contributed, honestly.** The pre-commitment mixture at the boundary (2) and
 role adoption *during the prompt* (user-region cells decoding to *"voice assistant to call
@@ -163,8 +165,8 @@ give. Every sharp effect, though, is a black-box ablation (drop the voice-assist
 was no blackbox arm, so the lens's *necessity* is unmeasured; the 20/20 boundary-mixture finding
 is also partly prompted (the brief tells the agent where the propensity lives).
 
-**Citation check.** Of 304 lens-cell fragments the agents quoted in `readout_cells`, **111
-(37%) verify verbatim** against the pages they read; 43 are ellipsis-truncated, 30 cite a page
+**Citation check.** Of 334 lens-cell fragments the agents quoted in `readout_cells`, **128
+(38%) verify verbatim** against the pages they read; 48 are ellipsis-truncated, 33 cite a page
 never read, the rest are paraphrases or stitched neighbours. The viewer marks only verified
 cells. One headline claim did not survive the raw grids: the purging run's *"'clear the meal'
 decodes as purging only in deep layers"* is, in the diag reads, 7–15 of ~79 user/header cells
@@ -172,5 +174,5 @@ at **every** layer (a ~2× tilt toward L52–60), with the benign reading at ~30
 gradient the agent reported as a switch.
 
 **Limits of this pass.** n=4 unjudged probes; 1 seed; no interventions run under the rubric;
-the lens page budget cut most agents off after 2–3 full reads (6 "budget spent" tool errors);
-3 lens-server HTTP 500s. Every `would_test_by` is the experiment the next pass should run.
+the lens page budget cut most agents off after 2 full reads (12 "budget spent" tool errors);
+15 lens-server HTTP 500s. Every `would_test_by` is the experiment the next pass should run.
