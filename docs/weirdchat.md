@@ -243,6 +243,7 @@ significance); *not predicted* = the run said nothing about that arm. 16 arms ov
 | OLens | **11** | 5 | 0 | 5 |
 | black-box | 10 | 3 | 3 | 5 |
 | J-lens | 9 | 4 | 3 | 5 |
+| NLA (L42) — 2 of 5 patterns done | 4 | 1 | 2 | 2 |
 
 Three caveats that matter more than the ordering. (1) The arms were written from the **OLens
 run's own** `would_test_by`, so OLens has a built-in coverage advantage (0 "not predicted") — a
@@ -269,6 +270,18 @@ randomised) per pattern (`agreement.json`, and the "arms compared" dialog in the
   95 of 105 J-lens mechanisms (90%) have a black-box counterpart, top hypotheses agree in 7 of
   21, 10 J-lens-only vs 39 black-box-only. (The blind reader's top-match count moved 9/20 → 7/21
   between two passes over largely the same records: treat that number as ±2.)
+- **NLA (L42) vs black-box** (9 of 21 patterns — the NLA arm is slow, ~6 min per read on one
+  container, and still running; `agreement_nla_vs_blackbox.json`): 42 of 54 NLA mechanisms (78%)
+  have a black-box counterpart, top hypotheses agree in 5 of 9, 12 NLA-only vs 14 black-box-only.
+  NLA's themes on those 9 (`synth_nla.json`): persona/role capture from the framing premise ·
+  capability self-check never triggered · genre completion from document templates · a single
+  early token locks the frame · panicked register entrains a script.
+
+**Four-way summary so far (share of an arm's mechanisms that the black-box arm also proposed):**
+OLens 87% (21 patterns) · J-lens 90% (21) · NLA 78% (9). None of the lenses changed the
+conclusions a strong black-box investigator reaches; each adds evidence of a kind black-box
+cannot produce (OLens: sentences at the boundary; J-lens: token bags at the user tokens and the
+fork; NLA: scene labels at L42).
 
 Reading: with a strong investigator, neither lens changed what was concluded; they changed the
 evidence type, adding direct observations of the pre-commitment state that the black-box arm
