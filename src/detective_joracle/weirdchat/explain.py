@@ -153,7 +153,7 @@ def run_explain_agent(
     rollouts = [(cid, m, t[:rollout_chars]) for cid, m, t in rollout_ids(pattern, n_side)]
     for cid, _, text in rollouts:  # the agent reads exactly the text it was shown
         tools.seed_conversation(cid, pattern.prompt, text)
-    lens = lens_of(arm) is not None
+    lens = lens_of(arm)
     rec = RunRecord(ORGANISM, CONDITION, arm, auditor, seed)
     run_tool_loop(
         tools,
@@ -167,7 +167,7 @@ def run_explain_agent(
             match_rate=pattern.published_match_rate,
             n_samples=len(pattern.samples),
             rollouts=rollouts,
-            lens=lens,
+            lens=lens is not None,
         ),
         backend,
         budget or Budget(max_calls=400),

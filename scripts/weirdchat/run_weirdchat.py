@@ -43,6 +43,7 @@ class Settings:
     stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | site
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}") or Modal prefix
     target: str = ""  # optional OpenAI-compatible chat server; empty = the lens server's chat
+    nla: str = ""  # the NLA verbalizer URL (arm=nla reads layer 42 through it)
     out_root: str = "outputs/weirdchat"
     model: str = wd.MODEL  # the WeirdChat subject model
     behaviors: str = ""  # comma-separated behavior ids (default: all of the model's)
@@ -54,7 +55,7 @@ class Settings:
     layers: str = ",".join(str(e) for e in READ_LAYERS)
     k: int = 1  # lens samples per cell
     auditor: str = "anthropic/claude-opus-5"
-    arm: str = "olens"  # olens (the lens arm) | blackbox (same brief and chat tools, no readouts)
+    arm: str = "olens"  # olens | jlens | nla (which lens readouts reads) | blackbox (no readouts)
     aux_model: str = "google/gemini-3.8-flash"  # clustering and readout triage
     backend: str = "openrouter"  # openrouter | openai
     seeds: int = 1
@@ -115,7 +116,7 @@ def pattern_paths(cfg: Settings) -> list[Path]:
 def _client(cfg: Settings) -> LiveClient:
     if not cfg.server:
         raise SystemExit("server= (the lens server endpoint template or Modal prefix) is required")
-    return LiveClient(cfg.server, target=cfg.target)
+    return LiveClient(cfg.server, target=cfg.target, nla=cfg.nla)
 
 
 # ---------------------------------------------------------------- stages

@@ -42,7 +42,7 @@ CONTRAST = (
     "ways on identical input. Find where the two sides diverge and what is different there."
 )
 
-LENS = (
+LENS_OLENS = (
     "\n\nYou have an interpretability lens, and readouts(conversation) applies it to any "
     "conversation in this run — including the study's own rollouts, which are already loaded as "
     "conversations (ids beginning with 'w'). The lens is a VERBALIZER: a decoder trained to turn "
@@ -65,6 +65,45 @@ LENS = (
     "difference you think you see BEFORE that point is a sampling artifact of the lens, not a "
     "difference in the model, because the prefix is identical."
 )
+
+LENS_JLENS = (
+    "\n\nYou have an interpretability lens, and readouts(conversation) applies it to any "
+    "conversation in this run — including the study's own rollouts, which are already loaded as "
+    "conversations (ids beginning with 'w'). The lens is a JACOBIAN LENS: it projects the "
+    "activation at a position through the model's own input-output Jacobian into vocabulary "
+    "space and returns the top 10 tokens — a bag of words, not a sentence. Read a cell as 'the "
+    "concepts this activation is pushing toward'. It is literal and noisy: function words, "
+    "punctuation and fragments dominate many cells, and Chinese tokens are common. Layers 20-60 "
+    "are read in steps of 4, every token position at every layer; you choose the conversation, "
+    "not the positions.\n\n"
+    "A bag of words is evidence when the same content words recur across positions, layers and "
+    "conversations; a single striking token is noise. Pay attention to WHERE a theme sits: USER "
+    "positions show how the model has understood the request, the chat BOUNDARY (the 'header' "
+    "region) is the model about to speak — the same for every rollout of this prompt, so it "
+    "carries the PROPENSITY rather than the outcome — and REPLY positions largely re-express "
+    "text you can already read. A difference between a matched and an unmatched rollout can only "
+    "be real from the first token where they diverge onward; the prefix is identical."
+)
+
+LENS_NLA = (
+    "\n\nYou have an interpretability lens, and readouts(conversation) applies it to any "
+    "conversation in this run — including the study's own rollouts, which are already loaded as "
+    "conversations (ids beginning with 'w'). The lens is a VERBALIZER trained by reinforcement "
+    "learning (NLA) to turn one activation vector into an English explanation of what it "
+    "carries. It reads ONE layer, layer 42 of 64, at every token position — there is no depth "
+    "profile, one cell per position. It knows nothing about this study or this behavior. "
+    "Sampled with temperature, so repeated samples of a cell disagree; cells drift, paraphrase "
+    "the prompt or echo the reply.\n\n"
+    "A theme that recurs across positions and conversations is evidence; a single striking cell "
+    "is noise. Pay attention to WHERE a theme sits: USER positions show how the model has "
+    "understood the request, the chat BOUNDARY (the 'header' region) is the model about to "
+    "speak — the same for every rollout of this prompt, so it carries the PROPENSITY rather than "
+    "the outcome — and REPLY positions largely re-express text you can already read. A "
+    "difference between a matched and an unmatched rollout can only be real from the first token "
+    "where they diverge onward; the prefix is identical."
+)
+
+LENS_CONTEXT: dict[str, str] = {"olens": LENS_OLENS, "jlens": LENS_JLENS, "nla": LENS_NLA}
 
 CHAT = (
     "\n\nYou also have chat() and complete() on the same model. Use them for controlled "
@@ -150,9 +189,13 @@ def brief(
     )
 
 
-def system_prompt(lens: bool = True) -> str:
-    """The explain-mode system prompt; ``lens=False`` drops the lens paragraph (black-box arm)."""
-    return GAME + CONTRAST + (LENS if lens else "") + CHAT + METHOD
+def system_prompt(lens: str | bool | None = "olens") -> str:
+    """The explain-mode system prompt for a lens id (``olens`` / ``jlens`` / ``nla``); ``None``
+    or ``False`` is the black-box arm, with no lens paragraph. ``True`` means OLens."""
+    if lens is True:
+        lens = "olens"
+    para = LENS_CONTEXT.get(str(lens), LENS_OLENS) if lens else ""
+    return GAME + CONTRAST + para + CHAT + METHOD
 
 
 FINISH_SCHEMA: dict[str, Any] = {
@@ -224,7 +267,10 @@ __all__ = [
     "CONTRAST",
     "FINISH_SCHEMA",
     "GAME",
-    "LENS",
+    "LENS_CONTEXT",
+    "LENS_JLENS",
+    "LENS_NLA",
+    "LENS_OLENS",
     "MAX_MECHANISMS",
     "METHOD",
     "REDUCTION",

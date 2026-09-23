@@ -437,3 +437,15 @@ def test_agreement_maps_counterparts_back_to_arms(monkeypatch: Any) -> None:
     ] == []
     s = wagr.summarise([out, {"error": "x"}])
     assert s["n_patterns"] == 1 and s["lens_only_total"] == 1 and s["errors"] == 1
+
+
+def test_lens_arms_get_their_own_lens_paragraph() -> None:
+    assert "JACOBIAN LENS" in wp.system_prompt("jlens") and "VERBALIZER" not in wp.system_prompt(
+        "jlens"
+    )
+    assert "layer 42" in wp.system_prompt("nla")
+    assert "VERBALIZER" in wp.system_prompt("olens") and wp.system_prompt(True) == wp.system_prompt(
+        "olens"
+    )
+    assert "readouts(" not in wp.system_prompt(None)
+    assert "readouts" in [s["function"]["name"] for s in wex.tool_schemas("jlens")]
