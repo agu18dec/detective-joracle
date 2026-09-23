@@ -492,6 +492,7 @@ def run_of(path: Path, auditor_dir: str) -> tuple[dict[str, Any], list[dict[str,
         "file": path.name,
     }
     tool_log = [as_dict(t) for t in as_list(record.get("tool_log"))]
+    run["is_lens"] = as_text(record.get("arm")) != "blackbox"
     run["n_tool_calls"] = len(tool_log)
     run["n_readouts"] = sum(1 for t in tool_log if as_text(t.get("name")) == "readouts")
     run["n_chat"] = sum(1 for t in tool_log if as_text(t.get("name")) == "chat")
@@ -515,6 +516,8 @@ def pattern_of(path: Path, out_root: Path) -> dict[str, Any]:
         run, tool_log = run_of(run_path, run_path.parent.name)
         run["run_index"] = len(runs)
         runs.append(run)
+        if run["arm"] == "blackbox":  # chat tools only: a black-box run must add no phantom reads
+            continue
         for ti, logged in enumerate(tool_log):
             if as_text(logged.get("name")) != "readouts":
                 continue
@@ -606,13 +609,103 @@ def clusters_of(out_root: Path) -> list[dict[str, Any]]:
     return clusters
 
 
+def agreement_of(out_root: Path) -> dict[str, Any] | None:
+    """agreement.json: the lens-vs-black-box reader's summary plus one entry per pattern."""
+    blob = read_json(out_root / "agreement.json")
+    if blob is None:
+        return None
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in (as_dict(x) for x in as_list(blob.get("patterns"))):
+        key = as_text(entry.get("pattern_key"))
+        if not key:
+            continue
+        pick = lambda lst: [  # noqa: E731
+            {"mechanism": as_text(m.get("mechanism")), "confidence": as_float(m.get("confidence"))}
+            for m in (as_dict(x) for x in as_list(lst))
+        ]
+        entries[key] = {
+            "n_lens": as_int(entry.get("n_lens")),
+            "n_blackbox": as_int(entry.get("n_blackbox")),
+            "lens_with_counterpart": as_int(entry.get("lens_with_counterpart")),
+            "blackbox_with_counterpart": as_int(entry.get("blackbox_with_counterpart")),
+            "lens_only": pick(entry.get("lens_only")),
+            "blackbox_only": pick(entry.get("blackbox_only")),
+            "top_match": entry.get("top_match")
+            if isinstance(entry.get("top_match"), bool)
+            else None,
+            "lens_only_summary": as_text(entry.get("lens_only_summary")),
+            "blackbox_only_summary": as_text(entry.get("blackbox_only_summary")),
+        }
+    summary = {k: as_int(v) for k, v in as_dict(blob.get("summary")).items()}
+    return {"summary": summary, "patterns": entries, "model": as_text(blob.get("model"))}
+
+
+def calibration_of(out_root: Path) -> dict[str, Any] | None:
+    """interventions/calibration.json (or calibration_<judge>.json): the judge vs the study's labels."""
+    folder = out_root / "interventions"
+    if not folder.is_dir():
+        return None
+    candidates = [folder / "calibration.json"] + sorted(folder.glob("calibration_*.json"))
+    for path in candidates:
+        blob = read_json(path)
+        if blob is not None:
+            conf = as_dict(blob.get("confusion"))
+            return {
+                "n": as_int(blob.get("n")),
+                "judge_failures": as_int(blob.get("judge_failures")),
+                "agreement": as_float(blob.get("agreement")),
+                "kappa": as_float(blob.get("kappa")),
+                "confusion": {k: as_int(conf.get(k)) for k in ("tp", "tn", "fp", "fn")},
+                "model": as_text(blob.get("model")) or path.stem.replace("calibration_", ""),
+                "file": path.name,
+            }
+    return None
+
+
+def interventions_of(out_root: Path, key: str) -> dict[str, Any] | None:
+    """interventions/<key>.json: one row per arm; the first arm is the unchanged baseline."""
+    blob = read_json(out_root / "interventions" / f"{key}.json")
+    if blob is None:
+        return None
+    arms = []
+    for entry in (as_dict(x) for x in as_list(blob.get("arms"))):
+        arm = as_dict(entry.get("arm"))
+        ci = [as_float(v) for v in as_list(entry.get("ci95"))[:2]]
+        arms.append(
+            {
+                "name": as_text(arm.get("name")) or f"arm {len(arms)}",
+                "prompt": as_text(arm.get("prompt")),
+                "system": as_text(arm.get("system")),
+                "prefill": as_text(arm.get("prefill")),
+                "note": as_text(arm.get("note")),
+                "n": as_int(entry.get("n")),
+                "k": as_int(entry.get("k")),
+                "rate": as_float(entry.get("rate")),
+                "ci95": ci if len(ci) == 2 else None,
+                "judge_failures": as_int(entry.get("judge_failures")),
+                "replies": [as_text(r) for r in as_list(entry.get("replies"))],
+                "verdicts": [
+                    v if isinstance(v, bool) else None for v in as_list(entry.get("verdicts"))
+                ],
+                "explanations": [as_text(e) for e in as_list(entry.get("explanations"))],
+                "delta_vs_baseline": as_float(entry.get("delta_vs_baseline")),
+                "fisher_p_vs_baseline": as_float(entry.get("fisher_p_vs_baseline")),
+            }
+        )
+    return {
+        "n_per_arm": as_int(blob.get("n_per_arm")),
+        "judge_model": as_text(blob.get("judge_model")),
+        "arms": arms,
+    }
+
+
 def synth_meta(out_root: Path) -> dict[str, Any]:
     synth = read_json(out_root / "synth.json") or {}
     return {"model": as_text(synth.get("model")), "n_records": as_int(synth.get("n_records"))}
 
 
 # ------------------------------------------------------------------- split
-HEAVY_PATTERN_KEYS = ("samples", "reads", "fork", "brief")
+HEAVY_PATTERN_KEYS = ("samples", "reads", "fork", "brief", "interventions")
 HEAVY_RUN_KEYS = ("steps", "notes")
 
 
@@ -634,6 +727,16 @@ def light_pattern(pat: dict[str, Any]) -> dict[str, Any]:
     light["n_samples"] = len(pat["samples"])
     light["n_runs"] = len(pat["runs"])
     light["grade"] = grade_of(pat)
+    light["has_blackbox"] = any(r["arm"] == "blackbox" for r in pat["runs"])
+    iv = pat.get("interventions")
+    light["interventions_meta"] = (
+        {"n_per_arm": iv["n_per_arm"], "judge_model": iv["judge_model"], "n_arms": len(iv["arms"])}
+        if iv
+        else None
+    )
+    light["intervention_notes"] = [
+        {"name": a["name"], "note": a["note"]} for a in (iv["arms"] if iv else [])
+    ]
     return light
 
 
@@ -928,9 +1031,20 @@ def build_site(
     patterns = [pattern_of(p, out_root) for p in paths]
     patterns.sort(key=lambda p: (p["behavior_name"], p["key"]))
     brief_fn, system_fn, brief_how = load_prompts()
+    agreement = agreement_of(out_root)
+    calibration = calibration_of(out_root)
     for pat in patterns:
         pat["brief"] = brief_of(pat, brief_fn)
+        pat["interventions"] = interventions_of(out_root, pat["key"])
+        pat["agreement"] = agreement["patterns"].get(pat["key"]) if agreement else None
     print(f"brief: {brief_how}")
+    n_bb = sum(1 for p in patterns if any(r["arm"] == "blackbox" for r in p["runs"]))
+    n_iv = sum(1 for p in patterns if p["interventions"])
+    print(
+        f"black-box runs on {n_bb} patterns · agreement.json: "
+        f"{'yes, ' + str(len(agreement['patterns'])) + ' patterns' if agreement else 'absent'} · "
+        f"interventions on {n_iv} patterns · calibration: {calibration['file'] if calibration else 'absent'}"
+    )
 
     cards, hl_stats = auto_highlights(patterns)
     hand = hand_highlights(patterns, highlights) if highlights else []
@@ -951,6 +1065,9 @@ def build_site(
         "highlights": cards,
         "verify": {"verified": hl_stats["verified"], "fragments": hl_stats["fragments"]},
         "system_prompt": system_fn() if system_fn else None,
+        "agreement_summary": agreement["summary"] if agreement else None,
+        "agreement_model": agreement["model"] if agreement else None,
+        "calibration": calibration,
         "brief_how": brief_how,
         "n_side": N_SIDE,
         "en": en,
@@ -1153,6 +1270,19 @@ i.matched{background:var(--miss)} i.unmatched{background:var(--hit)} i.agent{bac
 pre.brief{font-family:var(--mono);font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--ground);border:1px solid var(--line-soft);border-radius:4px;padding:8px 10px;margin:6px 0 0}
 .qa{margin-top:4px} .qa .lab{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint);margin:6px 0 2px} .qa .lab b{letter-spacing:0;text-transform:none;font-family:var(--mono);color:var(--text-dim);font-weight:400}
 .qa .body{font-family:var(--sans);font-size:12.5px;white-space:pre-wrap;word-break:break-word;background:var(--ground);border:1px solid var(--line-soft);border-radius:4px;padding:6px 8px}
+table.iv{table-layout:auto;width:100%;border:1px solid var(--line-soft);border-radius:4px;margin:6px 0}
+table.iv th{position:static;width:auto;text-transform:uppercase;letter-spacing:.06em;font-size:10.5px;padding:5px 8px;color:var(--text-faint);background:var(--surface-2)}
+table.iv td{padding:5px 8px;font-size:12px;vertical-align:top}
+table.iv tr.base td{background:color-mix(in srgb, var(--sample-soft) 35%, var(--surface))}
+table.iv td.up{background:var(--miss-soft);color:var(--miss);font-weight:600} table.iv td.down{background:var(--hit-soft);color:var(--hit);font-weight:600}
+table.iv .chg{font-family:var(--mono);font-size:11px;white-space:pre-wrap;word-break:break-word;max-width:320px} table.iv .chg ins{background:var(--hit-soft);text-decoration:none} table.iv .chg del{background:var(--miss-soft);text-decoration:line-through}
+.cibar{position:relative;height:6px;background:var(--surface-2);border-radius:3px;width:120px;margin-top:4px}
+.cibar i{position:absolute;top:0;height:100%;background:var(--accent-soft);border:1px solid var(--accent);border-radius:3px}
+.cibar b{position:absolute;top:-2px;width:2px;height:10px;background:var(--accent)}
+.ex{border:1px solid var(--line-soft);border-radius:4px;padding:5px 8px;margin:4px 0;font-size:12px}
+.ex .rep{font-family:var(--sans);white-space:pre-wrap;word-break:break-word} .ex .why{color:var(--text-dim);font-size:11.5px;margin-top:2px}
+table.sum{border:1px solid var(--line-soft);table-layout:auto} table.sum th{position:static;width:auto;text-transform:none;letter-spacing:0;font-size:12px;padding:4px 10px;color:var(--text-dim)} table.sum td{padding:4px 10px;font-family:var(--mono);font-size:12px}
+.armsw{display:flex;gap:4px;align-items:center;margin:0 0 8px}
 .rolls{margin-top:14px}
 .rolls h3{margin:0 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
 .roll{display:flex;gap:8px;align-items:baseline;width:100%;text-align:left;border:1px solid var(--line-soft);border-left:3px solid var(--line);background:var(--surface);border-radius:4px;padding:4px 8px;margin:0 0 4px;cursor:pointer;font-size:11.5px}
@@ -1265,6 +1395,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
   <input id="search" placeholder="search patterns and mechanisms  ( ; )" autocomplete="off" spellcheck="false">
   <span class="spacer"></span>
   <a class="btn" id="themes-btn" href="#/themes" title="mechanism clusters">themes</a>
+  <button class="btn" id="agree-btn" title="how the lens arm and a black-box arm compare" hidden>lens vs black-box</button>
   <button class="btn" id="text-toggle" aria-pressed="false" title="read the replies as plain text instead of tokens (x)">text</button>
   <button class="btn" id="ctx-toggle" aria-pressed="true" title="case / hypothesis / summary / rubric (c)">context</button>
   <button class="btn" id="wrap-toggle" aria-pressed="false" title="cap row height (w)">compact rows</button>
@@ -1300,6 +1431,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
     <p><i class="sw" style="background:var(--hit-soft);border-color:var(--hit)"></i><b>Green</b> means a phrase the agent quoted from a readout cell was found verbatim at build time: a green bar on a token says one of that token's cells carries such a phrase; the cell itself gets a green inset bar and the phrase is highlighted. Quotes that did not verify are listed in the build log, not here.</p>
     <p><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i><b>Dotted</b> underline is the fork: the first reply word where the flagged and clean replies diverge, computed from the read tokens (≈, positions were thinned).</p>
     <p><i class="sw" style="background:var(--find-soft);border-color:var(--find)"></i><b>Violet</b> is your search: <span class="kbd">/</span> filters this pattern's readouts (tokens whose cells match get a violet underline and are listed under the bar); <span class="kbd">;</span> searches summaries, prompts and mechanisms across every pattern.</p>
+    <p id="manual-cal" class="sub"></p>
     <p><b>Faded</b> tokens (‥) stand for positions the read thinned away — the lens read every 4th token plus punctuation and boundaries.</p>
     <p><b>Resizing.</b> Drag the splitter between the panes, the right edge of a column header, or the bottom edge of a layer label; double-click any of them to reset.</p>
     <p class="sub">Reads: <i>diag</i> = the diagnostic pass over the study's flagged / clean replies; <i>agent</i> = the investigator's own readouts, parsed back from its tool pages (w###m/u = the study rollouts it was seeded with — same text, a different lens sample; c### = conversations it created). Highlight cards: rust = inside the reply, amber = about to answer, green = inside the user turn.</p>
@@ -1328,6 +1460,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
   </div>
 </div></dialog>
 
+<dialog id="agree"><div class="body"><h2>Lens arm vs black-box arm</h2><p class="sub" style="margin:0 0 10px">agreement means the two arms told the same story, not that either is right</p><div id="agree-body"></div></div></dialog>
 <dialog id="themes"><div class="body"><h2>Recurring hypotheses across patterns</h2><p class="sub" style="margin:0 0 10px">how often each was proposed — not evidence it is right</p><div id="themes-body"></div></div></dialog>
 
 <script>
@@ -1347,7 +1480,15 @@ function load(k){ try { return localStorage.getItem(k); } catch(e){ return null;
 const PRIMER1 = "WeirdChat (Transluce) sampled the plain Qwen3.6-27B ~64 times per prompt and had a judge label every reply: does it show the behavior or not. That label is the ground truth for WHAT the model does. Nobody has ground truth for WHY — this page collects one investigator's hypotheses about why, read off the model's internals with OLens.";
 const VPCT = D.verify && D.verify.fragments ? Math.round(100 * D.verify.verified / D.verify.fragments) : null;
 $("#primer1").textContent = PRIMER1; if ($("#manual-primer")) $("#manual-primer").textContent = PRIMER1;
-$("#banner").textContent = "Hypotheses, unverified: no intervention was run under the judge's rubric; " + (VPCT==null ? "none of" : VPCT + "% of") + " the lens cells the investigator quoted check out verbatim (build-time figure).";
+const AGS = D.agreement_summary;
+$("#banner").textContent = "Hypotheses, unverified: no intervention was run under the judge's rubric; " + (VPCT==null ? "none of" : VPCT + "% of") + " the lens cells the investigator quoted check out verbatim (build-time figure)" +
+  (AGS && AGS.n_patterns ? `; the lens arm and a black-box arm agreed on the top hypothesis in ${AGS.top_match||0} of ${AGS.n_patterns} patterns` : "") + ".";
+if (D.calibration && D.calibration.n){ const c = D.calibration; $("#manual-cal").innerHTML = `<b>Intervention judge.</b> The judge (${esc(c.model)}) agreed with WeirdChat's judge on ${Math.round((c.agreement||0)*100)}% of ${c.n} labelled replies, κ=${num(c.kappa)}${c.confusion && c.confusion.tp!=null ? ` (tp ${c.confusion.tp} · tn ${c.confusion.tn} · fp ${c.confusion.fp} · fn ${c.confusion.fn})` : ""}${c.judge_failures ? ` · ${c.judge_failures} judge failures` : ""}.`; }
+if (AGS){ $("#agree-btn").hidden = false;
+  $("#agree-body").innerHTML = `<table class="sum"><tbody>` +
+    [["patterns compared", AGS.n_patterns], ["top hypotheses agree in", AGS.top_match], ["lens mechanisms with a black-box counterpart", `${AGS.lens_with_counterpart==null?"?":AGS.lens_with_counterpart} / ${AGS.lens_mechanisms==null?"?":AGS.lens_mechanisms}`], ["black-box mechanisms with a lens counterpart", `${AGS.blackbox_with_counterpart==null?"?":AGS.blackbox_with_counterpart} / ${AGS.blackbox_mechanisms==null?"?":AGS.blackbox_mechanisms}`], ["lens-only mechanisms", AGS.lens_only_total], ["black-box-only mechanisms", AGS.blackbox_only_total], ["reader errors", AGS.errors]].map(([k, v]) => `<tr><th>${esc(k)}</th><td>${v==null?"—":esc(v)}</td></tr>`).join("") + `</tbody></table>` +
+    `<p class="sub" style="margin-top:8px">${AGS.n_patterns||0} patterns · top hypotheses agree in ${AGS.top_match||0} · lens mechanisms with a counterpart ${AGS.lens_with_counterpart||0}/${AGS.lens_mechanisms||0} · black-box with a counterpart ${AGS.blackbox_with_counterpart||0}/${AGS.blackbox_mechanisms||0} · lens-only ${AGS.lens_only_total||0} · black-box-only ${AGS.blackbox_only_total||0}${D.agreement_model ? ` · read by ${esc(D.agreement_model)}` : ""}</p>`;
+  $("#agree-btn").onclick = () => $("#agree").showModal(); }
 // the two sides of every pattern, in plain words (internal ids keep matched/unmatched)
 const SIDE = {matched: "flagged reply", unmatched: "clean reply"};
 const SIDE_TIP = {matched: "the judge said this reply SHOWS the behavior", unmatched: "the judge said this reply does NOT show it"};
@@ -1367,7 +1508,12 @@ function readName(r){
 
 // ------------------------------------------------------------------ state
 const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
-           colw:{}, rowh:{}, below:false, tab:"brief", textView: load("wc-text") === "1", agentPromise:null};
+           colw:{}, rowh:{}, below:false, tab:"brief", arm:"lens", textView: load("wc-text") === "1", agentPromise:null};
+const isLens = r => r && r.arm !== "blackbox";
+function lensRun(runs){ return (runs||[]).find(isLens) || (runs||[]).find(r => r.n_readouts > 0) || null; }
+function bbRun(runs){ return (runs||[]).find(r => r.arm === "blackbox") || null; }
+function topMech(run){ return run ? (run.mechanisms||[]).slice().sort((a,b) => (b.confidence||0) - (a.confidence||0))[0] : null; }
+function confBadge(c){ return `<span class="badge ${c>=0.7?"miss":(c>=0.4?"hold":"dim")}">conf ${num(c)}</span>`; }
 const heavyCache = {};
 function dataUrl(key){ return "data/" + encodeURIComponent(key) + ".json"; }
 function patUrl(key, read, pos){ let h = "#/pattern/" + encodeURIComponent(key); if (read) h += "?read=" + encodeURIComponent(read) + (pos==null ? "" : "&pos=" + pos); return h; }
@@ -1397,7 +1543,7 @@ function prepareData(key, data){
   data.reads = data.reads || []; data.runs = data.runs || []; data.samples = data.samples || [];
   data.reads.forEach(indexRead);
   data.byId = {}; data.byConv = {}; data.byTool = {}; data.bySample = {};
-  for (const r of data.reads){ data.byId[r.id] = r; if (r.conv_id && (!data.byConv[r.conv_id] || (!data.byConv[r.conv_id].rows && !data.byConv[r.conv_id].deferred))) data.byConv[r.conv_id] = r; if (r.tool_index!=null) data.byTool[r.tool_index] = r; if (r.source==="diag" && r.sample_index!=null) data.bySample[r.sample_index] = r; }
+  for (const r of data.reads){ data.byId[r.id] = r; if (r.conv_id && (!data.byConv[r.conv_id] || (!data.byConv[r.conv_id].rows && !data.byConv[r.conv_id].deferred))) data.byConv[r.conv_id] = r; if (r.tool_index!=null) data.byTool[(r.run_index==null?0:r.run_index) + ":" + r.tool_index] = r; /* tool indices are per run */ if (r.source==="diag" && r.sample_index!=null) data.bySample[r.sample_index] = r; }
   for (const r of data.reads){ r.mention_ids = r.conv_id ? [r.conv_id] : []; for (const o of data.reads) if (o !== r && o.same_rollout_as === r.id && o.conv_id) r.mention_ids.push(o.conv_id); }
   data.mechs = []; data.runs.forEach((run, ri) => (run.mechanisms||[]).forEach((m, mi) => data.mechs.push({...m, run: ri, i: mi, auditor: run.auditor, seed: run.seed})));
   // verified highlight cells for this pattern: read → pos → [{layer, quote}]
@@ -1475,23 +1621,28 @@ function matchLine(rubric){
 function verifiedBadge(p){ if (!p || !p.cited_fragments) return `<span class="badge dim">no quoted cells</span>`; const k = p.cited_verified, n = p.cited_fragments; return `<span class="badge ${k===n?"hit":(k?"hold":"miss")}">cited cells verified ${k}/${n}</span>`; }
 function renderCtx(){
   const box = $("#ctx"); box.hidden = !S.ctx; const p = byKey[S.key]; if (!p){ box.innerHTML = ""; return; }
-  const data = S.data, runs = p.runs || [], run = runs[0];
+  const data = S.data, runs = p.runs || [], run = lensRun(runs), bb = bbRun(runs);
   const mechs = run ? (run.mechanisms||[]) : [];
-  const top = mechs.slice().sort((a,b) => (b.confidence||0) - (a.confidence||0))[0];
+  const top = topMech(run), bbTop = topMech(bb);
+  const ag = p.agreement, ivm = p.interventions_meta, cal = D.calibration;
   const nrep = 64;  // WeirdChat samples ~64 replies per prompt; the published rate is over those
   let h = `<div class="pane"><h3>the case</h3><div><b>Behavior:</b> ${esc(p.behavior_name)}${matchLine(p.rubric) ? ` <span class="dim">— ${esc(matchLine(p.rubric))}</span>` : ""}</div>` +
     `<div style="margin-top:3px"><b>What WeirdChat found:</b> on this prompt, ${pct(p.published_match_rate)} of ${nrep} replies were judged to show it. Same prompt, same model, same settings — it went both ways.</div>` +
     `<div style="margin-top:3px"><b>What you see here:</b> one <span title="${esc(SIDE_TIP.matched)}">flagged</span> and one <span title="${esc(SIDE_TIP.unmatched)}">clean</span> reply, read token by token through the lens (layers 20–60), plus the investigator's probes.</div>` +
+    (ag ? `<div style="margin-top:3px"><b>Lens vs black-box:</b> top hypotheses agree: ${ag.top_match==null?"?":(ag.top_match?"yes":"no")} · lens mechanisms with a black-box counterpart ${ag.lens_with_counterpart==null?"?":ag.lens_with_counterpart}/${ag.n_lens==null?"?":ag.n_lens} · black-box with a lens counterpart ${ag.blackbox_with_counterpart==null?"?":ag.blackbox_with_counterpart}/${ag.n_blackbox==null?"?":ag.n_blackbox}</div>` : "") +
+    (ivm ? `<div style="margin-top:3px"><b>Interventions run:</b> ${ivm.n_per_arm==null?"?":ivm.n_per_arm} samples/arm over ${ivm.n_arms} arms, judged by ${esc(ivm.judge_model||"?")}${cal && cal.kappa!=null ? ` (κ=${num(cal.kappa)} vs the study's labels)` : ""} — see the interventions tab</div>` : "") +
     `<div class="tags" style="margin-top:5px"><span class="tag">${pct(p.published_match_rate)} flagged</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${p.n_reads||0} lens reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
     `<div class="prompt">${esc(p.prompt)}</div></div>`;
   h += `<div class="pane"><h3>detective-joracle's hypothesis (unverified)</h3>` + (top ? `<div>${esc(top.mechanism)} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span></div>` +
     (top.would_test_by ? `<div class="dim" style="margin-top:4px">How it would be tested: ${esc(top.would_test_by)} <span class="badge hold">not run</span></div>` : `<div class="dim" style="margin-top:4px"><span class="badge hold">not run</span> no test proposed</div>`) +
-    (mechs.length > 1 ? `<div style="margin-top:4px"><a href="#" data-more>+ ${mechs.length-1} more in details ▸</a></div>` : "") : `<div class="empty">no agent run for this pattern yet — no hypothesis.</div>`) + `</div>`;
+    (mechs.length > 1 ? `<div style="margin-top:4px"><a href="#" data-more>+ ${mechs.length-1} more in details ▸</a></div>` : "") : `<div class="empty">no lens-arm run for this pattern yet — no hypothesis.</div>`) +
+    (bbTop ? `<div class="dim" style="margin-top:6px;border-top:1px dashed var(--line-soft);padding-top:4px"><b>black-box investigator (no lens):</b> ${esc(cut(bbTop.mechanism, 200))} · ${confBadge(bbTop.confidence)}</div>` : (bb ? `<div class="dim" style="margin-top:6px">black-box investigator (no lens): run present, no mechanisms reported</div>` : "")) + `</div>`;
   h += `<div class="pane"><h3>agent summary</h3>` + (run ? `<div>${esc(run.summary || "(no summary)")}</div>` +
     `<div class="vrow" style="margin-top:6px"><span class="name">tool calls</span><span>${run.n_tool_calls||0} · ${run.n_readouts||0} readouts · ${run.n_chat||0} chat probes</span></div>` +
     `<div class="vrow"><span class="name">mechanisms</span><span>${mechs.length}</span></div>` +
     `<div class="vrow"><span class="name">verification</span>${verifiedBadge(p)}</div>` +
-    `<div class="vrow"><span class="name">run</span><span class="dim">${esc(run.auditor)} s${run.seed} · stopped: ${esc(run.stopped_by||"?")}${runs.length>1?` · +${runs.length-1} more run(s)`:""}</span></div>` : `<div class="empty">no agent run for this pattern yet.</div>`) + `</div>`;
+    `<div class="vrow"><span class="name">lens run</span><span class="dim">${esc(run.auditor)} s${run.seed} · stopped: ${esc(run.stopped_by||"?")}</span></div>` +
+    (bb ? `<div class="vrow"><span class="name">black-box run</span><span>${bb.n_tool_calls||0} calls · ${bb.n_chat||0} chat probes · ${(bb.mechanisms||[]).length} mechanisms</span></div>` : "") : (bb ? `<div class="empty">no lens-arm run yet.</div><div class="vrow" style="margin-top:6px"><span class="name">black-box run</span><span>${bb.n_tool_calls||0} calls · ${bb.n_chat||0} chat probes · ${(bb.mechanisms||[]).length} mechanisms</span></div>` : `<div class="empty">no agent run for this pattern yet.</div>`)) + `</div>`;
   h += `<div class="pane"><h3>rubric</h3>${p.rubric ? clipbox(p.rubric, 320) : `<div class="empty">no rubric.</div>`}</div>`;
   box.innerHTML = h;
   box.querySelectorAll("[data-showall]").forEach(b => b.onclick = () => { b.previousElementSibling.classList.add("open"); b.remove(); });
@@ -1648,7 +1799,8 @@ function renderResults(){
   for (const p of D.patterns || []){
     if (rx.test(p.group_summary||"")) rows.push({p, where: "summary", snip: snip(p.group_summary)});
     if (rx.test(p.prompt||"")) rows.push({p, where: "prompt", snip: snip(p.prompt)});
-    (p.runs||[]).forEach((run, ri) => { if (rx.test(run.summary||"")) rows.push({p, where: `run ${ri} summary`, snip: snip(run.summary)});
+    (p.intervention_notes||[]).forEach(a => { if (rx.test(a.note||"") || rx.test(a.name||"")) rows.push({p, where: `intervention arm ${a.name}`, snip: snip(a.name + ": " + a.note)}); });
+    (p.runs||[]).forEach((run, ri) => { if (rx.test(run.summary||"")) rows.push({p, where: `${run.arm==="blackbox"?"black-box":"lens"} run summary`, snip: snip(run.summary)});
       (run.mechanisms||[]).forEach((m, mi) => { const t = [m.mechanism, m.evidence, m.readout_cells].join(" · "); if (rx.test(t)) rows.push({p, where: `mechanism ${mi+1}`, snip: snip(t), cell: firstCell(m.readout_cells)}); }); });
   }
   box.hidden = false;
@@ -1672,7 +1824,7 @@ function parseReplies(out){
   if (!heads.length) return null;
   return heads.map((h, i) => ({...h, text: (out||"").slice(h.end, i+1 < heads.length ? heads[i+1].start : undefined).replace(/\n+$/, "")}));
 }
-function stepBlock(s, i, data, run){ const rd = s.tool_index!=null ? data.byTool[s.tool_index] : null;
+function stepBlock(s, i, data, run){ const rd = s.tool_index!=null ? data.byTool[((run && run.run_index!=null) ? run.run_index : 0) + ":" + s.tool_index] : null;
   let h = `<div class="step ${esc(s.name||"")}"><div class="hd"><span class="nm">${esc(s.name||"assistant")}</span><span>#${i+1}${s.meta?" · "+esc(s.meta):""}</span>${rd ? `<a href="${patUrl(data.key, rd.id, null)}" title="${esc(rd.id)}">open this read → ${esc(readName(rd))}${rd.parse_error?" (unparsed)":""}</a>` : ""}</div>`;
   if (s.think) h += `<div class="think">${esc(s.think)}</div>`;
   if (s.name === "chat"){
@@ -1689,6 +1841,46 @@ function stepBlock(s, i, data, run){ const rd = s.tool_index!=null ? data.byTool
     if (s.output && s.name !== "readouts"){ const o = s.output; h += `<pre class="block">${esc(o.slice(0,500))}${o.length>500?" …":""}</pre>`; if (o.length > 500) h += `<details><summary>show full result (${o.length} chars)</summary><pre class="block">${esc(o)}</pre></details>`; }
     else if (s.output) h += `<details><summary>raw readout page (${s.output.length} chars, clipped; the structured read is in the strip)</summary><pre class="block">${esc(s.output)}</pre></details>`; }
   return h + `</div>`; }
+function agreeTab(ag){
+  const list = (items, label) => items.length ? items.map(m => `<div class="mech"><div><span class="badge dim">${label}</span> ${esc(m.mechanism)}${m.confidence==null?"":" "+confBadge(m.confidence)}</div></div>`).join("") : `<div class="empty">none</div>`;
+  return `<div class="sub" style="margin:0 0 8px">top hypotheses agree: <b>${ag.top_match==null?"?":(ag.top_match?"yes":"no")}</b> · lens mechanisms with a black-box counterpart ${ag.lens_with_counterpart==null?"?":ag.lens_with_counterpart}/${ag.n_lens==null?"?":ag.n_lens} · black-box with a lens counterpart ${ag.blackbox_with_counterpart==null?"?":ag.blackbox_with_counterpart}/${ag.n_blackbox==null?"?":ag.n_blackbox} — agreement means the two arms told the same story, not that either is right</div>` +
+    `<h3 style="margin:8px 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint)">only the lens arm proposed (${ag.lens_only.length})</h3>` + (ag.lens_only_summary ? `<div class="sub" style="margin:0 0 6px">${esc(ag.lens_only_summary)}</div>` : "") + list(ag.lens_only, "only the lens arm proposed") +
+    `<h3 style="margin:12px 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint)">only the black-box arm proposed (${ag.blackbox_only.length})</h3>` + (ag.blackbox_only_summary ? `<div class="sub" style="margin:0 0 6px">${esc(ag.blackbox_only_summary)}</div>` : "") + list(ag.blackbox_only, "only the black-box arm proposed");
+}
+function diffSpan(base, other){
+  // the changed span of `other` against `base`: common prefix/suffix stripped, a little context kept
+  if (other === base) return null;
+  let a = 0; while (a < base.length && a < other.length && base[a] === other[a]) a++;
+  let b = 0; while (b < base.length - a && b < other.length - a && base[base.length-1-b] === other[other.length-1-b]) b++;
+  const ctx = 30, pre = other.slice(Math.max(0, a - ctx), a), post = other.slice(other.length - b, other.length - b + ctx);
+  return {pre: (a > ctx ? "…" : "") + pre, removed: base.slice(a, base.length - b), added: other.slice(a, other.length - b), post: post + (other.length - b + ctx < other.length ? "…" : "")};
+}
+function interventionsTab(iv){
+  const arms = iv.arms || [], base = arms[0];
+  if (!arms.length) return `<div class="empty">no arms recorded.</div>`;
+  let h = `<div class="sub" style="margin:0 0 6px">${iv.n_per_arm==null?"?":iv.n_per_arm} samples per arm, judged by ${esc(iv.judge_model||"?")} under the study's rubric; the first row is the unchanged baseline. Green Δ = flagged rate went DOWN with p&lt;0.05, rust = UP with p&lt;0.05.</div>`;
+  h += `<table class="iv"><thead><tr><th>arm</th><th>what changed</th><th>tests</th><th>flagged rate · 95% CI</th><th>Δ vs baseline</th><th>Fisher p</th></tr></thead><tbody>`;
+  arms.forEach((a, i) => {
+    const isBase = i === 0, d = isBase || !base ? null : diffSpan(base.prompt||"", a.prompt||"");
+    let chg = isBase ? `<span class="dim">unchanged prompt</span>` : (d ? `<div class="chg">${esc(d.pre)}<del>${esc(d.removed)}</del><ins>${esc(d.added)}</ins>${esc(d.post)}</div>` : `<span class="dim">same prompt</span>`);
+    if (a.system && (!base || a.system !== base.system)) chg += `<div class="chg">system: ${esc(cut(a.system, 200))}</div>`;
+    if (a.prefill && (!base || a.prefill !== base.prefill)) chg += `<div class="chg">prefill: ${esc(cut(a.prefill, 200))}</div>`;
+    const ci = a.ci95, lo = ci ? Math.max(0, Math.min(1, ci[0])) : null, hi = ci ? Math.max(0, Math.min(1, ci[1])) : null;
+    const bar = ci ? `<div class="cibar" title="95% CI ${pct(lo)}–${pct(hi)}"><i style="left:${(lo*100).toFixed(1)}%;width:${((hi-lo)*100).toFixed(1)}%"></i>${a.rate!=null?`<b style="left:${(Math.max(0,Math.min(1,a.rate))*100).toFixed(1)}%"></b>`:""}</div>` : "";
+    const sig = a.fisher_p_vs_baseline!=null && a.fisher_p_vs_baseline < 0.05, cls = !isBase && sig && a.delta_vs_baseline!=null ? (a.delta_vs_baseline < 0 ? "down" : (a.delta_vs_baseline > 0 ? "up" : "")) : "";
+    h += `<tr class="${isBase?"base":""}"><td><b>${esc(a.name)}</b>${isBase?' <span class="badge hold">baseline</span>':""}${a.judge_failures?`<div class="dim" style="font-size:11px">${a.judge_failures} judge failure${a.judge_failures===1?"":"s"}</div>`:""}</td><td>${chg}</td><td class="dim">${esc(a.note||"")}</td>` +
+      `<td><span class="mono">${a.k==null?"?":a.k}/${a.n==null?"?":a.n} = ${pct(a.rate)}</span>${bar}</td><td class="${cls}">${isBase?"—":(a.delta_vs_baseline==null?"—":(a.delta_vs_baseline>0?"+":"")+(a.delta_vs_baseline*100).toFixed(1)+" pp")}</td><td class="mono">${isBase?"—":(a.fisher_p_vs_baseline==null?"—":a.fisher_p_vs_baseline<0.001?"<0.001":a.fisher_p_vs_baseline.toFixed(3))}</td></tr>`;
+  });
+  h += `</tbody></table>`;
+  arms.forEach((a, i) => {
+    const n = Math.min(3, (a.replies||[]).length);
+    h += `<button class="btn" data-ex="${i}" style="margin:4px 4px 4px 0">${esc(a.name)}: ${n} example repl${n===1?"y":"ies"} ▸</button>`;
+  });
+  arms.forEach((a, i) => {
+    h += `<div id="ex-${i}" hidden>` + (a.replies||[]).slice(0, 3).map((r, j) => { const v = (a.verdicts||[])[j]; return `<div class="ex"><span class="badge ${v===true?"miss":(v===false?"hit":"dim")}" title="${esc(v===true?SIDE_TIP.matched:(v===false?SIDE_TIP.unmatched:"the judge failed on this reply"))}">${v===true?"flagged":(v===false?"clean":"no verdict")}</span> <span class="dim">${esc(a.name)} · reply ${j+1}</span><div class="rep">${esc(cut(r||"(empty)", 900))}</div>${(a.explanations||[])[j]?`<div class="why">judge: ${esc((a.explanations||[])[j])}</div>`:""}</div>`; }).join("") + `</div>`;
+  });
+  return h;
+}
 function briefTab(data){
   const b = data.brief;
   if (!b || !b.text) return `<div class="empty">the brief could not be rebuilt — ${esc(b && b.error ? b.error : (D.brief_how || "prompts unavailable"))}</div>`;
@@ -1699,22 +1891,36 @@ function briefTab(data){
 }
 function renderBelow(){
   const box = $("#below"); box.hidden = !S.below; if (!S.below) return;
-  const data = S.data, tabs = [["brief", "brief"], ["mechanisms", "ranked mechanisms"], ["transcript", "agent transcript"], ["highlights", "highlights"]];
-  $("#tabs").innerHTML = tabs.map(([k, l]) => `<button class="btn" data-tab="${k}" aria-pressed="${S.tab===k}">${l}</button>`).join("") + `<span class="sub" style="margin-left:8px">unverified hypotheses — nothing here was tested</span>`;
+  const data = S.data, p = byKey[S.key];
+  const tabs = [["brief", "brief"], ["mechanisms", "ranked mechanisms"], ["transcript", "agent transcript"]];
+  if (p && p.agreement) tabs.push(["agree", "lens vs black-box"]);
+  if (data && data.interventions) tabs.push(["interventions", "interventions"]);
+  tabs.push(["highlights", "highlights"]);
+  if (!tabs.some(t => t[0] === S.tab)) S.tab = "brief";
+  $("#tabs").innerHTML = tabs.map(([k, l]) => `<button class="btn" data-tab="${k}" aria-pressed="${S.tab===k}">${l}</button>`).join("") + `<span class="sub" style="margin-left:8px">unverified hypotheses — nothing here was tested${data && data.interventions ? ", except where the interventions tab says so" : ""}</span>`;
   $("#tabs").querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { S.tab = b.dataset.tab; renderBelow(); });
+  // the transcript / mechanisms tabs follow one arm; a switch appears when both arms ran
+  const allRuns = data ? data.runs : [], hasBoth = allRuns.some(isLens) && allRuns.some(r => !isLens(r));
+  if (!hasBoth) S.arm = allRuns.some(isLens) || !allRuns.length ? "lens" : "blackbox";
+  const armRuns = allRuns.filter(r => (S.arm === "lens") === isLens(r));
+  const armSwitch = hasBoth ? `<div class="armsw"><span class="sub">arm:</span><button class="btn" data-arm="lens" aria-pressed="${S.arm==="lens"}">lens arm</button><button class="btn" data-arm="blackbox" aria-pressed="${S.arm==="blackbox"}">black-box arm</button><span class="sub">— same brief; the black-box arm had chat tools only, no lens</span></div>` : "";
   let h = "";
   if (!data) h = `<div class="status">no pattern loaded.</div>`;
   else if (S.tab === "brief") h = briefTab(data);
-  else if (S.tab === "mechanisms"){ if (!data.runs.length) h = `<div class="empty">no agent run for this pattern yet.</div>`;
-    data.runs.forEach((run, ri) => { h += `<div class="sub" style="margin:${ri?"12px":"0"} 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${esc(run.summary||"")}</div>`; const ms = (run.mechanisms||[]).slice().sort((a,b) => (b.confidence||0)-(a.confidence||0)); if (!ms.length) h += `<div class="empty">no mechanisms reported.</div>`; ms.forEach((m, i) => { h += mechBlock(m, i, data); }); }); }
-  else if (S.tab === "transcript"){ if (!data.runs.length) h = `<div class="empty">no agent run for this pattern yet.</div>`;
-    data.runs.forEach(run => { h += `<div class="sub" style="margin:0 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${(run.steps||[]).length} steps · stopped: ${esc(run.stopped_by||"?")}</div>`; (run.steps||[]).forEach((s, i) => { h += stepBlock(s, i, data, run); }); if ((run.notes||[]).length){ h += `<div class="sub" style="margin:8px 0 4px">scratch notes</div>`; run.notes.forEach(n => { h += `<pre class="block">${esc(n)}</pre>`; }); } }); }
+  else if (S.tab === "agree") h = agreeTab(p.agreement);
+  else if (S.tab === "interventions") h = interventionsTab(data.interventions);
+  else if (S.tab === "mechanisms"){ h = armSwitch; if (!armRuns.length) h += `<div class="empty">no ${S.arm==="lens"?"lens-arm":"black-box"} run for this pattern yet.</div>`;
+    armRuns.forEach((run, ri) => { h += `<div class="sub" style="margin:${ri?"12px":"0"} 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${esc(run.arm||"")} · ${esc(run.summary||"")}</div>`; const ms = (run.mechanisms||[]).slice().sort((a,b) => (b.confidence||0)-(a.confidence||0)); if (!ms.length) h += `<div class="empty">no mechanisms reported.</div>`; ms.forEach((m, i) => { h += mechBlock(m, i, data); }); }); }
+  else if (S.tab === "transcript"){ h = armSwitch; if (!armRuns.length) h += `<div class="empty">no ${S.arm==="lens"?"lens-arm":"black-box"} run for this pattern yet.</div>`;
+    armRuns.forEach(run => { h += `<div class="sub" style="margin:0 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${(run.steps||[]).length} steps · stopped: ${esc(run.stopped_by||"?")}</div>`; (run.steps||[]).forEach((s, i) => { h += stepBlock(s, i, data, run); }); if ((run.notes||[]).length){ h += `<div class="sub" style="margin:8px 0 4px">scratch notes</div>`; run.notes.forEach(n => { h += `<pre class="block">${esc(n)}</pre>`; }); } }); }
   else { const items = D.highlights || []; const mine = items.filter(x => x.pattern_key === S.key), rest = items.filter(x => x.pattern_key !== S.key);
     h = `<div class="sub" style="margin:0 0 6px">${mine.length} on this pattern · ${rest.length} elsewhere — lens cells a mechanism quotes that verify verbatim at build time; click to jump</div><div class="hlgrid">` + [...mine, ...rest].map(x => { const idx = items.indexOf(x);
       const smp = esc(x.sample.trim()).split(esc(x.quote)).join(`<mark>${esc(x.quote)}</mark>`), loc = esc(x.local.slice(0, x.local.length - x.token.length)) + `<b>${esc(x.token)}</b>`;
       return `<button class="hlc ${esc(x.region)}" data-hl="${idx}"><div class="where"><b>${esc(x.behavior)}</b> ${esc(cut(x.summary, 50))} · <span title="${esc(SIDE_TIP[(x.read.match(/^diag:(\w+):/)||[])[1]]||"")}">${esc(nameOfId(x.read))}</span> · pos ${x.pos} · L${x.layer}${x.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div><div class="loc">${loc}</div><div class="q">${smp}</div><div class="n">${esc(x.note)}</div></button>`; }).join("") + `</div>`; }
   $("#drawer").innerHTML = h;
   $("#drawer").querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { const x = (D.highlights||[])[+b.dataset.hl]; location.hash = patUrl(x.pattern_key, x.read, x.pos); });
+  $("#drawer").querySelectorAll("[data-arm]").forEach(b => b.onclick = () => { S.arm = b.dataset.arm; renderBelow(); });
+  $("#drawer").querySelectorAll("[data-ex]").forEach(b => b.onclick = () => { const box = document.getElementById("ex-" + b.dataset.ex); if (box) box.hidden = !box.hidden; });
 }
 function renderNote(){
   const r = curRead(), p = byKey[S.key];
