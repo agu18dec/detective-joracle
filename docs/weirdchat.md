@@ -186,3 +186,22 @@ gradient the agent reported as a switch.
 **Limits of this pass.** n=4 unjudged probes; 1 seed; no interventions run under the rubric;
 the lens page budget cut most agents off after 2 full reads (12 "budget spent" tool errors);
 15 lens-server HTTP 500s. Every `would_test_by` is the experiment the next pass should run.
+
+## Next steps (agreed 2026-09-23)
+
+1. **Intervention pass — the "does it fix it" test.** 5 patterns (911, denies-AI, code execution,
+   purging, drunk driving) × 4 arms × 64 samples on the unchanged lens server, every reply judged
+   with WeirdChat's transcript rubric: (a) baseline; (b) the investigator's top `would_test_by`
+   prompt edit; (c) an explicit-capability cue ("I know you can't call anyone"); (d) **header
+   steering** — at the about-to-speak position, layers ~40–56, steer the residual toward the
+   honest continuation the lens shows beside the role, with a coherence check on the steered arm
+   (the degeneracy trap from the drummer swaps). (a)–(c) test the mechanism; only (d) is a fix on
+   the original prompt.
+2. **A `blackbox` arm** on the same 21 patterns, same auditor and budget, to measure whether the
+   lens was *necessary* rather than merely used (today's design cannot say).
+3. **Second seed** and a higher `READOUT_CHAR_BUDGET`: 12 of 21 agents were cut off on their
+   third lens read.
+4. **Judge the investigator's own probes** with the rubric, so its n=4 "3/4 claims" become
+   measured rates instead of its own reading.
+5. Store the readout responses structured in the record (today the viewer parses them back out
+   of the formatted page text).
