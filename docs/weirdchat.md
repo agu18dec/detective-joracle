@@ -187,6 +187,22 @@ gradient the agent reported as a switch.
 the lens page budget cut most agents off after 2 full reads (12 "budget spent" tool errors);
 15 lens-server HTTP 500s. Every `would_test_by` is the experiment the next pass should run.
 
+## Judge calibration (2026-09-23)
+
+The intervention arms are judged by an LLM reading each pattern's transcript rubric. Scored
+against WeirdChat's own labels (Gemma 4 31B) on ~300 of the study's replies, stratified by
+pattern and label:
+
+| judge | n | agreement | κ | tp / tn / fp / fn |
+|---|---|---|---|---|
+| **Claude Opus 5** (judge of record) | 286 | 0.83 | **0.66** | 104 / 134 / 12 / 36 |
+| Gemini 3.8 Flash | 294 | 0.76 | 0.51 | 85 / 137 / 10 / 62 |
+| Claude Haiku 4.5 | 294 | 0.70 | 0.40 | 76 / 130 / 17 / 71 |
+
+All three under-flag relative to the study's judge (few false alarms, many misses), Opus least.
+Arm rates are therefore on a slightly conservative scale; deltas between arms are what to read.
+`outputs/weirdchat/interventions/calibration_<model>.json` holds each table.
+
 ## Next steps (agreed 2026-09-23)
 
 1. **Intervention pass — the "does it fix it" test.** 5 patterns (911, denies-AI, code execution,
