@@ -265,8 +265,11 @@ randomised) per pattern (`agreement.json`, and the "arms compared" dialog in the
 - **14 mechanisms are lens-only** vs 35 black-box-only. The lens-only ones are almost all the
   boundary claims — "two co-existing reply plans at the identical prefix, resolved by sampling",
   "three competing openings at the chat boundary" — plus a few weak/secondary readings.
+- **J-lens vs black-box** (20 of 21 patterns at time of writing, `agreement_jlens_vs_blackbox.json`):
+  the same profile — 92 of 104 J-lens mechanisms (88%) have a black-box counterpart, top
+  hypotheses agree in 9 of 20, 12 J-lens-only vs 33 black-box-only.
 
-Reading: with a strong investigator, OLens did not change what was concluded; it changed the
+Reading: with a strong investigator, neither lens changed what was concluded; they changed the
 evidence type, adding direct observations of the pre-commitment state that the black-box arm
 could only infer from prefills. Agreement means the two arms told the same story, not that
 either is right — whether the lens-only boundary claims are true is what the forecasting eval
