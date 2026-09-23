@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO / "src"))  # so the scripts also run from a bare che
 from detective_joracle.agent.backends import make_backend_factory  # noqa: E402
 from detective_joracle.agent.loop import Budget  # noqa: E402
 from detective_joracle.tools.live import READ_LAYERS, LiveClient, record_extras  # noqa: E402
+from detective_joracle.weirdchat import agreement as wagr  # noqa: E402
 from detective_joracle.weirdchat import data as wd  # noqa: E402
 from detective_joracle.weirdchat import diagnostics as wdiag  # noqa: E402
 from detective_joracle.weirdchat import explain as wex  # noqa: E402
@@ -39,7 +40,7 @@ from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 class Settings:
     """Every ``key=value`` option the driver accepts."""
 
-    stage: str = ""  # comma-separated: data | diagnose | agent | synth | site
+    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | site
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}") or Modal prefix
     target: str = ""  # optional OpenAI-compatible chat server; empty = the lens server's chat
     out_root: str = "outputs/weirdchat"
@@ -260,6 +261,37 @@ def stage_synth(cfg: Settings) -> None:
         print(f"[synth]   {len(c['members']):2d}  {c['name']}", flush=True)
 
 
+def stage_agreement(cfg: Settings) -> None:
+    """The lens arm's mechanisms against the black-box arm's, per pattern, read blind."""
+    runs = root(cfg) / "runs"
+    rows: list[dict[str, Any]] = []
+    for p in pattern_paths(cfg):
+        lens_p = _run_path(runs, p.stem, cfg.auditor, 0, "olens")
+        bb_p = _run_path(runs, p.stem, cfg.auditor, 0, "blackbox")
+        if not (_done(lens_p) and _done(bb_p)):
+            continue
+        lens = json.loads(lens_p.read_text())
+        bb = json.loads(bb_p.read_text())
+        rows.append(
+            wagr.compare(
+                lens["pattern"],
+                lens["record"]["result"]["mechanisms"],
+                bb["record"]["result"]["mechanisms"],
+                model=cfg.aux_model,
+            )
+        )
+        r = rows[-1]
+        print(
+            f"[agreement] {p.stem}: top_match={r.get('top_match')} "
+            f"lens {r.get('lens_with_counterpart')}/{r.get('n_lens')} matched, "
+            f"blackbox {r.get('blackbox_with_counterpart')}/{r.get('n_blackbox')} matched",
+            flush=True,
+        )
+    blob = {"summary": wagr.summarise(rows), "patterns": rows, "model": cfg.aux_model}
+    (root(cfg) / "agreement.json").write_text(wagr.dumps(blob))
+    print(f"[agreement] {blob['summary']}", flush=True)
+
+
 def stage_site(cfg: Settings) -> None:
     """Render the viewer."""
     sys.path.insert(0, str(REPO / "scripts" / "weirdchat"))
@@ -306,6 +338,7 @@ STAGES = {
     "diagnose": stage_diagnose,
     "agent": stage_agent,
     "synth": stage_synth,
+    "agreement": stage_agreement,
     "site": stage_site,
 }
 

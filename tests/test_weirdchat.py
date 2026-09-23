@@ -397,3 +397,43 @@ def test_run_arms_samples_every_arm_and_compares_to_baseline(
     sent = [kw for name, kw in client.requests if name == "chat"]
     assert all(kw["temperature"] == 1.0 and kw["organism"] == "base" for kw in sent)
     assert any(kw["prefill"] == "No." for kw in sent)
+
+
+def test_agreement_maps_counterparts_back_to_arms(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import agreement as wagr
+
+    lens = [
+        {"mechanism": "role capture", "confidence": 0.9},
+        {"mechanism": "lens-only thing", "confidence": 0.4},
+    ]
+    bb = [{"mechanism": "the model takes the assigned role", "confidence": 0.8}]
+
+    def fake_route(
+        items: Any, *, schema: Any, model: str, concurrency: int = 1
+    ) -> list[dict[str, Any] | None]:
+        user = items[0][1]
+        # whichever list is A, its first item matches the other list's first item
+        return [
+            {
+                "a_to_b": [{"id": "A0", "counterpart": "B0"}]
+                + ([{"id": "A1", "counterpart": None}] if "[A1]" in user else []),
+                "b_to_a": [{"id": "B0", "counterpart": "A0"}]
+                + ([{"id": "B1", "counterpart": None}] if "[B1]" in user else []),
+                "top_match": True,
+                "a_only_summary": "x",
+            }
+        ]
+
+    monkeypatch.setattr(wagr, "async_json_route", fake_route)
+    pat = {"pattern_key": "k", "prompt": "p", "behavior_name": "b", "behavior_id": "b"}
+    out = wagr.compare(pat, lens, bb, model="fake")
+    assert (
+        out["top_match"]
+        and out["lens_with_counterpart"] == 1
+        and out["blackbox_with_counterpart"] == 1
+    )
+    assert [m["mechanism"] for m in out["lens_only"]] == ["lens-only thing"] and out[
+        "blackbox_only"
+    ] == []
+    s = wagr.summarise([out, {"error": "x"}])
+    assert s["n_patterns"] == 1 and s["lens_only_total"] == 1 and s["errors"] == 1
