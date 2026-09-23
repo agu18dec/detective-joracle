@@ -230,6 +230,28 @@ at its base rate (both deletions land at p = 0.058). These are prompt-level test
 mechanisms, not fixes on the original prompt; the activation-level test (steering at the boundary)
 is still to run.
 
+### Prediction scoreboard per arm
+
+Each arm's `would_test_by` predictions, matched to the measured arms by an Opus reader and
+scored strictly: *right* = significant (p < 0.05) change of ≥ 10 points in the predicted
+direction; *wrong* = anything else it predicted (including a real effect that missed
+significance); *not predicted* = the run said nothing about that arm. 16 arms over 5 patterns
+(`predictions_<arm>.json`; the viewer's interventions tab shows the per-arm cells).
+
+| investigator arm | right | wrong | not predicted | patterns |
+|---|---|---|---|---|
+| OLens | **11** | 5 | 0 | 5 |
+| black-box | 10 | 3 | 3 | 5 |
+| J-lens (4 of 5 patterns done at time of writing) | 8 | 3 | 2 | 4 |
+
+Three caveats that matter more than the ordering. (1) The arms were written from the **OLens
+run's own** `would_test_by`, so OLens has a built-in coverage advantage (0 "not predicted") — a
+tool-agnostic bank (`docs/weirdchat_eval_design.md` §1) is the fair version. (2) Three of
+OLens's five "wrong" are the underpowered code-execution pattern, where both deletions landed at
+p = 0.058 in the predicted direction; under a directional rule they are right. (3) One seed per
+arm. Taken together: every arm predicted the load-bearing effects; none of them separates on this
+sample.
+
 ## Lens arm vs black-box arm (2026-09-23)
 
 A second investigator per pattern with the same brief, chat tools and budget but **no
