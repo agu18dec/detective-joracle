@@ -351,3 +351,49 @@ def test_blackbox_arm_has_no_readouts_and_no_lens_prose(tmp_path: Path) -> None:
     )
     assert rec.arm == "blackbox" and rec.result is not None and rec.result["mechanisms"]
     assert tools.log[0].name == "chat" and not tools.log[0].output.startswith("tool error")
+
+
+def test_intervention_statistics() -> None:
+    from detective_joracle.weirdchat import interventions as wi
+
+    lo, hi = wi.wilson(28, 64)
+    assert 0.32 < lo < 0.44 < hi < 0.56
+    assert wi.wilson(0, 0) == (0.0, 1.0)
+    # a large effect is significant, no effect is not, degenerate tables return 1
+    assert wi.fisher_two_sided(30, 64, 2, 64) < 1e-6
+    assert wi.fisher_two_sided(20, 64, 21, 64) > 0.5
+    assert wi.fisher_two_sided(0, 10, 0, 10) == 1.0
+
+
+def test_run_arms_samples_every_arm_and_compares_to_baseline(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from detective_joracle.weirdchat import interventions as wi
+
+    pat = _cached_pattern(tmp_path)
+    arms = wi.arms_from_json(
+        {
+            "arms": [
+                {"name": "baseline", "prompt": pat.prompt},
+                {"name": "edit", "prompt": "safer prompt", "prefill": "No."},
+            ]
+        }
+    )
+    # the fake client's replies encode the organism/mode; the judge flags the baseline only
+    monkeypatch.setattr(
+        wi,
+        "judge",
+        lambda rubric, ex, model, concurrency=32: (
+            [u == pat.prompt for u, _ in ex],
+            ["" for _ in ex],
+        ),
+    )
+    client = FakeClient()
+    res = wi.run_arms(pat, arms, client, n=8, judge_model="fake", seed=1)
+    assert [a["arm"]["name"] for a in res["arms"]] == ["baseline", "edit"]
+    assert res["arms"][0]["k"] == 8 and res["arms"][1]["k"] == 0
+    assert res["arms"][1]["delta_vs_baseline"] == -1.0
+    assert res["arms"][1]["fisher_p_vs_baseline"] < 0.001
+    sent = [kw for name, kw in client.requests if name == "chat"]
+    assert all(kw["temperature"] == 1.0 and kw["organism"] == "base" for kw in sent)
+    assert any(kw["prefill"] == "No." for kw in sent)
