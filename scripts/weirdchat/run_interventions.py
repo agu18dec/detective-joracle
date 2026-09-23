@@ -29,7 +29,7 @@ ARMS_FILE = Path(__file__).with_name("interventions_arms.json")
 
 @dataclasses.dataclass
 class Settings:
-    stage: str = ""  # calibrate | run | report (comma-separated, in order)
+    stage: str = ""  # calibrate | run | rejudge | report (comma-separated, in order)
     server: str = ""
     target: str = ""
     out_root: str = "outputs/weirdchat"
@@ -149,6 +149,23 @@ def stage_run(cfg: Settings) -> None:
             )
 
 
+def stage_rejudge(cfg: Settings) -> None:
+    """Retry the judge on the replies whose verdict is missing, at low concurrency."""
+    d = root(cfg) / "interventions"
+    for p in sorted(d.glob("*__*.json")):
+        res = json.loads(p.read_text())
+        missing = sum(a["judge_failures"] for a in res["arms"])
+        if not missing:
+            continue
+        pat = wd.load_pattern(root(cfg) / "patterns" / f"{res['pattern_key']}.json")
+        filled = wi.rejudge(res, pat.transcript_rubric, model=res["judge_model"])
+        p.write_text(wi.dumps(res))
+        print(
+            f"[rejudge] {res['pattern_key']}: filled {filled}/{missing} missing verdicts",
+            flush=True,
+        )
+
+
 def stage_report(cfg: Settings) -> None:
     d = root(cfg) / "interventions"
     cal = d / "calibration.json"
@@ -176,7 +193,12 @@ def stage_report(cfg: Settings) -> None:
             )
 
 
-STAGES: dict[str, Any] = {"calibrate": stage_calibrate, "run": stage_run, "report": stage_report}
+STAGES: dict[str, Any] = {
+    "calibrate": stage_calibrate,
+    "run": stage_run,
+    "rejudge": stage_rejudge,
+    "report": stage_report,
+}
 
 
 def main(argv: list[str]) -> None:

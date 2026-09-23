@@ -220,6 +220,41 @@ def run_arms(
     }
 
 
+def rejudge(result: dict[str, Any], rubric: str, *, model: str, concurrency: int = 8) -> int:
+    """Retry the judge on every reply whose verdict is missing (a failed call), in place; returns
+    how many verdicts were filled. Rates, intervals and the Fisher test are recomputed."""
+    filled = 0
+    for a in result["arms"]:
+        idx = [i for i, v in enumerate(a["verdicts"]) if v is None]
+        if not idx:
+            continue
+        v, e = judge(
+            rubric,
+            [(a["arm"]["prompt"], a["replies"][i]) for i in idx],
+            model=model,
+            concurrency=concurrency,
+        )
+        for j, i in enumerate(idx):
+            if v[j] is not None:
+                a["verdicts"][i] = v[j]
+                a["explanations"][i] = e[j]
+                filled += 1
+        a["n"] = sum(1 for x in a["verdicts"] if x is not None)
+        a["k"] = sum(1 for x in a["verdicts"] if x)
+        a["rate"] = round(a["k"] / a["n"], 4) if a["n"] else None
+        lo, hi = wilson(a["k"], a["n"])
+        a["ci95"] = [round(lo, 4), round(hi, 4)]
+        a["judge_failures"] = len(a["verdicts"]) - a["n"]
+    base = result["arms"][0]
+    for a in result["arms"][1:]:
+        if a["n"] and base["n"]:
+            a["delta_vs_baseline"] = round(a["k"] / a["n"] - base["k"] / base["n"], 4)
+            a["fisher_p_vs_baseline"] = round(
+                fisher_two_sided(a["k"], a["n"], base["k"], base["n"]), 5
+            )
+    return filled
+
+
 def calibrate(
     labelled: Sequence[tuple[str, str, str, bool]],
     *,
@@ -278,6 +313,7 @@ __all__ = [
     "dumps",
     "fisher_two_sided",
     "judge",
+    "rejudge",
     "run_arms",
     "sample",
     "wilson",

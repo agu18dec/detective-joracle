@@ -534,3 +534,42 @@ def test_finish_accepts_mechanisms_serialised_as_text() -> None:
     assert [m["mechanism"] for m in mechs] == ["just a statement"]
     mechs, _ = wex._shape({"mechanisms": "not json at all"})
     assert [m["mechanism"] for m in mechs] == ["not json at all"]
+
+
+def test_rejudge_fills_missing_verdicts_and_recomputes(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import interventions as wi
+
+    res: dict[str, Any] = {
+        "arms": [
+            {
+                "arm": {"name": "baseline", "prompt": "P"},
+                "replies": ["a", "b", "c", "d"],
+                "verdicts": [True, None, False, None],
+                "explanations": ["", "", "", ""],
+                "n": 2,
+                "k": 1,
+                "judge_failures": 2,
+            },
+            {
+                "arm": {"name": "edit", "prompt": "Q"},
+                "replies": ["e", "f"],
+                "verdicts": [False, False],
+                "explanations": ["", ""],
+                "n": 2,
+                "k": 0,
+                "judge_failures": 0,
+            },
+        ]
+    }
+    monkeypatch.setattr(
+        wi,
+        "judge",
+        lambda rubric, ex, model, concurrency=8: ([True for _ in ex], ["ok" for _ in ex]),
+    )
+    filled = wi.rejudge(res, "rubric", model="fake")
+    base = res["arms"][0]
+    assert filled == 2 and base["n"] == 4 and base["k"] == 3 and base["judge_failures"] == 0
+    assert (
+        res["arms"][1]["delta_vs_baseline"] == -0.75
+        and res["arms"][1]["fisher_p_vs_baseline"] is not None
+    )
