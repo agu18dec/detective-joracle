@@ -37,6 +37,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "src"))  # so the brief can be rebuilt with the repo's own prompts
+
 # a single OLens sample keeps at most this much text (measured max is 431, so nothing is clipped)
 CELL_CAP = 450
 # a tool result / an assistant turn in the transcript keeps at most this much text
@@ -329,6 +332,69 @@ def fork_position(read: dict[str, Any], fork: dict[str, Any]) -> int | None:
     return None
 
 
+# ------------------------------------------------------------------ the brief
+N_SIDE = 2  # study rollouts per side handed to the investigator (run_weirdchat.py default)
+
+
+def load_prompts() -> tuple[Any, Any, str]:
+    """(brief, system_prompt, how) from detective_joracle.weirdchat.prompts.
+
+    The package import needs the repo's dependencies (requests, openai). When they are missing
+    the module is loaded from its source instead — same templates, same code — with its one
+    relative import (MAX_PREDICTIONS) read out of agent/loop.py."""
+    try:
+        from detective_joracle.weirdchat.prompts import brief, system_prompt
+
+        return brief, system_prompt, "detective_joracle.weirdchat.prompts (imported)"
+    except Exception as exc:  # fall back to the source: the brief must still be faithful
+        reason = f"{type(exc).__name__}: {exc}"
+    try:
+        src_dir = REPO / "src" / "detective_joracle"
+        tree = ast.parse((src_dir / "weirdchat" / "prompts.py").read_text())
+        tree.body = [n for n in tree.body if not (isinstance(n, ast.ImportFrom) and n.level)]
+        max_pred = 10
+        for node in ast.parse((src_dir / "agent" / "loop.py").read_text()).body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "MAX_PREDICTIONS" for t in node.targets
+            ):
+                max_pred = int(ast.literal_eval(node.value))
+        ns: dict[str, Any] = {"MAX_PREDICTIONS": max_pred, "__name__": "wc_prompts"}
+        exec(compile(tree, "prompts.py", "exec"), ns)  # noqa: S102 — the repo's own module
+        return ns["brief"], ns["system_prompt"], f"prompts.py loaded from source ({reason})"
+    except Exception as exc:
+        return None, None, f"unavailable: {reason}; source fallback failed: {exc}"
+
+
+def rollout_ids(samples: list[dict[str, Any]], n_side: int = N_SIDE) -> list[tuple[str, bool, str]]:
+    """The seeded study rollouts exactly as explain.rollout_ids orders them: w000m, w001m, w000u, w001u."""
+    out: list[tuple[str, bool, str]] = []
+    for i, smp in enumerate([x for x in samples if x["matched"]][:n_side]):
+        out.append((f"w{i:03d}m", True, smp["text"]))
+    for i, smp in enumerate([x for x in samples if not x["matched"]][:n_side]):
+        out.append((f"w{i:03d}u", False, smp["text"]))
+    return out
+
+
+def brief_of(pat: dict[str, Any], brief_fn: Any) -> dict[str, Any] | None:
+    """The opening message the investigator received for this pattern, rebuilt from the pattern."""
+    if brief_fn is None:
+        return None
+    rollouts = [(cid, m, t[:3000]) for cid, m, t in rollout_ids(pat["samples"])]
+    try:
+        text = brief_fn(
+            behavior_name=pat["behavior_name"],
+            rubric=pat["rubric"],
+            group_summary=pat["group_summary"],
+            prompt=pat["prompt"],
+            match_rate=pat["published_match_rate"] or 0.0,
+            n_samples=len(pat["samples"]),
+            rollouts=rollouts,
+        )
+    except Exception as exc:
+        return {"text": None, "ids": [], "error": f"{type(exc).__name__}: {exc}"}
+    return {"text": text, "ids": [cid for cid, _, _ in rollouts], "error": None}
+
+
 # ------------------------------------------------------------------ transcript
 def steps_of(record: dict[str, Any]) -> list[dict[str, Any]]:
     """Chronological transcript: assistant text, tool calls, and each call's paired output."""
@@ -362,6 +428,9 @@ def steps_of(record: dict[str, Any]) -> list[dict[str, Any]]:
                     "name": name,
                     "args": compact_args(args),
                     "user": as_text(args.get("user")) if name == "chat" else "",
+                    "system": as_text(args.get("system")) if name == "chat" else "",
+                    "prefill": as_text(args.get("prefill")) if name == "chat" else "",
+                    "note": as_text(args.get("text")) if name == "note" else "",
                     "conversation": as_text(args.get("conversation")),
                     "tool_index": tool_index,
                     "output": clip(as_text(logged.get("output")), TOOL_OUTPUT_CAP),
@@ -543,7 +612,7 @@ def synth_meta(out_root: Path) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------- split
-HEAVY_PATTERN_KEYS = ("samples", "reads", "fork")
+HEAVY_PATTERN_KEYS = ("samples", "reads", "fork", "brief")
 HEAVY_RUN_KEYS = ("steps", "notes")
 
 
@@ -858,6 +927,10 @@ def build_site(
     paths = sorted(pattern_dir.glob("*.json")) if pattern_dir.is_dir() else []
     patterns = [pattern_of(p, out_root) for p in paths]
     patterns.sort(key=lambda p: (p["behavior_name"], p["key"]))
+    brief_fn, system_fn, brief_how = load_prompts()
+    for pat in patterns:
+        pat["brief"] = brief_of(pat, brief_fn)
+    print(f"brief: {brief_how}")
 
     cards, hl_stats = auto_highlights(patterns)
     hand = hand_highlights(patterns, highlights) if highlights else []
@@ -877,6 +950,9 @@ def build_site(
         "synth": synth_meta(out_root),
         "highlights": cards,
         "verify": {"verified": hl_stats["verified"], "fragments": hl_stats["fragments"]},
+        "system_prompt": system_fn() if system_fn else None,
+        "brief_how": brief_how,
+        "n_side": N_SIDE,
         "en": en,
         "counts": {
             "patterns": len(patterns),
@@ -1066,6 +1142,17 @@ i.matched{background:var(--miss)} i.unmatched{background:var(--hit)} i.agent{bac
 .tok.cur{background:var(--accent)!important;color:#fff;border-color:var(--accent)}
 .tok.nodata{opacity:.4;cursor:default;background:transparent}
 .tok .nl{font-size:10px;color:var(--text-faint)} .tok.cur .nl{color:#fff}
+.tlegend{display:flex;gap:12px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--text-dim);margin:0 0 8px}
+.tlegend .sw{width:11px;height:11px}
+.prose{font-family:var(--sans);font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--ground);border:1px solid var(--line-soft);border-radius:5px;padding:8px 10px;color:var(--text)}
+.cmp2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+.cmp2 .col{min-width:0}
+.cmp2 .col h4{margin:0 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
+.cmp2 .div.flagged{background:var(--miss-soft)} .cmp2 .div.clean{background:var(--hit-soft)}
+.caption{font-size:11.5px;color:var(--text-dim);margin:8px 0 4px}
+pre.brief{font-family:var(--mono);font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--ground);border:1px solid var(--line-soft);border-radius:4px;padding:8px 10px;margin:6px 0 0}
+.qa{margin-top:4px} .qa .lab{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint);margin:6px 0 2px} .qa .lab b{letter-spacing:0;text-transform:none;font-family:var(--mono);color:var(--text-dim);font-weight:400}
+.qa .body{font-family:var(--sans);font-size:12.5px;white-space:pre-wrap;word-break:break-word;background:var(--ground);border:1px solid var(--line-soft);border-radius:4px;padding:6px 8px}
 .rolls{margin-top:14px}
 .rolls h3{margin:0 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
 .roll{display:flex;gap:8px;align-items:baseline;width:100%;text-align:left;border:1px solid var(--line-soft);border-left:3px solid var(--line);background:var(--surface);border-radius:4px;padding:4px 8px;margin:0 0 4px;cursor:pointer;font-size:11.5px}
@@ -1178,6 +1265,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
   <input id="search" placeholder="search patterns and mechanisms  ( ; )" autocomplete="off" spellcheck="false">
   <span class="spacer"></span>
   <a class="btn" id="themes-btn" href="#/themes" title="mechanism clusters">themes</a>
+  <button class="btn" id="text-toggle" aria-pressed="false" title="read the replies as plain text instead of tokens (x)">text</button>
   <button class="btn" id="ctx-toggle" aria-pressed="true" title="case / hypothesis / summary / rubric (c)">context</button>
   <button class="btn" id="wrap-toggle" aria-pressed="false" title="cap row height (w)">compact rows</button>
   <button class="btn" id="below-toggle" aria-pressed="false" title="mechanisms · transcript · highlights">details</button>
@@ -1231,6 +1319,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
     <span class="kbd">1…9</span><span>show / hide a read as a column</span>
     <span class="kbd">c</span><span>show / hide the context panes</span>
     <span class="kbd">w</span><span>compact rows on / off</span>
+    <span class="kbd">x</span><span>replies as plain text / as tokens</span>
     <span class="kbd">/</span><span>find in this pattern's readouts (violet)</span>
     <span class="kbd">;</span><span>search patterns and mechanisms</span>
     <span class="kbd">t</span><span>light / dark</span>
@@ -1263,12 +1352,22 @@ $("#banner").textContent = "Hypotheses, unverified: no intervention was run unde
 const SIDE = {matched: "flagged reply", unmatched: "clean reply"};
 const SIDE_TIP = {matched: "the judge said this reply SHOWS the behavior", unmatched: "the judge said this reply does NOT show it"};
 const side = l => SIDE[l] || l;
-function nameOfId(id){ const m = String(id).match(/^diag:(\w+):(.*)$/); return m ? `${side(m[1])} s${m[2]}` : String(id).replace(/^agent:/, "agent "); }
-function readName(r){ return r.source==="diag" ? `${side(r.label)} · s${r.sample_index}` : `agent ${r.conv_id}${r.same_rollout_as ? " (= " + nameOfId(r.same_rollout_as) + ", other lens sample)" : ""}`; }
+// "of 64": the pattern's own sample count when it is the study total, else WeirdChat's ~64
+function sampleTotal(){ const p = byKey[S.key]; return p && p.n_samples >= 32 ? `of ${p.n_samples}` : "of ~64"; }
+function nameOfId(id){
+  const m = String(id).match(/^diag:(\w+):(.*)$/); if (m) return `${side(m[1])} · sample ${m[2]}`;
+  const a = String(id).match(/^agent:(\w+)/); if (!a) return String(id);
+  const w = a[1].match(/^w\d+([mu])$/); return w ? `${side(w[1]==="m"?"matched":"unmatched")} · ${a[1]} (investigator's own lens sample)` : `investigator probe ${a[1]}`;
+}
+function readName(r){
+  if (r.source === "diag") return `${side(r.label)} · sample ${r.sample_index} ${sampleTotal()}`;
+  if (/^w\d+[mu]$/.test(r.conv_id||"")){ const twin = S.data && r.same_rollout_as ? S.data.byId[r.same_rollout_as] : null; return `${side(r.label)} · sample ${twin ? twin.sample_index : r.conv_id} (investigator's own lens sample)`; }
+  return `investigator probe ${r.conv_id}`;
+}
 
 // ------------------------------------------------------------------ state
 const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
-           colw:{}, rowh:{}, below:false, tab:"mechanisms", agentPromise:null};
+           colw:{}, rowh:{}, below:false, tab:"brief", textView: load("wc-text") === "1", agentPromise:null};
 const heavyCache = {};
 function dataUrl(key){ return "data/" + encodeURIComponent(key) + ".json"; }
 function patUrl(key, read, pos){ let h = "#/pattern/" + encodeURIComponent(key); if (read) h += "?read=" + encodeURIComponent(read) + (pos==null ? "" : "&pos=" + pos); return h; }
@@ -1360,7 +1459,7 @@ function renderBar(){
   $("#read-select").innerHTML = reads.length ? reads.map(r => `<option value="${esc(r.id)}" ${r.id===S.read?"selected":""}>${esc(readLabel(r))}</option>`).join("") : `<option>—</option>`;
   $("#cmp-toggles").innerHTML = reads.filter(r => !r.parse_error).map((r, i) => `<button class="btn cmp" data-cmp="${esc(r.id)}" aria-pressed="${S.compare.includes(r.id)}" ${r.id===S.read?"disabled":""} title="${esc((SIDE_TIP[r.label] ? SIDE_TIP[r.label] + " — " : "") + readName(r) + " as a grid column (" + (i+1) + ")")}"><i class="${readDot(r)}"></i>${esc(readName(r))}</button>`).join("");
   $("#cmp-toggles").querySelectorAll("[data-cmp]").forEach(b => b.onclick = () => toggleCompare(b.dataset.cmp));
-  $("#ctx-toggle").setAttribute("aria-pressed", String(S.ctx)); $("#wrap-toggle").setAttribute("aria-pressed", String(S.compact)); $("#below-toggle").setAttribute("aria-pressed", String(S.below));
+  $("#ctx-toggle").setAttribute("aria-pressed", String(S.ctx)); $("#text-toggle").setAttribute("aria-pressed", String(S.textView)); $("#wrap-toggle").setAttribute("aria-pressed", String(S.compact)); $("#below-toggle").setAttribute("aria-pressed", String(S.below));
 }
 
 // --------------------------------------------------------------------- ctx
@@ -1411,10 +1510,35 @@ function foundPositions(){
   const r0 = curRead(); for (const p of (r0.positions||[])) for (const r of reads) if (cellsAt(r, p).some(s => rx.test(s))){ set.add(p); break; }
   return set;
 }
+const LEGEND = `<div class="tlegend"><span><i class="sw" style="background:var(--accent)"></i>token in view</span>` +
+  `<span title="about to speak: the last token before the model writes — identical for every reply"><i class="sw" style="background:var(--sample-soft);border-color:var(--sample-line)"></i>yellow = about to speak: the last token before the model writes — identical for every reply</span>` +
+  `<span><i class="sw" style="border-top:3px solid var(--hit);background:var(--surface)"></i>green top bar = a cell here contains a phrase the investigator quoted (verified)</span>` +
+  `<span><i class="sw" style="box-shadow:inset 0 -3px 0 var(--find);background:var(--surface)"></i>violet = search hit</span>` +
+  `<span><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i>dotted = ≈ where the flagged and clean replies diverge</span>` +
+  `<span><i class="sw" style="opacity:.4;background:var(--text-faint)"></i>faded ‥ = position not read</span></div>`;
+function proseBlock(label, text, cls, tip){ return `<div class="blk ${cls||""}"><div class="role"><span${tip?` title="${esc(tip)}"`:""}>${esc(label)}</span></div><div class="prose">${esc(text||"(empty)")}</div></div>`; }
+function renderProse(r, box){
+  // the same read as readable text: prompt, then the reply, labelled exactly as the strip labels it
+  const data = S.data, p = byKey[S.key];
+  const user = (r.messages||[]).filter(m => m.role === "user").map(m => m.content).join("\n\n") || p.prompt;
+  let h = `<div class="tlegend"><span>text view — the replies as prose; press <span class="kbd">x</span> for the clickable tokens</span></div>`;
+  h += proseBlock("user prompt", user, "user");
+  h += proseBlock(replyLabel(r), r.completion + (r.text_source === "tool page" && r.completion && r.completion.length >= 900 ? "\n\n[clipped to 900 chars on the investigator's page]" : ""), "reply", SIDE_TIP[r.label]);
+  const dm = data.reads.find(x => x.source==="diag" && x.label==="matched"), du = data.reads.find(x => x.source==="diag" && x.label==="unmatched");
+  if (dm && du && data.fork && data.fork.prefix_chars != null){
+    const n = data.fork.prefix_chars, cutAt = (t) => [t.slice(0, n), t.slice(n)];
+    const [pm, rm] = cutAt(dm.completion||""), [pu, ru] = cutAt(du.completion||"");
+    h += `<div class="caption">same prompt, same settings — these two replies diverge here${n ? ` (after ${n} shared characters)` : " (from the first word)"}</div>` +
+      `<div class="cmp2"><div class="col"><h4 title="${esc(SIDE_TIP.matched)}">flagged reply · sample ${dm.sample_index}</h4><div class="prose">${esc(pm)}<span class="div flagged">${esc(rm)}</span></div></div>` +
+      `<div class="col"><h4 title="${esc(SIDE_TIP.unmatched)}">clean reply · sample ${du.sample_index}</h4><div class="prose">${esc(pu)}<span class="div clean">${esc(ru)}</span></div></div></div>`;
+  }
+  box.innerHTML = h;
+}
 function renderText(){
   const r = curRead(), box = $("#text"); if (!r){ return; }
+  if (S.textView) return renderProse(r, box);
   const hl = S.data.hl[r.id] || {}, found = foundPositions();
-  let h = "";
+  let h = LEGEND;
   if (r.parse_error) h += `<div class="notice">this readout page did not parse: ${esc(r.parse_error)}</div>`;
   const rows = r.rows || []; let i = 0;
   if (!rows.length) h += `<div class="status">no positions in this read.</div>`;
@@ -1540,23 +1664,51 @@ function linkCells(text, data){ let out = "", last = 0, cid = null; const re = /
     last = m.index + m[0].length; }
   return out + esc(text.slice(last)); }
 function mechBlock(m, i, data){ return `<div class="mech"><div><span class="n">${i+1}.</span>${esc(m.mechanism)}${m.confidence==null?"":` <span class="badge ${m.confidence>=0.7?"miss":(m.confidence>=0.4?"hold":"dim")}">confidence ${num(m.confidence)}</span>`}</div>` + (m.evidence ? `<div class="ev">${esc(m.evidence)}</div>` : "") + (m.readout_cells ? `<div class="cells">cells: ${linkCells(m.readout_cells, data)}</div>` : "") + (m.would_test_by ? `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>` : "") + `</div>`; }
-function stepBlock(s, i, data){ const rd = s.tool_index!=null ? data.byTool[s.tool_index] : null;
+function showAll(text, n){ const t = text || ""; if (t.length <= n) return `<div class="body">${esc(t)}</div>`; return `<div class="body">${esc(t.slice(0, n))} …</div><details><summary>show all (${t.length} chars)</summary><div class="body">${esc(t)}</div></details>`; }
+function parseReplies(out){
+  // the tool's _record format: "[c005] organism reply (N tokens)[ [truncated]]:\n<text>" blocks separated by blank lines
+  const re = /^\[(c\d+)\] (\S+) (reply|sampled USER turn|continuation) \((\d+) tokens\)( \[truncated\])?:\n/gm; const heads = []; let m;
+  while ((m = re.exec(out||""))) heads.push({cid: m[1], model: m[2], kind: m[3], tokens: m[4], trunc: !!m[5], start: m.index, end: m.index + m[0].length});
+  if (!heads.length) return null;
+  return heads.map((h, i) => ({...h, text: (out||"").slice(h.end, i+1 < heads.length ? heads[i+1].start : undefined).replace(/\n+$/, "")}));
+}
+function stepBlock(s, i, data, run){ const rd = s.tool_index!=null ? data.byTool[s.tool_index] : null;
   let h = `<div class="step ${esc(s.name||"")}"><div class="hd"><span class="nm">${esc(s.name||"assistant")}</span><span>#${i+1}${s.meta?" · "+esc(s.meta):""}</span>${rd ? `<a href="${patUrl(data.key, rd.id, null)}" title="${esc(rd.id)}">open this read → ${esc(readName(rd))}${rd.parse_error?" (unparsed)":""}</a>` : ""}</div>`;
   if (s.think) h += `<div class="think">${esc(s.think)}</div>`;
-  if (s.name === "chat") h += `<div class="call">user → <span class="usr">${esc(s.user)}</span></div>`; else if (s.name) h += `<div class="call">${esc(s.name)}(${esc(s.args)})</div>`;
-  if (s.output){ const o = s.output; h += `<pre class="block">${esc(o.slice(0,500))}${o.length>500?" …":""}</pre>`; if (o.length > 500) h += `<details><summary>show full ${s.name==="chat"?"reply":"result"} (${o.length} chars)</summary><pre class="block">${esc(o)}</pre></details>`; }
+  if (s.name === "chat"){
+    h += `<div class="qa"><div class="lab">investigator asked:</div>${showAll(s.user, 600)}`;
+    if (s.system) h += `<div class="lab">with system prompt:</div>${showAll(s.system, 600)}`;
+    if (s.prefill) h += `<div class="lab">with the reply prefilled:</div>${showAll(s.prefill, 600)}`;
+    const reps = parseReplies(s.output);
+    if (reps) reps.forEach(r => { h += `<div class="lab">model answered: <b>${esc(r.cid)} · ${esc(r.model)} · ${r.tokens} tokens${r.trunc?" · truncated":""}</b></div>${showAll(r.text, 600)}`; });
+    else if (s.output) h += `<div class="lab">model answered:</div>${showAll(s.output, 600)}`;
+    h += `</div>`;
+  } else if (s.name === "note"){ h += `<div class="qa"><div class="lab">note to self:</div>${showAll(s.note || s.args, 600)}</div>`; }
+  else if (s.name === "finish"){ h += `<div class="call">finished with ${(run && run.mechanisms ? run.mechanisms.length : 0)} mechanisms — see the mechanisms tab</div>`; }
+  else { if (s.name) h += `<div class="call">${esc(s.name)}(${esc(s.args)})</div>`;
+    if (s.output && s.name !== "readouts"){ const o = s.output; h += `<pre class="block">${esc(o.slice(0,500))}${o.length>500?" …":""}</pre>`; if (o.length > 500) h += `<details><summary>show full result (${o.length} chars)</summary><pre class="block">${esc(o)}</pre></details>`; }
+    else if (s.output) h += `<details><summary>raw readout page (${s.output.length} chars, clipped; the structured read is in the strip)</summary><pre class="block">${esc(s.output)}</pre></details>`; }
   return h + `</div>`; }
+function briefTab(data){
+  const b = data.brief;
+  if (!b || !b.text) return `<div class="empty">the brief could not be rebuilt — ${esc(b && b.error ? b.error : (D.brief_how || "prompts unavailable"))}</div>`;
+  let h = `<div class="sub" style="margin:0 0 6px">what the investigator was handed: the behavior, the judge's rubric, the prompt, and ${D.n_side||2} flagged + ${D.n_side||2} clean replies, pre-loaded as conversations ${esc((b.ids||[]).join("/"))}</div>`;
+  if (D.system_prompt) h += `<details><summary>system prompt (${D.system_prompt.length} chars)</summary><pre class="brief">${esc(D.system_prompt)}</pre></details>`;
+  h += `<pre class="brief">${esc(b.text)}</pre><div class="sub" style="margin-top:6px">rebuilt at build time from the pattern with the repo's prompts module (${esc(D.brief_how||"")})</div>`;
+  return h;
+}
 function renderBelow(){
   const box = $("#below"); box.hidden = !S.below; if (!S.below) return;
-  const data = S.data, tabs = [["mechanisms", "ranked mechanisms"], ["transcript", "agent transcript"], ["highlights", "highlights"]];
+  const data = S.data, tabs = [["brief", "brief"], ["mechanisms", "ranked mechanisms"], ["transcript", "agent transcript"], ["highlights", "highlights"]];
   $("#tabs").innerHTML = tabs.map(([k, l]) => `<button class="btn" data-tab="${k}" aria-pressed="${S.tab===k}">${l}</button>`).join("") + `<span class="sub" style="margin-left:8px">unverified hypotheses — nothing here was tested</span>`;
   $("#tabs").querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { S.tab = b.dataset.tab; renderBelow(); });
   let h = "";
   if (!data) h = `<div class="status">no pattern loaded.</div>`;
+  else if (S.tab === "brief") h = briefTab(data);
   else if (S.tab === "mechanisms"){ if (!data.runs.length) h = `<div class="empty">no agent run for this pattern yet.</div>`;
     data.runs.forEach((run, ri) => { h += `<div class="sub" style="margin:${ri?"12px":"0"} 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${esc(run.summary||"")}</div>`; const ms = (run.mechanisms||[]).slice().sort((a,b) => (b.confidence||0)-(a.confidence||0)); if (!ms.length) h += `<div class="empty">no mechanisms reported.</div>`; ms.forEach((m, i) => { h += mechBlock(m, i, data); }); }); }
   else if (S.tab === "transcript"){ if (!data.runs.length) h = `<div class="empty">no agent run for this pattern yet.</div>`;
-    data.runs.forEach(run => { h += `<div class="sub" style="margin:0 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${(run.steps||[]).length} steps · stopped: ${esc(run.stopped_by||"?")}</div>`; (run.steps||[]).forEach((s, i) => { h += stepBlock(s, i, data); }); if ((run.notes||[]).length){ h += `<div class="sub" style="margin:8px 0 4px">scratch notes</div>`; run.notes.forEach(n => { h += `<pre class="block">${esc(n)}</pre>`; }); } }); }
+    data.runs.forEach(run => { h += `<div class="sub" style="margin:0 0 6px"><b>${esc(run.auditor)}</b> seed ${run.seed} · ${(run.steps||[]).length} steps · stopped: ${esc(run.stopped_by||"?")}</div>`; (run.steps||[]).forEach((s, i) => { h += stepBlock(s, i, data, run); }); if ((run.notes||[]).length){ h += `<div class="sub" style="margin:8px 0 4px">scratch notes</div>`; run.notes.forEach(n => { h += `<pre class="block">${esc(n)}</pre>`; }); } }); }
   else { const items = D.highlights || []; const mine = items.filter(x => x.pattern_key === S.key), rest = items.filter(x => x.pattern_key !== S.key);
     h = `<div class="sub" style="margin:0 0 6px">${mine.length} on this pattern · ${rest.length} elsewhere — lens cells a mechanism quotes that verify verbatim at build time; click to jump</div><div class="hlgrid">` + [...mine, ...rest].map(x => { const idx = items.indexOf(x);
       const smp = esc(x.sample.trim()).split(esc(x.quote)).join(`<mark>${esc(x.quote)}</mark>`), loc = esc(x.local.slice(0, x.local.length - x.token.length)) + `<b>${esc(x.token)}</b>`;
@@ -1603,6 +1755,7 @@ $("#read-select").onchange = e => { selectRead(e.target.value, null); e.target.b
 $("#prev-item").onclick = () => stepPattern(-1); $("#next-item").onclick = () => stepPattern(1);
 $("#keys").onclick = () => $("#help").showModal(); $("#manual-btn").onclick = () => $("#manual").showModal();
 $("#ctx-toggle").onclick = () => { S.ctx = !S.ctx; renderBar(); renderCtx(); };
+$("#text-toggle").onclick = () => { S.textView = !S.textView; store("wc-text", S.textView ? "1" : "0"); renderBar(); renderText(); };
 $("#wrap-toggle").onclick = () => { S.compact = !S.compact; renderBar(); renderGrid(); };
 $("#below-toggle").onclick = () => { S.below = !S.below; renderBar(); renderBelow(); };
 $("#theme").onclick = toggleTheme;
@@ -1621,7 +1774,7 @@ document.addEventListener("keydown", e => {
   else if (k === "j") stepPattern(1); else if (k === "k") stepPattern(-1);
   else if (k === "]") stepBehavior(1); else if (k === "[") stepBehavior(-1);
   else if (k === "p"){ const r = curRead(); if (r && r.aboutPos!=null) selectRead(r.id, r.aboutPos); }
-  else if (k === "c") $("#ctx-toggle").click(); else if (k === "w") $("#wrap-toggle").click();
+  else if (k === "c") $("#ctx-toggle").click(); else if (k === "w") $("#wrap-toggle").click(); else if (k === "x") $("#text-toggle").click();
   else if (k === "/"){ $("#find").focus(); e.preventDefault(); }
   else if (k === ";"){ $("#search").focus(); e.preventDefault(); }
   else if (k === "?") $("#help").showModal(); else if (k === "m") $("#manual").showModal(); else if (k === "t") toggleTheme();
