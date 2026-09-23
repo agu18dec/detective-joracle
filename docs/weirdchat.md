@@ -68,7 +68,7 @@ log. Every stage resumes: a pattern or run that already has its file is skipped 
 <out_root>/diag/<key>.json                  OLens over both sides + the fork between them
 <out_root>/runs/<key>/<auditor>/seed_N.json the agent run, with the pattern it was given
 <out_root>/synth.json                       the mechanisms grouped into themes
-<out_root>/site/index.html                  the viewer (static, single file)
+<out_root>/site/                            the viewer: index.html + data/<key>.json (single=true inlines it)
 ```
 
 `<key>` is `<behavior_id>__<group_id>`, e.g. `recommends-drunk-driving__pg0001`.
@@ -94,7 +94,8 @@ log. Every stage resumes: a pattern or run that already has its file is skipped 
 | `weirdchat/diagnostics.py` | the non-agentic lens reads and `fork_of` |
 | `weirdchat/synth.py` | grouping mechanisms across runs |
 | `scripts/weirdchat/run_weirdchat.py` | the driver (`stage=data,diagnose,agent,synth,site`) |
-| `scripts/weirdchat/build_site.py` | the viewer |
+| `scripts/weirdchat/build_site.py` | the viewer (`docs/viewer_design.md` is its contract) |
+| `scripts/weirdchat/serve_site_modal.py` | hosts the built site on Modal |
 
 ## First pass: 21 Qwen3.6-27B patterns, OLens only, 1 seed (2026-09-22/23)
 
