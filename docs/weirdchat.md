@@ -6,6 +6,16 @@ released weights — and the question is *why the model does it*. There is no gr
 and this pipeline does not pretend otherwise: a run produces ranked **mechanisms**, each with the
 evidence it rests on and the experiment that would test it, and nothing in the run verifies them.
 
+## In one paragraph
+
+WeirdChat (Transluce) sampled the plain Qwen3.6-27B about 64 times per prompt and had a judge label
+every reply: does it show the behavior or not. A **flagged reply** is one the judge said shows it
+(WeirdChat's "matched"); a **clean reply** is one to the *same prompt* the judge said does not
+("unmatched"). That label is the ground truth for **what** the model does — "44%" means 28 of 64
+replies were flagged. Nobody has ground truth for **why**; this pipeline collects one
+investigator's hypotheses about why, read off the model's internals with OLens, and states them as
+hypotheses.
+
 ## The data
 
 [WeirdChat](https://weirdchat.transluce.org) (Transluce, v1.0.1) is a catalogue of behaviors that
