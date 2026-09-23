@@ -307,3 +307,47 @@ def test_prose_only_finish_bounces_back(tmp_path: Path) -> None:
     )
     assert tools.log[0].output.startswith("tool error") and "ARRAY" in tools.log[0].output
     assert rec.result is not None and [m["mechanism"] for m in rec.result["mechanisms"]] == ["m"]
+
+
+def test_blackbox_arm_has_no_readouts_and_no_lens_prose(tmp_path: Path) -> None:
+    pat = _cached_pattern(tmp_path)
+    names = [s["function"]["name"] for s in wex.tool_schemas("blackbox")]
+    assert "readouts" not in names and "chat" in names and "finish" in names
+    assert "readouts(" not in wp.system_prompt(lens=False)
+    assert "readouts(" in wp.system_prompt(lens=True)
+    text = wp.brief(
+        behavior_name="b",
+        rubric="r",
+        group_summary="g",
+        prompt="p",
+        match_rate=0.5,
+        n_samples=4,
+        rollouts=wex.rollout_ids(pat, 1),
+        lens=False,
+    )
+    assert "chat(conversation=" in text and "readouts()" not in text
+    steps: list[tuple[str, list[tuple[str, dict[str, Any]]], int]] = [
+        ("probe", [("chat", {"user": "q", "conversation": "w000m"})], 20),
+        (
+            "done",
+            [
+                (
+                    "finish",
+                    {"mechanisms": [{"mechanism": "m", "evidence": "e", "would_test_by": "t"}]},
+                )
+            ],
+            20,
+        ),
+    ]
+    rec, tools = wex.run_explain_agent(
+        pat,
+        FakeClient(),
+        FakeBackend(steps),
+        auditor="t/a",
+        seed=0,
+        arm="blackbox",
+        budget=Budget(10_000, 20),
+        n_side=1,
+    )
+    assert rec.arm == "blackbox" and rec.result is not None and rec.result["mechanisms"]
+    assert tools.log[0].name == "chat" and not tools.log[0].output.startswith("tool error")

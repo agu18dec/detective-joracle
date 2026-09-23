@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..agent.loop import Backend, Budget, RunRecord, run_tool_loop
+from ..tools.arms import lens_of
 from ..tools.live import LIVE_CONDITION, READ_LAYERS, Conversation, LensClient, LiveTools
 from ..tools.live import tool_schemas as live_tool_schemas
 from . import prompts as wp
@@ -152,11 +153,12 @@ def run_explain_agent(
     rollouts = [(cid, m, t[:rollout_chars]) for cid, m, t in rollout_ids(pattern, n_side)]
     for cid, _, text in rollouts:  # the agent reads exactly the text it was shown
         tools.seed_conversation(cid, pattern.prompt, text)
+    lens = lens_of(arm) is not None
     rec = RunRecord(ORGANISM, CONDITION, arm, auditor, seed)
     run_tool_loop(
         tools,
         tool_schemas(arm, layers),
-        wp.system_prompt(),
+        wp.system_prompt(lens),
         wp.brief(
             behavior_name=pattern.behavior_name,
             rubric=pattern.transcript_rubric,
@@ -165,6 +167,7 @@ def run_explain_agent(
             match_rate=pattern.published_match_rate,
             n_samples=len(pattern.samples),
             rollouts=rollouts,
+            lens=lens,
         ),
         backend,
         budget or Budget(max_calls=400),

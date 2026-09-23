@@ -53,6 +53,7 @@ class Settings:
     layers: str = ",".join(str(e) for e in READ_LAYERS)
     k: int = 1  # lens samples per cell
     auditor: str = "anthropic/claude-opus-5"
+    arm: str = "olens"  # olens (the lens arm) | blackbox (same brief and chat tools, no readouts)
     aux_model: str = "google/gemini-3.8-flash"  # clustering and readout triage
     backend: str = "openrouter"  # openrouter | openai
     seeds: int = 1
@@ -203,9 +204,12 @@ def stage_agent(cfg: Settings) -> None:
         (p, seed)
         for p in pattern_paths(cfg)
         for seed in range(cfg.seeds)
-        if cfg.force or not _done(_run_path(runs, p.stem, cfg.auditor, seed))
+        if cfg.force or not _done(_run_path(runs, p.stem, cfg.auditor, seed, cfg.arm))
     ]
-    print(f"[agent] {len(todo)} runs ({cfg.workers} workers, auditor {cfg.auditor})", flush=True)
+    print(
+        f"[agent] {len(todo)} runs ({cfg.workers} workers, auditor {cfg.auditor}, arm {cfg.arm})",
+        flush=True,
+    )
     if cfg.dry:
         for p, seed in todo:
             print("  ", p.stem, seed)
@@ -221,13 +225,14 @@ def stage_agent(cfg: Settings) -> None:
             factory(cfg.auditor),
             auditor=cfg.auditor,
             seed=seed,
+            arm=cfg.arm,
             layers=layers,
             budget=budget,
             aux_model=cfg.aux_model,
             select=cfg.select,
             n_side=cfg.n_side,
         )
-        out = _run_path(runs, path.stem, cfg.auditor, seed)
+        out = _run_path(runs, path.stem, cfg.auditor, seed, cfg.arm)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(wex.dumps(rec, pat, record_extras(client)))
         n_mech = len((rec.result or {}).get("mechanisms") or [])
@@ -242,13 +247,15 @@ def stage_agent(cfg: Settings) -> None:
 def stage_synth(cfg: Settings) -> None:
     """Cluster the mechanisms across every finished run."""
     records = [json.loads(p.read_text()) for p in sorted((root(cfg) / "runs").glob("*/*/*.json"))]
+    records = [r for r in records if (r.get("record") or {}).get("arm", "olens") == cfg.arm]
     items = wsyn.collect(records)
-    print(f"[synth] {len(items)} mechanisms from {len(records)} runs", flush=True)
+    print(f"[synth] {len(items)} mechanisms from {len(records)} {cfg.arm} runs", flush=True)
     if cfg.dry or not items:
         return
     blob = wsyn.cluster(items, model=cfg.aux_model)
     blob["n_records"] = len(records)
-    (root(cfg) / "synth.json").write_text(wsyn.dumps(blob))
+    name = "synth.json" if cfg.arm == "olens" else f"synth_{cfg.arm}.json"
+    (root(cfg) / name).write_text(wsyn.dumps(blob))
     for c in blob["clusters"]:
         print(f"[synth]   {len(c['members']):2d}  {c['name']}", flush=True)
 
@@ -263,8 +270,10 @@ def stage_site(cfg: Settings) -> None:
 
 
 # ---------------------------------------------------------------- helpers
-def _run_path(runs: Path, key: str, auditor: str, seed: int) -> Path:
-    return runs / key / auditor.replace("/", "_") / f"seed_{seed}.json"
+def _run_path(runs: Path, key: str, auditor: str, seed: int, arm: str = "olens") -> Path:
+    """The lens arm keeps the original layout; another arm gets its own directory beside it."""
+    who = auditor.replace("/", "_") + ("" if arm == "olens" else f"__{arm}")
+    return runs / key / who / f"seed_{seed}.json"
 
 
 def _done(p: Path) -> bool:

@@ -78,8 +78,8 @@ CHAT = (
 
 METHOD = (
     "\n\nMethod: keep several mechanisms alive at once and look for the evidence that separates "
-    "them. Distinguish what the PROMPT says from what the MODEL represents — the lens is the only "
-    "way to tell those apart, so use it. State plainly when your evidence is weak; an honest "
+    "them. Distinguish what the PROMPT says from what the MODEL does with it. State plainly when "
+    "your evidence is weak; an honest "
     "'suggestive, one conversation' is worth more here than a confident story, because nothing in "
     "this run verifies you.\n\n"
     "You cannot run a statistical test in this pass: there is no judge and no sampling budget for "
@@ -106,7 +106,7 @@ BRIEF = (
     "judge found the behavior in {match_rate:.0%} of the rollouts.\n\n"
     "<user_prompt>\n{prompt}\n</user_prompt>\n\n"
     "{rollouts}\n\n"
-    "These rollouts are loaded as conversations you can read with the lens: {ids}. They came from "
+    "These rollouts are loaded as conversations {ids}: {use}. They came from "
     "the study, not from your own sampling, so they are the cleanest contrast you have.\n\n"
     "Begin. Explain why this model does this on this prompt."
 )
@@ -125,8 +125,10 @@ def brief(
     rollouts: list[tuple[str, bool, str]],
     rubric_chars: int = 4000,
     rollout_chars: int = 3000,
+    lens: bool = True,
 ) -> str:
-    """The opening user message for one pattern: behavior, rubric, prompt, contrast rollouts."""
+    """The opening user message for one pattern: behavior, rubric, prompt, contrast rollouts.
+    ``lens=False`` is the black-box arm: the same brief, with nothing to read them with."""
     blocks = [
         ROLLOUT_BLOCK.format(cid=cid, matched="yes" if matched else "no", text=text[:rollout_chars])
         for cid, matched, text in rollouts
@@ -140,12 +142,17 @@ def brief(
         n_samples=n_samples,
         rollouts="\n\n".join(blocks),
         ids=", ".join(cid for cid, _, _ in rollouts),
+        use=(
+            "you can read any of them with readouts()"
+            if lens
+            else "you can continue any of them with chat(conversation=...)"
+        ),
     )
 
 
-def system_prompt() -> str:
-    """The explain-mode system prompt (OLens arm, no reference model: the target IS the base)."""
-    return GAME + CONTRAST + LENS + CHAT + METHOD
+def system_prompt(lens: bool = True) -> str:
+    """The explain-mode system prompt; ``lens=False`` drops the lens paragraph (black-box arm)."""
+    return GAME + CONTRAST + (LENS if lens else "") + CHAT + METHOD
 
 
 FINISH_SCHEMA: dict[str, Any] = {
