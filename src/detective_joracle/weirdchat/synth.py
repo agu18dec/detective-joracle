@@ -11,7 +11,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from ..llm.route import async_json_route
+from ..llm.route import async_json_route, schema_block
 
 SYSTEM = (
     "You are organising the findings of an interpretability study. Researchers explained, one "
@@ -32,13 +32,14 @@ USER = (
     "the item ids that belong to it. Items that fit no theme go in no theme."
 )
 
-SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
+SCHEMA: dict[str, Any] = schema_block(
+    "themes",
+    {
         "clusters": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "name": {"type": "string"},
                     "description": {"type": "string"},
@@ -48,8 +49,8 @@ SCHEMA: dict[str, Any] = {
             },
         }
     },
-    "required": ["clusters"],
-}
+    ["clusters"],
+)
 
 
 def collect(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
