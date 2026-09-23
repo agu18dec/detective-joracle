@@ -41,6 +41,7 @@ class Settings:
     n_calib: int = 300  # study-labelled replies to score the judge on
     seed: int = 0
     force: bool = False
+    rejudge_all: bool = False  # stage=rejudge: re-judge EVERY reply with judge_model (a judge swap)
 
 
 def _csv(s: str) -> list[str]:
@@ -150,20 +151,31 @@ def stage_run(cfg: Settings) -> None:
 
 
 def stage_rejudge(cfg: Settings) -> None:
-    """Retry the judge on the replies whose verdict is missing, at low concurrency."""
+    """Retry the judge on the replies whose verdict is missing, at low concurrency — or, with
+    ``rejudge_all=true``, re-judge every reply with ``judge_model`` (a judge swap)."""
     d = root(cfg) / "interventions"
     for p in sorted(d.glob("*__*.json")):
         res = json.loads(p.read_text())
         missing = sum(a["judge_failures"] for a in res["arms"])
-        if not missing:
+        if not missing and not cfg.rejudge_all:
             continue
         pat = wd.load_pattern(root(cfg) / "patterns" / f"{res['pattern_key']}.json")
-        filled = wi.rejudge(res, pat.transcript_rubric, model=res["judge_model"])
+        model = cfg.judge_model if cfg.rejudge_all else res["judge_model"]
+        filled = wi.rejudge(res, pat.transcript_rubric, model=model, everything=cfg.rejudge_all)
         p.write_text(wi.dumps(res))
-        print(
-            f"[rejudge] {res['pattern_key']}: filled {filled}/{missing} missing verdicts",
-            flush=True,
+        what = (
+            f"re-judged {filled} replies with {model}"
+            if cfg.rejudge_all
+            else f"filled {filled}/{missing} missing verdicts"
         )
+        print(f"[rejudge] {res['pattern_key']}: {what}", flush=True)
+        for a in res["arms"]:
+            delta = a.get("delta_vs_baseline")
+            print(
+                f"[rejudge]   {a['arm']['name']:28s} {a['k']:3d}/{a['n']:<3d} = {a['rate']:.2f}"
+                + (f"  Δ={delta:+.2f} p={a['fisher_p_vs_baseline']}" if delta is not None else ""),
+                flush=True,
+            )
 
 
 def stage_report(cfg: Settings) -> None:
