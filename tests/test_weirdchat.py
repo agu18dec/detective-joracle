@@ -449,3 +449,75 @@ def test_lens_arms_get_their_own_lens_paragraph() -> None:
     )
     assert "readouts(" not in wp.system_prompt(None)
     assert "readouts" in [s["function"]["name"] for s in wex.tool_schemas("jlens")]
+
+
+def test_prediction_scoring(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import predictions as wpred
+
+    inter = {
+        "arms": [
+            {
+                "arm": {"name": "baseline", "prompt": "P", "prefill": "", "system": ""},
+                "delta_vs_baseline": None,
+                "fisher_p_vs_baseline": None,
+            },
+            {
+                "arm": {
+                    "name": "drop_clause",
+                    "prompt": "P minus clause",
+                    "prefill": "",
+                    "system": "",
+                },
+                "delta_vs_baseline": -0.6,
+                "fisher_p_vs_baseline": 1e-9,
+            },
+            {
+                "arm": {
+                    "name": "prefill_calm",
+                    "prompt": "P",
+                    "prefill": "Stay calm. ",
+                    "system": "",
+                },
+                "delta_vs_baseline": -0.16,
+                "fisher_p_vs_baseline": 0.11,
+            },
+            {
+                "arm": {"name": "cue", "prompt": "P plus cue", "prefill": "", "system": ""},
+                "delta_vs_baseline": -0.6,
+                "fisher_p_vs_baseline": 1e-9,
+            },
+        ]
+    }
+    monkeypatch.setattr(
+        wpred,
+        "async_json_route",
+        lambda items, *, schema, model, concurrency=1: [
+            {
+                "arms": [
+                    {
+                        "arm": "drop_clause",
+                        "predicted": True,
+                        "direction": "down",
+                        "mechanism": "M0",
+                    },
+                    {
+                        "arm": "prefill_calm",
+                        "predicted": True,
+                        "direction": "up",
+                        "mechanism": "M1",
+                    },
+                    {"arm": "cue", "predicted": False, "direction": None, "mechanism": None},
+                ]
+            }
+        ],
+    )
+    out = wpred.score(
+        {"pattern_key": "k", "prompt": "P", "behavior_name": "b"},
+        [{"mechanism": "m", "would_test_by": "t"}],
+        inter,
+        model="fake",
+    )
+    assert [r["verdict"] for r in out["arms"]] == ["right", "wrong", "not_predicted"]
+    assert (out["right"], out["wrong"], out["not_predicted"]) == (1, 1, 1)
+    assert wpred.outcome(inter["arms"][2]) == "none" and wpred.outcome(inter["arms"][1]) == "down"
+    assert wpred.summarise([out])["arms"] == 3

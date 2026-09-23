@@ -33,6 +33,7 @@ from detective_joracle.weirdchat import agreement as wagr  # noqa: E402
 from detective_joracle.weirdchat import data as wd  # noqa: E402
 from detective_joracle.weirdchat import diagnostics as wdiag  # noqa: E402
 from detective_joracle.weirdchat import explain as wex  # noqa: E402
+from detective_joracle.weirdchat import predictions as wpred  # noqa: E402
 from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 
 
@@ -40,7 +41,9 @@ from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 class Settings:
     """Every ``key=value`` option the driver accepts."""
 
-    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | site
+    stage: str = (
+        ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | site
+    )
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}") or Modal prefix
     target: str = ""  # optional OpenAI-compatible chat server; empty = the lens server's chat
     nla: str = ""  # the NLA verbalizer URL (arm=nla reads layer 42 through it)
@@ -56,6 +59,7 @@ class Settings:
     k: int = 1  # lens samples per cell
     auditor: str = "anthropic/claude-opus-5"
     arm: str = "olens"  # olens | jlens | nla (which lens readouts reads) | blackbox (no readouts)
+    arm_b: str = "blackbox"  # the other arm in stage=agreement (arm vs arm_b)
     aux_model: str = "google/gemini-3.8-flash"  # clustering and readout triage
     backend: str = "openrouter"  # openrouter | openai
     seeds: int = 1
@@ -263,12 +267,12 @@ def stage_synth(cfg: Settings) -> None:
 
 
 def stage_agreement(cfg: Settings) -> None:
-    """The lens arm's mechanisms against the black-box arm's, per pattern, read blind."""
+    """One arm's mechanisms against another's (``arm`` vs ``arm_b``), per pattern, read blind."""
     runs = root(cfg) / "runs"
     rows: list[dict[str, Any]] = []
     for p in pattern_paths(cfg):
-        lens_p = _run_path(runs, p.stem, cfg.auditor, 0, "olens")
-        bb_p = _run_path(runs, p.stem, cfg.auditor, 0, "blackbox")
+        lens_p = _run_path(runs, p.stem, cfg.auditor, 0, cfg.arm)
+        bb_p = _run_path(runs, p.stem, cfg.auditor, 0, cfg.arm_b)
         if not (_done(lens_p) and _done(bb_p)):
             continue
         lens = json.loads(lens_p.read_text())
@@ -288,9 +292,51 @@ def stage_agreement(cfg: Settings) -> None:
             f"blackbox {r.get('blackbox_with_counterpart')}/{r.get('n_blackbox')} matched",
             flush=True,
         )
-    blob = {"summary": wagr.summarise(rows), "patterns": rows, "model": cfg.aux_model}
-    (root(cfg) / "agreement.json").write_text(wagr.dumps(blob))
+    blob = {
+        "summary": wagr.summarise(rows),
+        "patterns": rows,
+        "model": cfg.aux_model,
+        "arm": cfg.arm,
+        "arm_b": cfg.arm_b,
+    }
+    name = (
+        "agreement.json"
+        if (cfg.arm, cfg.arm_b) == ("olens", "blackbox")
+        else f"agreement_{cfg.arm}_vs_{cfg.arm_b}.json"
+    )
+    (root(cfg) / name).write_text(wagr.dumps(blob))
     print(f"[agreement] {blob['summary']}", flush=True)
+
+
+def stage_predictions(cfg: Settings) -> None:
+    """Score ``arm``'s would_test_by predictions against the measured intervention arms."""
+    runs = root(cfg) / "runs"
+    rows: list[dict[str, Any]] = []
+    for ip in sorted((root(cfg) / "interventions").glob("*__*.json")):
+        inter = json.loads(ip.read_text())
+        rp = _run_path(runs, ip.stem, cfg.auditor, 0, cfg.arm)
+        if not _done(rp):
+            continue
+        run = json.loads(rp.read_text())
+        rows.append(
+            wpred.score(
+                run["pattern"], run["record"]["result"]["mechanisms"], inter, model=cfg.aux_model
+            )
+        )
+        r = rows[-1]
+        print(
+            f"[predictions] {cfg.arm} {ip.stem}: right {r.get('right')} wrong {r.get('wrong')} "
+            f"not predicted {r.get('not_predicted')} of {r.get('n_arms')} arms",
+            flush=True,
+        )
+    blob = {
+        "summary": wpred.summarise(rows),
+        "patterns": rows,
+        "arm": cfg.arm,
+        "model": cfg.aux_model,
+    }
+    (root(cfg) / f"predictions_{cfg.arm}.json").write_text(wpred.dumps(blob))
+    print(f"[predictions] {cfg.arm}: {blob['summary']}", flush=True)
 
 
 def stage_site(cfg: Settings) -> None:
@@ -340,6 +386,7 @@ STAGES = {
     "agent": stage_agent,
     "synth": stage_synth,
     "agreement": stage_agreement,
+    "predictions": stage_predictions,
     "site": stage_site,
 }
 
