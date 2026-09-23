@@ -876,6 +876,7 @@ def build_site(
         "clusters": clusters_of(out_root),
         "synth": synth_meta(out_root),
         "highlights": cards,
+        "verify": {"verified": hl_stats["verified"], "fragments": hl_stats["fragments"]},
         "en": en,
         "counts": {
             "patterns": len(patterns),
@@ -956,12 +957,6 @@ def main() -> None:
     )
 
 
-# plain text (no quotes/backslashes): it is injected into a JS string and set via textContent
-BANNER = (
-    "Unverified hypotheses: the agent was told the behavior and asked why; every mechanism here "
-    "is read off chat probes and OLens readouts and nothing has been causally tested."
-)
-
 TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1011,7 +1006,9 @@ i.matched{background:var(--miss)} i.unmatched{background:var(--hit)} i.agent{bac
 #find{border-color:var(--find)}
 .spacer{flex:1}
 .sub{font-size:11.5px;color:var(--text-dim)}
-#banner{flex:none;background:var(--miss-soft);color:var(--miss);font-size:11.5px;padding:3px 14px;border-bottom:1px solid var(--line)}
+#primer{flex:none;border-bottom:1px solid var(--line)}
+#primer .p1{background:var(--surface);color:var(--text);font-size:11.5px;padding:4px 14px;border-bottom:1px solid var(--line-soft)}
+#primer .p2{background:var(--miss-soft);color:var(--miss);font-size:11.5px;padding:3px 14px}
 #results{flex:none;background:var(--surface);border-bottom:1px solid var(--line);max-height:170px;overflow:auto;padding:4px 14px}
 #results[hidden]{display:none}
 .res{display:flex;gap:10px;align-items:baseline;width:100%;text-align:left;border:0;background:none;padding:3px 0;cursor:pointer;font-size:11.5px;color:var(--text)}
@@ -1188,7 +1185,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
   <button class="btn" id="manual-btn" title="what the colours mean (m)">m</button>
   <button class="btn" id="keys" title="keyboard (?)">?</button>
 </div>
-<div id="banner"></div>
+<div id="primer"><div class="p1" id="primer1"></div><div class="p2" id="banner"></div></div>
 <div id="results" hidden></div>
 <div id="ctx"></div>
 <div id="hits" hidden></div>
@@ -1206,14 +1203,18 @@ dialog h2{margin:0 0 10px;font-size:15px}
 <dialog id="manual"><div class="body">
   <h2>Reading the page</h2>
   <div class="man">
+    <h3 style="margin:0 0 6px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-faint)">What am I looking at?</h3>
+    <p id="manual-primer"></p>
+    <p><b>Flagged reply</b> — the judge said this reply SHOWS the behavior. <b>Clean reply</b> — the judge said this reply does NOT show it. Same prompt, same model, same settings; the two are read token by token through the lens so the internals can be compared where the text diverges.</p>
+    <h3 style="margin:10px 0 6px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-faint)">Colours</h3>
     <p><i class="sw" style="background:var(--accent)"></i><b>Teal</b> is the token in view: the grid on the right shows what the lens decoded at that position, one row per layer, one column per compared read.</p>
-    <p><i class="sw" style="background:var(--sample-soft);border-color:var(--sample-line)"></i><b>Yellow</b> is the position of record — the last header token, where the model has read the request and written nothing. It is identical for every rollout of a prompt, so a readout difference there is lens sampling, not the model. <span class="kbd">p</span> jumps to it.</p>
+    <p><i class="sw" style="background:var(--sample-soft);border-color:var(--sample-line)"></i><b>Yellow</b> is the position of record — the last header token, where the model has read the request and written nothing. It is identical for every reply to a prompt, so a readout difference there is lens sampling, not the model. <span class="kbd">p</span> jumps to it.</p>
     <p><i class="sw" style="background:var(--hit-soft);border-color:var(--hit)"></i><b>Green</b> means a phrase the agent quoted from a readout cell was found verbatim at build time: a green bar on a token says one of that token's cells carries such a phrase; the cell itself gets a green inset bar and the phrase is highlighted. Quotes that did not verify are listed in the build log, not here.</p>
-    <p><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i><b>Dotted</b> underline is the fork: the first reply word where the matched and unmatched rollouts diverge, computed from the read tokens (≈, positions were thinned).</p>
+    <p><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i><b>Dotted</b> underline is the fork: the first reply word where the flagged and clean replies diverge, computed from the read tokens (≈, positions were thinned).</p>
     <p><i class="sw" style="background:var(--find-soft);border-color:var(--find)"></i><b>Violet</b> is your search: <span class="kbd">/</span> filters this pattern's readouts (tokens whose cells match get a violet underline and are listed under the bar); <span class="kbd">;</span> searches summaries, prompts and mechanisms across every pattern.</p>
     <p><b>Faded</b> tokens (‥) stand for positions the read thinned away — the lens read every 4th token plus punctuation and boundaries.</p>
     <p><b>Resizing.</b> Drag the splitter between the panes, the right edge of a column header, or the bottom edge of a layer label; double-click any of them to reset.</p>
-    <p class="sub">Reads: <i>diag</i> = the diagnostic pass over the study's matched / unmatched rollouts; <i>agent</i> = the investigator's own readouts, parsed back from its tool pages (w###m/u = the study rollouts it was seeded with — same text, a different lens sample; c### = conversations it created). Highlight cards: rust = inside the reply, amber = about to answer, green = inside the user turn.</p>
+    <p class="sub">Reads: <i>diag</i> = the diagnostic pass over the study's flagged / clean replies; <i>agent</i> = the investigator's own readouts, parsed back from its tool pages (w###m/u = the study rollouts it was seeded with — same text, a different lens sample; c### = conversations it created). Highlight cards: rust = inside the reply, amber = about to answer, green = inside the user turn.</p>
   </div>
 </div></dialog>
 
@@ -1238,11 +1239,10 @@ dialog h2{margin:0 0 10px;font-size:15px}
   </div>
 </div></dialog>
 
-<dialog id="themes"><div class="body"><h2>Themes — mechanism clusters</h2><div id="themes-body"></div></div></dialog>
+<dialog id="themes"><div class="body"><h2>Recurring hypotheses across patterns</h2><p class="sub" style="margin:0 0 10px">how often each was proposed — not evidence it is right</p><div id="themes-body"></div></div></dialog>
 
 <script>
 const D = /*__DATA__*/;
-const BANNER = "__BANNER__";
 const $ = s => document.querySelector(s);
 const esc = s => (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const rxEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1254,7 +1254,17 @@ const GLABEL = {run: "agent run with mechanisms", diag: "diagnostics only", data
 function el(tag, cls, text){ const e = document.createElement(tag); if (cls) e.className = cls; if (text!=null) e.textContent = text; return e; }
 function store(k, v){ try { v==null ? localStorage.removeItem(k) : localStorage.setItem(k, String(v)); } catch(e){} }
 function load(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
-$("#banner").textContent = BANNER;
+// the primer: what WeirdChat is, what is ground truth here and what is not
+const PRIMER1 = "WeirdChat (Transluce) sampled the plain Qwen3.6-27B ~64 times per prompt and had a judge label every reply: does it show the behavior or not. That label is the ground truth for WHAT the model does. Nobody has ground truth for WHY — this page collects one investigator's hypotheses about why, read off the model's internals with OLens.";
+const VPCT = D.verify && D.verify.fragments ? Math.round(100 * D.verify.verified / D.verify.fragments) : null;
+$("#primer1").textContent = PRIMER1; if ($("#manual-primer")) $("#manual-primer").textContent = PRIMER1;
+$("#banner").textContent = "Hypotheses, unverified: no intervention was run under the judge's rubric; " + (VPCT==null ? "none of" : VPCT + "% of") + " the lens cells the investigator quoted check out verbatim (build-time figure).";
+// the two sides of every pattern, in plain words (internal ids keep matched/unmatched)
+const SIDE = {matched: "flagged reply", unmatched: "clean reply"};
+const SIDE_TIP = {matched: "the judge said this reply SHOWS the behavior", unmatched: "the judge said this reply does NOT show it"};
+const side = l => SIDE[l] || l;
+function nameOfId(id){ const m = String(id).match(/^diag:(\w+):(.*)$/); return m ? `${side(m[1])} s${m[2]}` : String(id).replace(/^agent:/, "agent "); }
+function readName(r){ return r.source==="diag" ? `${side(r.label)} · s${r.sample_index}` : `agent ${r.conv_id}${r.same_rollout_as ? " (= " + nameOfId(r.same_rollout_as) + ", other lens sample)" : ""}`; }
 
 // ------------------------------------------------------------------ state
 const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
@@ -1339,33 +1349,45 @@ function renderAll(){ renderBar(); renderCtx(); renderText(); renderGrid(); rend
 
 // --------------------------------------------------------------------- bar
 function readDot(r){ return r.parse_error ? "err" : (r.source==="diag" ? r.label : (r.label==="agent" ? "agent" : r.label)); }
-function readLabel(r){ return r.source==="diag" ? `diag ${r.label} · sample ${r.sample_index}` : `agent ${r.conv_id}${r.same_rollout_as ? " (= " + r.same_rollout_as.split(":")[1] + ")" : ""}${r.parse_error ? " ⚠ unparsed" : ""}`; }
+function readLabel(r){ return readName(r) + (r.parse_error ? " ⚠ unparsed" : ""); }
 function renderBar(){
   const p = byKey[S.key], bs = D.behaviors || [], bid = p ? p.behavior_id : (bs[0] ? bs[0].behavior_id : null);
   $("#beh-select").innerHTML = bs.map(b => `<option value="${esc(b.behavior_id)}" ${b.behavior_id===bid?"selected":""}>${esc(b.behavior_name)} (${b.n_patterns})</option>`).join("");
   const pats = patternsOf(bid);
-  $("#pat-select").innerHTML = pats.map(q => `<option value="${esc(q.key)}" ${q.key===S.key?"selected":""}>${esc(cut(q.group_summary || q.key, 60))} · ${pct(q.published_match_rate)}</option>`).join("");
+  $("#pat-select").innerHTML = pats.map(q => `<option value="${esc(q.key)}" ${q.key===S.key?"selected":""}>${esc(cut(q.group_summary || q.key, 60))} · ${pct(q.published_match_rate)} flagged</option>`).join("");
   const idx = pats.findIndex(q => q.key === S.key); $("#prev-item").disabled = idx <= 0; $("#next-item").disabled = idx < 0 || idx >= pats.length-1;
   const reads = S.data ? S.data.reads : [];
   $("#read-select").innerHTML = reads.length ? reads.map(r => `<option value="${esc(r.id)}" ${r.id===S.read?"selected":""}>${esc(readLabel(r))}</option>`).join("") : `<option>—</option>`;
-  $("#cmp-toggles").innerHTML = reads.filter(r => !r.parse_error).map((r, i) => `<button class="btn cmp" data-cmp="${esc(r.id)}" aria-pressed="${S.compare.includes(r.id)}" ${r.id===S.read?"disabled":""} title="${esc(r.id)} as a grid column (${i+1})"><i class="${readDot(r)}"></i>${esc(r.id.replace(/^diag:/, "").replace(/^agent:/, ""))}</button>`).join("");
+  $("#cmp-toggles").innerHTML = reads.filter(r => !r.parse_error).map((r, i) => `<button class="btn cmp" data-cmp="${esc(r.id)}" aria-pressed="${S.compare.includes(r.id)}" ${r.id===S.read?"disabled":""} title="${esc((SIDE_TIP[r.label] ? SIDE_TIP[r.label] + " — " : "") + readName(r) + " as a grid column (" + (i+1) + ")")}"><i class="${readDot(r)}"></i>${esc(readName(r))}</button>`).join("");
   $("#cmp-toggles").querySelectorAll("[data-cmp]").forEach(b => b.onclick = () => toggleCompare(b.dataset.cmp));
   $("#ctx-toggle").setAttribute("aria-pressed", String(S.ctx)); $("#wrap-toggle").setAttribute("aria-pressed", String(S.compact)); $("#below-toggle").setAttribute("aria-pressed", String(S.below));
 }
 
 // --------------------------------------------------------------------- ctx
 function clipbox(text, n){ const t = text || ""; if (t.length <= n) return `<div class="mono">${esc(t)}</div>`; return `<div class="clipbox"><div class="mono">${esc(t)}</div></div><button class="showall" data-showall>show all (${t.length} chars)</button>`; }
+function matchLine(rubric){
+  // the judge's one-line criterion: the rubric line naming match=true, else its first sentence
+  const t = rubric || ""; if (!t) return "";
+  const line = t.split(/\n+/).find(l => /match\s*=\s*true/i.test(l));
+  const clean = x => x.replace(/\*\*/g, "").replace(/^\s*match\s*=\s*true\s*(if|when|:)?\s*/i, "").trim();
+  if (line) return cut(clean(line), 260);
+  const first = t.split(/(?<=\.)\s+/)[0] || t; return cut(first.trim(), 260);
+}
 function verifiedBadge(p){ if (!p || !p.cited_fragments) return `<span class="badge dim">no quoted cells</span>`; const k = p.cited_verified, n = p.cited_fragments; return `<span class="badge ${k===n?"hit":(k?"hold":"miss")}">cited cells verified ${k}/${n}</span>`; }
 function renderCtx(){
   const box = $("#ctx"); box.hidden = !S.ctx; const p = byKey[S.key]; if (!p){ box.innerHTML = ""; return; }
   const data = S.data, runs = p.runs || [], run = runs[0];
   const mechs = run ? (run.mechanisms||[]) : [];
   const top = mechs.slice().sort((a,b) => (b.confidence||0) - (a.confidence||0))[0];
-  let h = `<div class="pane"><h3>the case</h3><div style="font-weight:600">${esc(p.behavior_name)}</div><div class="dim" style="margin:2px 0 4px">${esc(p.group_summary)}</div>` +
-    `<div class="tags"><span class="tag">published match ${pct(p.published_match_rate)}</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${(p.n_samples||0)} rollouts in the contrast set</span><span class="tag">${p.n_reads||0} reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
+  const nrep = 64;  // WeirdChat samples ~64 replies per prompt; the published rate is over those
+  let h = `<div class="pane"><h3>the case</h3><div><b>Behavior:</b> ${esc(p.behavior_name)}${matchLine(p.rubric) ? ` <span class="dim">— ${esc(matchLine(p.rubric))}</span>` : ""}</div>` +
+    `<div style="margin-top:3px"><b>What WeirdChat found:</b> on this prompt, ${pct(p.published_match_rate)} of ${nrep} replies were judged to show it. Same prompt, same model, same settings — it went both ways.</div>` +
+    `<div style="margin-top:3px"><b>What you see here:</b> one <span title="${esc(SIDE_TIP.matched)}">flagged</span> and one <span title="${esc(SIDE_TIP.unmatched)}">clean</span> reply, read token by token through the lens (layers 20–60), plus the investigator's probes.</div>` +
+    `<div class="tags" style="margin-top:5px"><span class="tag">${pct(p.published_match_rate)} flagged</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${p.n_reads||0} lens reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
     `<div class="prompt">${esc(p.prompt)}</div></div>`;
-  h += `<div class="pane"><h3>primary hypothesis</h3>` + (top ? `<div>${esc(top.mechanism)} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span></div>` +
-    (top.would_test_by ? `<div class="dim" style="margin-top:4px"><span class="badge hold">not run</span> would test by: ${esc(top.would_test_by)}</div>` : "") + (mechs.length > 1 ? `<div class="dim" style="margin-top:4px">+${mechs.length-1} more in details</div>` : "") : `<div class="empty">no agent run for this pattern yet — no hypothesis.</div>`) + `</div>`;
+  h += `<div class="pane"><h3>detective-joracle's hypothesis (unverified)</h3>` + (top ? `<div>${esc(top.mechanism)} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span></div>` +
+    (top.would_test_by ? `<div class="dim" style="margin-top:4px">How it would be tested: ${esc(top.would_test_by)} <span class="badge hold">not run</span></div>` : `<div class="dim" style="margin-top:4px"><span class="badge hold">not run</span> no test proposed</div>`) +
+    (mechs.length > 1 ? `<div style="margin-top:4px"><a href="#" data-more>+ ${mechs.length-1} more in details ▸</a></div>` : "") : `<div class="empty">no agent run for this pattern yet — no hypothesis.</div>`) + `</div>`;
   h += `<div class="pane"><h3>agent summary</h3>` + (run ? `<div>${esc(run.summary || "(no summary)")}</div>` +
     `<div class="vrow" style="margin-top:6px"><span class="name">tool calls</span><span>${run.n_tool_calls||0} · ${run.n_readouts||0} readouts · ${run.n_chat||0} chat probes</span></div>` +
     `<div class="vrow"><span class="name">mechanisms</span><span>${mechs.length}</span></div>` +
@@ -1374,10 +1396,12 @@ function renderCtx(){
   h += `<div class="pane"><h3>rubric</h3>${p.rubric ? clipbox(p.rubric, 320) : `<div class="empty">no rubric.</div>`}</div>`;
   box.innerHTML = h;
   box.querySelectorAll("[data-showall]").forEach(b => b.onclick = () => { b.previousElementSibling.classList.add("open"); b.remove(); });
+  box.querySelectorAll("[data-more]").forEach(a => a.onclick = e => { e.preventDefault(); S.below = true; S.tab = "mechanisms"; renderBar(); renderBelow(); });
 }
 
 // -------------------------------------------------------------------- text
-const REGION_LABEL = {user: "the model is reading the request", header: "about to answer — identical for every rollout of this prompt", reply: "the model is writing its answer", system: ""};
+const REGION_LABEL = {user: "the model is reading the request", header: "about to answer — identical for every reply to this prompt", reply: "the model is writing its answer", system: ""};
+function replyLabel(r){ if (r.source !== "diag") return "the model's reply (investigator's probe, unjudged)"; return `${side(r.label)} — judge: ${r.label==="matched" ? "shows the behavior" : "does not"}`; }
 function tokHtml(s){ if (s === "") return `<span class="nl">∅</span>`; return esc(s).replace(/\n/g, `<span class="nl">⏎</span>`).replace(/\t/g, `<span class="nl">⇥</span>`); }
 function findRx(){ return S.find ? new RegExp(rxEsc(S.find), "i") : null; }
 function cellsAt(r, pos){ const row = r.rowByPos && r.rowByPos[pos]; return row ? (row.samples||[]).reduce((a, ss) => a.concat(ss), []) : []; }
@@ -1403,13 +1427,15 @@ function renderText(){
       const cls = ["tok", row.pos===S.pos?"cur":"", row.pos===r.aboutPos?"read":"", hl[row.pos]?"hit":"", found.has(row.pos)?"found":"", row.pos===r.fork_pos?"mark":""].join(" ");
       inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}${hl[row.pos]?" · a quoted phrase verifies here":""}${row.pos===r.aboutPos?" · about to speak":""}${row.pos===r.fork_pos?" · fork":""}">${tokHtml(row.tok)}</span>`;
     }
-    h += `<div class="blk ${esc(region)}"><div class="role"><span>${esc(region==="header"?"about to answer":region)}</span><span class="lbl2">${esc(REGION_LABEL[region]||"")}</span></div><div class="toks">${inner}</div></div>`;
+    const lbl2 = region === "reply" ? replyLabel(r) : (REGION_LABEL[region]||"");
+    const tip = region === "reply" && r.source === "diag" ? ` title="${esc(SIDE_TIP[r.label]||"")}"` : "";
+    h += `<div class="blk ${esc(region)}"><div class="role"><span${tip}>${esc(region==="header"?"about to answer":region)}</span><span class="lbl2"${tip}>${esc(lbl2)}</span></div><div class="toks">${inner}</div></div>`;
   }
   // the other rollouts of the contrast set, compact, clickable when a read exists for them
   const others = (S.data.samples||[]).filter(s => !(r.source==="diag" && s.sample_index===r.sample_index));
   if (others.length){
-    h += `<div class="rolls"><h3>other rollouts in the contrast set (${others.length})</h3>` + others.map(s => { const rd = S.data.bySample[s.sample_index];
-      return `<button class="roll ${s.matched?"matched":"unmatched"}" ${rd?`data-read="${esc(rd.id)}"`:"disabled"} title="${rd?"open this rollout's read":"no lens read of this rollout"}"><span class="lab">${s.matched?"matched":"unmatched"} · sample ${s.sample_index}${rd?"":" · no read"}</span><span class="snip">${esc(cut((s.text||"").replace(/\s+/g," "), 160))}</span></button>`; }).join("") + `</div>`;
+    h += `<div class="rolls"><h3>other replies in the contrast set (${others.length}) — click one to read it</h3>` + others.map(s => { const rd = S.data.bySample[s.sample_index];
+      return `<button class="roll ${s.matched?"matched":"unmatched"}" ${rd?`data-read="${esc(rd.id)}"`:"disabled"} title="${rd?"open this reply's read":"no lens read of this reply"}"><span class="lab" title="${esc(SIDE_TIP[s.matched?"matched":"unmatched"])}">${s.matched?"flagged reply":"clean reply"} · sample ${s.sample_index}${rd?"":" · no read"}</span><span class="snip">${esc(cut((s.text||"").replace(/\s+/g," "), 160))}</span></button>`; }).join("") + `</div>`;
   }
   box.innerHTML = h;
   box.querySelectorAll(".tok[data-pos]").forEach(t => t.onclick = () => selectRead(S.read, +t.dataset.pos));
@@ -1423,9 +1449,9 @@ function citations(text){ const out = []; let cid = null; const re = /\b([wc]\d+
   return out; }
 function mechsAt(r, pos){ const out = []; for (const m of S.data.mechs){ const here = citations(m.readout_cells).filter(c => c.pos === pos && c.cid && r.mention_ids.includes(c.cid)); if (here.length) out.push({m, via: here[0].cid}); } return out; }
 function whereText(r, row){
-  if (row.region === "header") return row.pos === r.aboutPos ? "about to speak: the model has read the request and written nothing — identical for every rollout" : "the chat boundary before the reply — identical for every rollout of this prompt";
+  if (row.region === "header") return row.pos === r.aboutPos ? "about to speak: the model has read the request and written nothing — identical for every reply to this prompt" : "the chat boundary before the reply — identical for every reply to this prompt";
   if (row.region === "user") return "inside the user turn: the model is reading the request and has written nothing";
-  if (row.region === "reply") return (row.pos === r.fork_pos ? "on the fork: " : "inside the reply: ") + "the model is writing its answer" + (row.pos === r.fork_pos ? " — the first word where the matched and unmatched rollouts diverge (≈)" : "");
+  if (row.region === "reply") return (row.pos === r.fork_pos ? "on the fork: " : "inside the reply: ") + "the model is writing its answer" + (row.pos === r.fork_pos ? " — the first word where the flagged and clean replies diverge (≈)" : "");
   return row.region;
 }
 function markCell(text, quotes, qrx){
@@ -1440,7 +1466,7 @@ function renderGrid(){
   if (!row){ posbar.innerHTML = `<div class="status">${r.parse_error ? "nothing to show — this page did not parse." : "no position selected."}</div>`; wrap.innerHTML = ""; return; }
   const fl = mechsAt(r, p);
   let h = `<div class="row"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="wherenote">${esc(whereText(r, row))} · ${esc(row.kind)}</span></div>`;
-  if (fl.length) h += `<div class="mcards">` + fl.map((f, i) => `<button class="mcard ${f.via===r.conv_id?"":"other"}" data-mc="${i}"><div class="hd"><span class="txt">${esc(cut(f.m.mechanism, 160))}</span><span class="badge ${f.m.confidence>=0.7?"miss":(f.m.confidence>=0.4?"hold":"dim")}">conf ${num(f.m.confidence)}</span></div><div class="more"><div>${esc(f.m.mechanism)}</div><div class="quote">${esc(f.m.readout_cells)}</div>${f.via!==r.conv_id?`<div class="dim">cited on ${esc(f.via)} — same rollout, different lens sample</div>`:""}</div></button>`).join("") + `</div>`;
+  if (fl.length) h += `<div class="mcards">` + fl.map((f, i) => `<button class="mcard ${f.via===r.conv_id?"":"other"}" data-mc="${i}"><div class="hd"><span class="txt">${esc(cut(f.m.mechanism, 160))}</span><span class="badge ${f.m.confidence>=0.7?"miss":(f.m.confidence>=0.4?"hold":"dim")}">conf ${num(f.m.confidence)}</span></div><div class="more"><div>${esc(f.m.mechanism)}</div><div class="quote">${esc(f.m.readout_cells)}</div>${f.via!==r.conv_id?`<div class="dim">cited on ${esc(f.via)} — same reply, different lens sample</div>`:""}</div></button>`).join("") + `</div>`;
   else h += `<div class="dim" style="font-size:11.5px">no reported mechanism cites ${esc(r.mention_ids.join(" / ") || r.id)} at pos ${p}.</div>`;
   posbar.innerHTML = h;
   posbar.querySelectorAll("[data-mc]").forEach(b => b.onclick = () => b.classList.toggle("open"));
@@ -1454,7 +1480,7 @@ function renderGrid(){
   if (identical) wrap.appendChild(el("div", "notice", "identical prefix — same activation, different lens samples" + (row.region==="reply" ? " (the replies still agree at this position)" : "")));
   const colw = Math.max(260, Math.floor((wrap.clientWidth - 58) / Math.max(1, cols.length)) - 1); wrap.style.setProperty("--col", colw + "px");
   const table = el("table"), thead = el("thead"), hr = el("tr"); hr.appendChild(el("th", "layer", "layer"));
-  cols.forEach((c, j) => { const th = el("th", readDot(c), c.id); if (!identical && cols.length > 1) th.appendChild(el("span", "own", toks[j]==null ? "not read at pos " + p : JSON.stringify(toks[j])));
+  cols.forEach((c, j) => { const th = el("th", readDot(c), readName(c)); th.title = (SIDE_TIP[c.label] ? SIDE_TIP[c.label] + " · " : "") + c.id; if (!identical && cols.length > 1) th.appendChild(el("span", "own", toks[j]==null ? "not read at pos " + p : JSON.stringify(toks[j])));
     if (S.colw[c.id]) th.style.width = S.colw[c.id] + "px";
     const grip = el("div", "grip-x"); grip.title = "drag to resize this column (double-click resets)";
     grip.onpointerdown = e => { e.preventDefault(); const x0 = e.clientX, w0 = th.getBoundingClientRect().width; const mv = ev => { S.colw[c.id] = Math.max(140, w0 + ev.clientX - x0); th.style.width = S.colw[c.id] + "px"; }; const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); };
@@ -1515,7 +1541,7 @@ function linkCells(text, data){ let out = "", last = 0, cid = null; const re = /
   return out + esc(text.slice(last)); }
 function mechBlock(m, i, data){ return `<div class="mech"><div><span class="n">${i+1}.</span>${esc(m.mechanism)}${m.confidence==null?"":` <span class="badge ${m.confidence>=0.7?"miss":(m.confidence>=0.4?"hold":"dim")}">confidence ${num(m.confidence)}</span>`}</div>` + (m.evidence ? `<div class="ev">${esc(m.evidence)}</div>` : "") + (m.readout_cells ? `<div class="cells">cells: ${linkCells(m.readout_cells, data)}</div>` : "") + (m.would_test_by ? `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>` : "") + `</div>`; }
 function stepBlock(s, i, data){ const rd = s.tool_index!=null ? data.byTool[s.tool_index] : null;
-  let h = `<div class="step ${esc(s.name||"")}"><div class="hd"><span class="nm">${esc(s.name||"assistant")}</span><span>#${i+1}${s.meta?" · "+esc(s.meta):""}</span>${rd ? `<a href="${patUrl(data.key, rd.id, null)}">open this read → ${esc(rd.id)}${rd.parse_error?" (unparsed)":""}</a>` : ""}</div>`;
+  let h = `<div class="step ${esc(s.name||"")}"><div class="hd"><span class="nm">${esc(s.name||"assistant")}</span><span>#${i+1}${s.meta?" · "+esc(s.meta):""}</span>${rd ? `<a href="${patUrl(data.key, rd.id, null)}" title="${esc(rd.id)}">open this read → ${esc(readName(rd))}${rd.parse_error?" (unparsed)":""}</a>` : ""}</div>`;
   if (s.think) h += `<div class="think">${esc(s.think)}</div>`;
   if (s.name === "chat") h += `<div class="call">user → <span class="usr">${esc(s.user)}</span></div>`; else if (s.name) h += `<div class="call">${esc(s.name)}(${esc(s.args)})</div>`;
   if (s.output){ const o = s.output; h += `<pre class="block">${esc(o.slice(0,500))}${o.length>500?" …":""}</pre>`; if (o.length > 500) h += `<details><summary>show full ${s.name==="chat"?"reply":"result"} (${o.length} chars)</summary><pre class="block">${esc(o)}</pre></details>`; }
@@ -1534,13 +1560,13 @@ function renderBelow(){
   else { const items = D.highlights || []; const mine = items.filter(x => x.pattern_key === S.key), rest = items.filter(x => x.pattern_key !== S.key);
     h = `<div class="sub" style="margin:0 0 6px">${mine.length} on this pattern · ${rest.length} elsewhere — lens cells a mechanism quotes that verify verbatim at build time; click to jump</div><div class="hlgrid">` + [...mine, ...rest].map(x => { const idx = items.indexOf(x);
       const smp = esc(x.sample.trim()).split(esc(x.quote)).join(`<mark>${esc(x.quote)}</mark>`), loc = esc(x.local.slice(0, x.local.length - x.token.length)) + `<b>${esc(x.token)}</b>`;
-      return `<button class="hlc ${esc(x.region)}" data-hl="${idx}"><div class="where"><b>${esc(x.behavior)}</b> ${esc(cut(x.summary, 50))} · ${esc(x.read)} · pos ${x.pos} · L${x.layer}${x.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div><div class="loc">${loc}</div><div class="q">${smp}</div><div class="n">${esc(x.note)}</div></button>`; }).join("") + `</div>`; }
+      return `<button class="hlc ${esc(x.region)}" data-hl="${idx}"><div class="where"><b>${esc(x.behavior)}</b> ${esc(cut(x.summary, 50))} · <span title="${esc(SIDE_TIP[(x.read.match(/^diag:(\w+):/)||[])[1]]||"")}">${esc(nameOfId(x.read))}</span> · pos ${x.pos} · L${x.layer}${x.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div><div class="loc">${loc}</div><div class="q">${smp}</div><div class="n">${esc(x.note)}</div></button>`; }).join("") + `</div>`; }
   $("#drawer").innerHTML = h;
   $("#drawer").querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { const x = (D.highlights||[])[+b.dataset.hl]; location.hash = patUrl(x.pattern_key, x.read, x.pos); });
 }
 function renderNote(){
   const r = curRead(), p = byKey[S.key];
-  $("#note").innerHTML = (p ? `<span class="mono" style="font-size:11px">${esc(p.key)}</span>` : "") + (r ? `<span>${esc(r.id)} · ${(r.positions||[]).length} positions read${r.claimed && r.claimed.positions!=null && r.claimed.positions!==(r.positions||[]).length ? ` (page header says ${r.claimed.positions})` : ""} · ${(r.layers||[]).length} layers · positions were thinned (every 4th token + punctuation + boundaries; ‥ marks gaps)</span>` : "") +
+  $("#note").innerHTML = (p ? `<span class="mono" style="font-size:11px">${esc(p.key)}</span>` : "") + (r ? `<span title="${esc(r.id)}">${esc(readName(r))} · ${(r.positions||[]).length} positions read${r.claimed && r.claimed.positions!=null && r.claimed.positions!==(r.positions||[]).length ? ` (page header says ${r.claimed.positions})` : ""} · ${(r.layers||[]).length} layers · positions were thinned (every 4th token + punctuation + boundaries; ‥ marks gaps)</span>` : "") +
     `<span class="spacer"></span><span><span class="kbd">← →</span> token · <span class="kbd">p</span> about to speak · <span class="kbd">/</span> find · <span class="kbd">?</span> keys</span>`;
 }
 
@@ -1607,7 +1633,6 @@ window.addEventListener("hashchange", route);
 route();
 </script>
 """
-TEMPLATE = TEMPLATE.replace("__BANNER__", BANNER)
 
 
 if __name__ == "__main__":
