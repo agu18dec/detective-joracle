@@ -175,8 +175,8 @@ give. Every sharp effect, though, is a black-box ablation (drop the voice-assist
 was no blackbox arm, so the lens's *necessity* is unmeasured; the 20/20 boundary-mixture finding
 is also partly prompted (the brief tells the agent where the propensity lives).
 
-**Citation check.** Of 334 lens-cell fragments the agents quoted in `readout_cells`, **128
-(38%) verify verbatim** against the pages they read; 48 are ellipsis-truncated, 33 cite a page
+**Citation check.** Of 335 lens-cell fragments the agents quoted in `readout_cells`, **129
+(39%) verify verbatim** against the pages they read; 51 are ellipsis-truncated, 33 cite a page
 never read, the rest are paraphrases or stitched neighbours. The viewer marks only verified
 cells. One headline claim did not survive the raw grids: the purging run's *"'clear the meal'
 decodes as purging only in deep layers"* is, in the diag reads, 7–15 of ~79 user/header cells
