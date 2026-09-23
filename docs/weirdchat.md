@@ -187,6 +187,26 @@ gradient the agent reported as a switch.
 the lens page budget cut most agents off after 2 full reads (12 "budget spent" tool errors);
 15 lens-server HTTP 500s. Every `would_test_by` is the experiment the next pass should run.
 
+## Lens arm vs black-box arm (2026-09-23)
+
+A second investigator per pattern with the same brief, chat tools and budget but **no
+`readouts`** (`arm=blackbox`); an Opus reader compared the two mechanism lists blind (A/B order
+randomised) per pattern (`agreement.json`, and the "arms compared" dialog in the viewer).
+
+- Top-ranked hypotheses agree in **11 of 21** patterns.
+- **96 of 110 OLens mechanisms (87%) have a black-box counterpart**; 105 of 140 black-box
+  mechanisms (75%) have a lens counterpart. The black-box arm proposed more mechanisms (140 vs
+  110): more probes, more hypotheses.
+- **14 mechanisms are lens-only** vs 35 black-box-only. The lens-only ones are almost all the
+  boundary claims — "two co-existing reply plans at the identical prefix, resolved by sampling",
+  "three competing openings at the chat boundary" — plus a few weak/secondary readings.
+
+Reading: with a strong investigator, OLens did not change what was concluded; it changed the
+evidence type, adding direct observations of the pre-commitment state that the black-box arm
+could only infer from prefills. Agreement means the two arms told the same story, not that
+either is right — whether the lens-only boundary claims are true is what the forecasting eval
+(`docs/weirdchat_eval_design.md` §1) is for.
+
 ## Judge calibration (2026-09-23)
 
 The intervention arms are judged by an LLM reading each pattern's transcript rubric. Scored
