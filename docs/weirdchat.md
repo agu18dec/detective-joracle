@@ -306,6 +306,32 @@ could only infer from prefills. Agreement means the two arms told the same story
 either is right — whether the lens-only boundary claims are true is what the forecasting eval
 (`docs/weirdchat_eval_design.md` §1) is for.
 
+## Gemini layers on the page (2026-09-24)
+
+Two reader passes over each pattern's study reads (flagged reply A and clean reply A, the diag
+reads), both by `google/gemini-3.8-flash`, both verified verbatim at build time so nothing is
+marked on the strength of a paraphrase:
+
+- **⚑ Gemini flags** (`stage=flags`, `flags/<key>.json`): cells that say something the text at that
+  point does not — role adoption, both branches live, a hidden referent decoded, a disclaimer next
+  to the claim, a contradiction with the text, a commitment point. 1,252 kept of 1,286 proposed
+  across the 21 patterns. An attention pass: the reader saw the reply and its label.
+- **◆ Gemini annotations** (`stage=annotate` then `stage=grade`, `annotations/<key>.json`): cells
+  that support a specific OLens mechanism, with the flagged and clean cells compared at the same
+  position and layer. 1,408 kept of 1,429 proposed. The grading pass then labels each one
+  **contrastive** (one side says something bearing on the hypothesis that the other does not) or
+  **shared propensity** (both sides carry it); the page shows contrastive ones by default.
+- **Plain-English hypotheses** (`stage=concise`, `concise.json`): every mechanism rewritten into
+  one sentence by Haiku 4.5; the investigator's full text stays one click away.
+
+**Alignment rule for the flagged-vs-clean matrix.** Flagged reply A and clean reply A are two
+rollouts of one prompt, so positions are token-identical only through the user turn, the header
+and the shared reply prefix (the fork). There, two columns compare two lens samples of the *same*
+activation. Past the fork the texts differ, so the page greys the other side's columns and shows
+their own token: cells after the fork are reference, not a comparison, and a contrastive
+annotation there means "the flagged reply's activation says X and nothing in the clean reply
+does", not "the same position differs".
+
 ## Judge calibration (2026-09-23)
 
 The intervention arms are judged by an LLM reading each pattern's transcript rubric. Scored
