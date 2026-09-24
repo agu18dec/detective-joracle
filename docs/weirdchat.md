@@ -318,9 +318,22 @@ marked on the strength of a paraphrase:
   across the 21 patterns. An attention pass: the reader saw the reply and its label.
 - **◆ Gemini annotations** (`stage=annotate` then `stage=grade`, `annotations/<key>.json`): cells
   that support a specific OLens mechanism, with the flagged and clean cells compared at the same
-  position and layer. 1,408 kept of 1,429 proposed. The grading pass then labels each one
-  **contrastive** (one side says something bearing on the hypothesis that the other does not) or
-  **shared propensity** (both sides carry it); the page shows contrastive ones by default.
+  position and layer. 1,408 kept of 1,429 proposed. The grading pass is two-sided: it asks
+  separately whether the flagged cell and whether the clean cell express the hypothesised
+  content, and labels the annotation **contrastive** only when exactly one side does, **shared
+  propensity** when both do, and **neither** when the quoted cells do not bear on the hypothesis
+  at all. Strict grade of record: 901 contrastive · 182 shared · 325 neither. (A first, one-sided
+  grade had called 1,182 contrastive; a caregiver cell that both replies carried was marked
+  contrastive, which is what forced the two-sided rewrite.) The page shows contrastive ones by
+  default, in green, as the single Gemini layer; ⚑ flags are off by default.
+- **Which OLens read the page shows.** Each reply was read twice by OLens: the *study read* (our
+  diagnostic pass, the sample Gemini's quotes were verified against) and the *investigator's
+  read* (the agent's own `readouts` call during its run). The matrix shows the investigator's
+  read by default, with the study read behind its lens toggle; green cells are keyed by
+  (position, layer) so the investigator's column inherits them and the card shows the
+  investigator's own sample at that cell beside the verified quote. Where the investigator never
+  read a reply, the study read stands in and says so. J-lens and NLA columns render a collapsible
+  "not read for this reply" placeholder where that arm's investigator did not read it.
 - **Plain-English hypotheses** (`stage=concise`, `concise.json`): every mechanism rewritten into
   one sentence by Haiku 4.5; the investigator's full text stays one click away.
 
