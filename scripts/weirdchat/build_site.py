@@ -471,6 +471,38 @@ def compact_args(args: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+RECORD_HEAD_RE = re.compile(
+    r"^\[(c\d+)\] (\S+) (reply|sampled USER turn|continuation) \((\d+) tokens\)( \[truncated\])?:\n",
+    re.M,
+)
+
+
+def probes_of(tool_log: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """c### → the chat/complete call that produced it: what was asked, and the model's reply."""
+    out: dict[str, dict[str, Any]] = {}
+    for ti, logged in enumerate(tool_log):
+        name = as_text(logged.get("name"))
+        if name not in ("chat", "complete", "sample_user_turn"):
+            continue
+        text = as_text(logged.get("output"))
+        heads = list(RECORD_HEAD_RE.finditer(text))
+        cids = [h.group(1) for h in heads]
+        args = as_dict(logged.get("args"))
+        for i, h in enumerate(heads):
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+            out[h.group(1)] = {
+                "call": ti,
+                "tool": name,
+                "user": as_text(args.get("user")) or as_text(args.get("text")),
+                "system": as_text(args.get("system")),
+                "prefill": as_text(args.get("prefill")),
+                "reply": clip(text[h.end() : end].strip(), 600),
+                "truncated": bool(h.group(5)),
+                "siblings": cids,
+            }
+    return out
+
+
 def mechanisms_of(record: dict[str, Any]) -> list[dict[str, Any]]:
     out = []
     for mech in as_list(as_dict(record.get("result")).get("mechanisms")):
@@ -511,6 +543,7 @@ def run_of(path: Path, auditor_dir: str) -> tuple[dict[str, Any], list[dict[str,
         "file": path.name,
     }
     tool_log = [as_dict(t) for t in as_list(record.get("tool_log"))]
+    run["probes"] = probes_of(tool_log)
     run["is_lens"] = as_text(record.get("arm")) != "blackbox"
     run["n_tool_calls"] = len(tool_log)
     run["n_readouts"] = sum(1 for t in tool_log if as_text(t.get("name")) == "readouts")
@@ -519,7 +552,27 @@ def run_of(path: Path, auditor_dir: str) -> tuple[dict[str, Any], list[dict[str,
 
 
 # ---------------------------------------------------------------- collection
-def pattern_of(path: Path, out_root: Path) -> dict[str, Any]:
+LETTERS = "ABCDEFGH"
+
+
+def reply_names(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The study replies as the investigator knew them: flagged A/B = w000m/w001m, clean A/B = w000u/w001u."""
+    out = []
+    for side, matched in (("flagged", True), ("clean", False)):
+        for i, smp in enumerate([x for x in samples if x["matched"] == matched]):
+            out.append(
+                {
+                    "side": side,
+                    "letter": LETTERS[i] if i < len(LETTERS) else str(i + 1),
+                    "cid": f"w{i:03d}{'m' if matched else 'u'}" if i < N_SIDE else None,
+                    "sample_index": smp["sample_index"],
+                    "text": smp["text"],
+                }
+            )
+    return out
+
+
+def pattern_of(path: Path, out_root: Path, concise: dict[str, str] | None = None) -> dict[str, Any]:
     """One pattern plus whatever diagnostics and agent runs exist beside it."""
     meta = read_json(path) or {}
     key = as_text(meta.get("pattern_key")) or path.stem
@@ -555,8 +608,27 @@ def pattern_of(path: Path, out_root: Path) -> dict[str, Any]:
         }
         for s in (as_dict(x) for x in as_list(meta.get("samples")))
     ]
+    replies = reply_names(samples)
+    by_sample = {r["sample_index"]: r for r in replies}
+    by_cid = {r["cid"]: r for r in replies if r["cid"]}
+    for read in reads:
+        ref = (
+            by_sample.get(read["sample_index"])
+            if read["source"] == "diag"
+            else by_cid.get(read["conv_id"])
+        )
+        read["reply"] = {"side": ref["side"], "letter": ref["letter"]} if ref else None
+    for run in (
+        runs
+    ):  # the plain-English rewrite of each mechanism, when the concise pass has produced one
+        for i, mech in enumerate(run["mechanisms"]):
+            mech["short"] = (concise or {}).get(f"{key}#{run['arm'] or 'olens'}#{i}", "")
     return {
         "key": key,
+        "replies": [
+            {k: v for k, v in r.items() if k != "text"} | {"text": clip(r["text"], 400)}
+            for r in replies
+        ],
         "entry_id": as_text(meta.get("entry_id")),
         "behavior_id": as_text(meta.get("behavior_id")) or "—",
         "behavior_name": as_text(meta.get("behavior_name")) or as_text(meta.get("behavior_id")),
@@ -880,7 +952,7 @@ def synth_meta(out_root: Path) -> dict[str, Any]:
 
 # ------------------------------------------------------------------- split
 HEAVY_PATTERN_KEYS = ("samples", "reads", "fork", "brief", "interventions", "predictions", "flags")
-HEAVY_RUN_KEYS = ("steps", "notes")
+HEAVY_RUN_KEYS = ("steps", "notes", "probes")
 
 
 def grade_of(pat: dict[str, Any]) -> str:
@@ -1230,8 +1302,14 @@ def build_site(
     """Collect everything under ``out_root``; write ``site_dir/index.html`` (+ ``data/*.json``)."""
     pattern_dir = out_root / "patterns"
     paths = sorted(pattern_dir.glob("*.json")) if pattern_dir.is_dir() else []
-    patterns = [pattern_of(p, out_root) for p in paths]
+    concise = {k: as_text(v) for k, v in (read_json(out_root / "concise.json") or {}).items()}
+    patterns = [pattern_of(p, out_root, concise) for p in paths]
     patterns.sort(key=lambda p: (p["behavior_name"], p["key"]))
+    n_short = sum(1 for p in patterns for r in p["runs"] for m in r["mechanisms"] if m["short"])
+    n_mech = sum(len(r["mechanisms"]) for p in patterns for r in p["runs"])
+    print(
+        f"concise.json: {len(concise)} entries · {n_short}/{n_mech} mechanisms have a plain-English sentence"
+    )
     brief_fn, system_fn, brief_how = load_prompts()
     agreements = agreements_of(out_root)
     predictions = predictions_of(out_root)
@@ -1552,6 +1630,18 @@ td .bag{display:flex;flex-wrap:wrap;gap:3px;padding:8px 10px}
 td .bag span{font-family:var(--mono);font-size:11px;background:var(--ground);border:1px solid var(--line-soft);border-radius:3px;padding:0 4px;white-space:pre}
 td .bag span.m{background:var(--hit-soft);border-color:var(--hit)} td .bag span.f{background:var(--find-soft);border-color:var(--find)}
 .pred{font-family:var(--mono);font-size:12px} .pred.right{color:var(--hit);font-weight:600} .pred.wrong{color:var(--miss);font-weight:600} .pred.np{color:var(--text-faint)}
+.mtitle{font-size:13px;color:var(--text)} .mfull{color:var(--text-dim);font-size:12px;margin-top:4px;white-space:pre-wrap}
+.more{font-size:11px;color:var(--accent);background:none;border:0;padding:0;cursor:pointer;margin-left:6px}
+.mmore[hidden]{display:none}
+.evb{margin-top:6px;border-top:1px dashed var(--line-soft);padding-top:5px}
+.evb h4{margin:0 0 4px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
+.evr{display:flex;gap:8px;align-items:baseline;border:1px solid var(--line-soft);border-left:3px solid var(--line);border-radius:4px;padding:3px 8px;margin:0 0 4px;font-size:11.5px;background:var(--surface);width:100%;text-align:left;cursor:pointer}
+.evr:disabled{cursor:default} .evr.flagged{border-left-color:var(--miss)} .evr.clean{border-left-color:var(--hit)}
+.evr .nm{font-weight:600;flex:none;white-space:nowrap} .evr .snip{color:var(--text-dim);font-family:var(--sans);flex:1;min-width:0}
+.evg{border:1px solid var(--line-soft);border-radius:4px;padding:4px 8px;margin:0 0 6px}
+.evg .ask{font-size:11.5px;margin-bottom:3px} .evg .ask b{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint);font-weight:600;margin-right:6px}
+.evg .rep{font-size:11.5px;color:var(--text-dim);border-left:2px solid var(--line);padding-left:6px;margin:2px 0}
+.evg .rep .pn{font-family:var(--mono);font-size:10.5px;color:var(--text-faint);margin-right:4px}
 .score{display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;margin:0 0 8px} .score span{border:1px solid var(--line-soft);border-radius:4px;padding:2px 8px;background:var(--ground)}
 .rolls{margin-top:14px}
 .rolls h3{margin:0 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
@@ -1773,18 +1863,31 @@ const SIDE_TIP = {matched: "the judge said this reply SHOWS the behavior", unmat
 const side = l => SIDE[l] || l;
 // "of 64": the pattern's own sample count when it is the study total, else WeirdChat's ~64
 function sampleTotal(){ const p = byKey[S.key]; return p && p.n_samples >= 32 ? `of ${p.n_samples}` : "of ~64"; }
-function nameOfId(id){
-  const m = String(id).match(/^diag:(\w+):(.*)$/); if (m) return `${side(m[1])} · sample ${m[2]}`;
+// one naming scheme for the study replies: flagged reply A/B = w000m/w001m, clean reply A/B = w000u/w001u
+const CID_REPLY = {w000m: ["flagged", "A"], w001m: ["flagged", "B"], w000u: ["clean", "A"], w001u: ["clean", "B"]};
+function replyByCid(pat, cid){ const r = (pat && pat.replies || []).find(x => x.cid === cid); if (r) return r; const c = CID_REPLY[cid]; return c ? {side: c[0], letter: c[1], cid, sample_index: null, text: ""} : null; }
+function replyBySample(pat, idx){ return (pat && pat.replies || []).find(x => x.sample_index === idx) || null; }
+function replyLabelOf(rep){ return rep ? `${rep.side} reply ${rep.letter}` : null; }
+const SIDE_OF = {flagged: "matched", clean: "unmatched"};
+function shortOf(m){ if (!m) return ""; if (m.short) return m.short; const t = (m.mechanism||"").trim(); const f = t.split(/(?<=[.!?])\s+/)[0] || t; return cut(f, 220); }
+const SHORT_BY_TEXT = {}; for (const p of (D.patterns||[])) for (const run of (p.runs||[])) for (const m of (run.mechanisms||[])) if (m.mechanism) SHORT_BY_TEXT[m.mechanism] = shortOf(m);
+function shortFor(text){ return SHORT_BY_TEXT[text] || shortOf({mechanism: text}); }
+function nameOfId(id, key){
+  const pat = byKey[key || S.key];
+  const m = String(id).match(/^diag:(\w+):(\d+)/); if (m){ const rep = replyBySample(pat, +m[2]); return (rep ? replyLabelOf(rep) : `${side(m[1])} · sample ${m[2]}`) + " · study read"; }
   const a = String(id).match(/^agent:(?:(\w+):)?([wc]\d+[mu]?)/); if (!a) return String(id);
-  const lens = a[1] && a[1] !== "olens" ? ` (${LENS_SHORT[a[1]] || a[1]})` : "";
-  const w = a[2].match(/^w\d+([mu])$/); return w ? `${side(w[1]==="m"?"matched":"unmatched")} · ${a[2]} (investigator's own lens sample${lens ? ", " + (LENS_SHORT[a[1]] || a[1]) : ""})` : `investigator probe ${a[2]}${lens}`;
+  const lens = LENS_SHORT[a[1] || "olens"] || a[1] || "OLens";
+  const rep = replyByCid(pat, a[2]); if (rep) return `${replyLabelOf(rep)} · investigator's read (${lens})`;
+  return `probe ${parseInt(a[2].slice(1), 10)}${a[1] && a[1] !== "olens" ? " (" + lens + ")" : ""}`;
 }
-function lensTag(r){ const l = r.lens || "olens"; return l === "olens" ? "" : ` (${LENS_SHORT[l] || l})`; }
+function lensName(r){ return LENS_SHORT[r.lens || "olens"] || r.lens || "OLens"; }
 function readName(r){
-  if (r.source === "diag") return `${side(r.label)} · sample ${r.sample_index} ${sampleTotal()}`;
-  if (/^w\d+[mu]$/.test(r.conv_id||"")){ const twin = S.data && r.same_rollout_as ? S.data.byId[r.same_rollout_as] : null; return `${side(r.label)} · sample ${twin ? twin.sample_index : r.conv_id} (investigator's own lens sample${r.lens && r.lens !== "olens" ? ", " + (LENS_SHORT[r.lens] || r.lens) : ""})`; }
-  return `investigator probe ${r.conv_id}${lensTag(r)}`;
+  const rep = r.reply || (r.source === "diag" ? replyBySample(byKey[S.key], r.sample_index) : replyByCid(byKey[S.key], r.conv_id));
+  if (r.source === "diag") return rep ? `${replyLabelOf(rep)} · study read` : `${side(r.label)} · sample ${r.sample_index} · study read`;
+  if (rep) return `${replyLabelOf(rep)} · investigator's read (${lensName(r)})`;
+  return `probe ${parseInt(String(r.conv_id||"").replace(/^c/, ""), 10) || r.conv_id}${(r.lens||"olens") !== "olens" ? " (" + lensName(r) + ")" : ""}`;
 }
+function readTip(r){ const parts = [r.id]; if (r.source === "diag") parts.push(`WeirdChat sample ${r.sample_index} ${sampleTotal()}`); if (r.conv_id) parts.push(`conversation ${r.conv_id}`); if (r.same_rollout_as) parts.push(`same reply as ${r.same_rollout_as}, other lens sample`); if (SIDE_TIP[r.label]) parts.unshift(SIDE_TIP[r.label]); return parts.join(" · "); }
 
 // ------------------------------------------------------------------ state
 const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
@@ -1893,6 +1996,13 @@ function renderAll(){ renderBar(); renderCtx(); renderText(); renderGrid(); rend
 // --------------------------------------------------------------------- bar
 function readDot(r){ return r.parse_error ? "err" : (r.source==="diag" ? r.label : (r.label==="agent" ? "agent" : r.label)); }
 function readLabel(r){ return readName(r) + (r.parse_error ? " ⚠ unparsed" : ""); }
+function evidenceCids(m){
+  // conversation ids a mechanism cites, ranges like c008-c011 expanded, study ids first
+  const text = (m.evidence||"") + "\n" + (m.readout_cells||""); const out = new Set(); let x;
+  const rr = /\bc(\d{3})\s*[-–]\s*c?(\d{3})\b/g; while ((x = rr.exec(text))){ const a = +x[1], b = +x[2]; if (b >= a && b - a < 40) for (let i = a; i <= b; i++) out.add("c" + String(i).padStart(3, "0")); }
+  const single = /\b(w\d{3}[mu]|c\d{3})\b/g; while ((x = single.exec(text))) out.add(x[1]);
+  const ids = [...out]; return {study: ids.filter(i => i[0] === "w").sort(), probes: ids.filter(i => i[0] === "c").sort()};
+}
 function renderBar(){
   const p = byKey[S.key], bs = D.behaviors || [], bid = p ? p.behavior_id : (bs[0] ? bs[0].behavior_id : null);
   $("#beh-select").innerHTML = bs.map(b => `<option value="${esc(b.behavior_id)}" ${b.behavior_id===bid?"selected":""}>${esc(b.behavior_name)} (${b.n_patterns})</option>`).join("");
@@ -1900,9 +2010,10 @@ function renderBar(){
   $("#pat-select").innerHTML = pats.map(q => `<option value="${esc(q.key)}" ${q.key===S.key?"selected":""}>${esc(cut(q.group_summary || q.key, 60))} · ${pct(q.published_match_rate)} flagged</option>`).join("");
   const idx = pats.findIndex(q => q.key === S.key); $("#prev-item").disabled = idx <= 0; $("#next-item").disabled = idx < 0 || idx >= pats.length-1;
   const reads = S.data ? S.data.reads : [];
-  const groups = [["study (flagged / clean)", r => r.source === "diag"], ["OLens probes", r => r.source !== "diag" && (r.lens||"olens") === "olens"], ["J-lens probes", r => r.lens === "jlens"], ["NLA probes", r => r.lens === "nla"], ["other probes", r => r.source !== "diag" && !["olens","jlens","nla"].includes(r.lens||"olens")]];
-  $("#read-select").innerHTML = reads.length ? groups.map(([g, f]) => { const rs = reads.filter(f); return rs.length ? `<optgroup label="${esc(g)}">` + rs.map(r => `<option value="${esc(r.id)}" ${r.id===S.read?"selected":""}>${esc(readLabel(r))}</option>`).join("") + `</optgroup>` : ""; }).join("") : `<option>—</option>`;
-  $("#cmp-toggles").innerHTML = reads.filter(r => !r.parse_error).map((r, i) => `<button class="btn cmp" data-cmp="${esc(r.id)}" aria-pressed="${S.compare.includes(r.id)}" ${r.id===S.read?"disabled":""} title="${esc((SIDE_TIP[r.label] ? SIDE_TIP[r.label] + " — " : "") + readName(r) + " as a grid column (" + (i+1) + ")")}"><i class="${readDot(r)}"></i>${esc(readName(r))}</button>`).join("");
+  const isStudyRead = r => r.source !== "diag" && /^w\d+[mu]$/.test(r.conv_id||"");
+  const groups = [["study replies", r => r.source === "diag"], ["investigator's reads of them", isStudyRead], ["investigator's probes", r => r.source !== "diag" && !isStudyRead(r)]];
+  $("#read-select").innerHTML = reads.length ? groups.map(([g, f]) => { const rs = reads.filter(f); return rs.length ? `<optgroup label="${esc(g)}">` + rs.map(r => `<option value="${esc(r.id)}" title="${esc(readTip(r))}" ${r.id===S.read?"selected":""}>${esc(readLabel(r))}</option>`).join("") + `</optgroup>` : ""; }).join("") : `<option>—</option>`;
+  $("#cmp-toggles").innerHTML = reads.filter(r => !r.parse_error).map((r, i) => `<button class="btn cmp" data-cmp="${esc(r.id)}" aria-pressed="${S.compare.includes(r.id)}" ${r.id===S.read?"disabled":""} title="${esc(readTip(r) + " — as a grid column (" + (i+1) + ")")}"><i class="${readDot(r)}"></i>${esc(readName(r))}</button>`).join("");
   $("#cmp-toggles").querySelectorAll("[data-cmp]").forEach(b => b.onclick = () => toggleCompare(b.dataset.cmp));
   $("#ctx-toggle").setAttribute("aria-pressed", String(S.ctx)); $("#text-toggle").setAttribute("aria-pressed", String(S.textView)); $("#wrap-toggle").setAttribute("aria-pressed", String(S.compact)); $("#below-toggle").setAttribute("aria-pressed", String(S.below));
 }
@@ -1933,10 +2044,12 @@ function renderCtx(){
     (ivm ? `<div style="margin-top:3px"><b>Interventions run:</b> ${ivm.n_per_arm==null?"?":ivm.n_per_arm} samples/arm over ${ivm.n_arms} arms, judged by ${esc(ivm.judge_model||"?")}${cal && cal.kappa!=null ? ` (κ=${num(cal.kappa)} vs the study's labels)` : ""} — see the interventions tab</div>` : "") +
     `<div class="tags" style="margin-top:5px"><span class="tag">${pct(p.published_match_rate)} flagged</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${p.n_reads||0} lens reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
     `<div class="prompt">${esc(p.prompt)}</div></div>`;
-  h += `<div class="pane"><h3>detective-joracle's hypothesis (unverified)</h3>` + (top ? `<div><span class="badge dim">${esc(armLabel(armOf(run)))}</span> ${esc(top.mechanism)} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span></div>` +
+  const heavyRun = data && data.runs ? data.runs.find(x => x.run_index === run.run_index) || data.runs[runs.indexOf(run)] : null;
+  h += `<div class="pane"><h3>detective-joracle's hypothesis (unverified)</h3>` + (top ? `<div class="mtitle"><span class="badge dim">${esc(armLabel(armOf(run)))}</span> ${esc(shortOf(top))} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span><button class="more" data-more="1">more ▸</button></div>` +
+    `<div class="mmore" hidden>${top.short ? `<div class="mfull">${esc(top.mechanism)}</div>` : ""}${top.evidence ? `<div class="quote">${esc(top.evidence)}</div>` : ""}${data && data.runs ? evidenceBlock(top, heavyRun, data) : `<div class="dim">evidence replies appear once the pattern's data has loaded</div>`}</div>` +
     (top.would_test_by ? `<div class="dim" style="margin-top:4px">How it would be tested: ${esc(top.would_test_by)} <span class="badge hold">not run</span></div>` : `<div class="dim" style="margin-top:4px"><span class="badge hold">not run</span> no test proposed</div>`) +
-    (mechs.length > 1 ? `<div style="margin-top:4px"><a href="#" data-more>+ ${mechs.length-1} more in details ▸</a></div>` : "") : `<div class="empty">no run for this pattern yet — no hypothesis.</div>`) +
-    others.map((o, i) => { const t = topMech(o); return `<div class="dim" style="margin-top:${i?4:6}px;${i?"":"border-top:1px dashed var(--line-soft);padding-top:4px"}"><b>${esc(armLabel(armOf(o)))}:</b> ${t ? esc(cut(t.mechanism, 200)) + " · " + confBadge(t.confidence) : "run present, no mechanisms reported"}</div>`; }).join("") + `</div>`;
+    (mechs.length > 1 ? `<div style="margin-top:4px"><a href="#" data-all>+ ${mechs.length-1} more in details ▸</a></div>` : "") : `<div class="empty">no run for this pattern yet — no hypothesis.</div>`) +
+    others.map((o, i) => { const t = topMech(o); return `<div class="dim" style="margin-top:${i?4:6}px;${i?"":"border-top:1px dashed var(--line-soft);padding-top:4px"}" title="${esc(t ? t.mechanism : "")}"><b>${esc(armLabel(armOf(o)))}:</b> ${t ? esc(shortOf(t)) + " · " + confBadge(t.confidence) : "run present, no mechanisms reported"}</div>`; }).join("") + `</div>`;
   h += `<div class="pane"><h3>agent summary</h3>` + (run ? `<div>${esc(run.summary || "(no summary)")}</div>` +
     `<div class="vrow" style="margin-top:6px"><span class="name">tool calls</span><span>${run.n_tool_calls||0} · ${run.n_readouts||0} readouts · ${run.n_chat||0} chat probes</span></div>` +
     `<div class="vrow"><span class="name">mechanisms</span><span>${mechs.length}</span></div>` +
@@ -1946,12 +2059,13 @@ function renderCtx(){
   h += `<div class="pane"><h3>rubric</h3>${p.rubric ? clipbox(p.rubric, 320) : `<div class="empty">no rubric.</div>`}</div>`;
   box.innerHTML = h;
   box.querySelectorAll("[data-showall]").forEach(b => b.onclick = () => { b.previousElementSibling.classList.add("open"); b.remove(); });
-  box.querySelectorAll("[data-more]").forEach(a => a.onclick = e => { e.preventDefault(); S.below = true; S.tab = "mechanisms"; renderBar(); renderBelow(); });
+  box.querySelectorAll("[data-all]").forEach(a => a.onclick = e => { e.preventDefault(); S.below = true; S.tab = "mechanisms"; renderBar(); renderBelow(); });
+  wireMore(box);
 }
 
 // -------------------------------------------------------------------- text
 const REGION_LABEL = {user: "the model is reading the request", header: "about to answer — identical for every reply to this prompt", reply: "the model is writing its answer", system: ""};
-function replyLabel(r){ if (r.source !== "diag") return "the model's reply (investigator's probe, unjudged)"; return `${side(r.label)} — judge: ${r.label==="matched" ? "shows the behavior" : "does not"}`; }
+function replyLabel(r){ const rep = r.reply; if (r.source !== "diag" && !rep) return "the model's reply (investigator's probe, unjudged)"; const nm = rep ? replyLabelOf(rep) : side(r.label); return `${nm} — judge: ${r.label==="matched" ? "shows the behavior" : "does not"}${r.source !== "diag" ? " (investigator's read)" : ""}`; }
 function tokHtml(s){ if (s === "") return `<span class="nl">∅</span>`; return esc(s).replace(/\n/g, `<span class="nl">⏎</span>`).replace(/\t/g, `<span class="nl">⇥</span>`); }
 function findRx(){ return S.find ? new RegExp(rxEsc(S.find), "i") : null; }
 function cellsAt(r, pos){ const row = r.rowByPos && r.rowByPos[pos]; return row ? (row.samples||[]).reduce((a, ss) => a.concat(ss), []) : []; }
@@ -1990,8 +2104,8 @@ function renderProse(r, box){
     const n = data.fork.prefix_chars, cutAt = (t) => [t.slice(0, n), t.slice(n)];
     const [pm, rm] = cutAt(dm.completion||""), [pu, ru] = cutAt(du.completion||"");
     h += `<div class="caption">same prompt, same settings — these two replies diverge here${n ? ` (after ${n} shared characters)` : " (from the first word)"}</div>` +
-      `<div class="cmp2"><div class="col"><h4 title="${esc(SIDE_TIP.matched)}">flagged reply · sample ${dm.sample_index}</h4><div class="prose">${esc(pm)}<span class="div flagged">${esc(rm)}</span></div></div>` +
-      `<div class="col"><h4 title="${esc(SIDE_TIP.unmatched)}">clean reply · sample ${du.sample_index}</h4><div class="prose">${esc(pu)}<span class="div clean">${esc(ru)}</span></div></div></div>`;
+      `<div class="cmp2"><div class="col"><h4 title="${esc(SIDE_TIP.matched + " · WeirdChat sample " + dm.sample_index)}">${esc(replyLabelOf(replyBySample(p, dm.sample_index)) || "flagged reply")}</h4><div class="prose">${esc(pm)}<span class="div flagged">${esc(rm)}</span></div></div>` +
+      `<div class="col"><h4 title="${esc(SIDE_TIP.unmatched + " · WeirdChat sample " + du.sample_index)}">${esc(replyLabelOf(replyBySample(p, du.sample_index)) || "clean reply")}</h4><div class="prose">${esc(pu)}<span class="div clean">${esc(ru)}</span></div></div></div>`;
   }
   box.innerHTML = h;
 }
@@ -2021,7 +2135,7 @@ function renderText(){
   const others = (S.data.samples||[]).filter(s => !(r.source==="diag" && s.sample_index===r.sample_index));
   if (others.length){
     h += `<div class="rolls"><h3>other replies in the contrast set (${others.length}) — click one to read it</h3>` + others.map(s => { const rd = S.data.bySample[s.sample_index];
-      return `<button class="roll ${s.matched?"matched":"unmatched"}" ${rd?`data-read="${esc(rd.id)}"`:"disabled"} title="${rd?"open this reply's read":"no lens read of this reply"}"><span class="lab" title="${esc(SIDE_TIP[s.matched?"matched":"unmatched"])}">${s.matched?"flagged reply":"clean reply"} · sample ${s.sample_index}${rd?"":" · no read"}</span><span class="snip">${esc(cut((s.text||"").replace(/\s+/g," "), 160))}</span></button>`; }).join("") + `</div>`;
+      return `<button class="roll ${s.matched?"matched":"unmatched"}" ${rd?`data-read="${esc(rd.id)}"`:"disabled"} title="${rd?"open this reply's read":"no lens read of this reply"}"><span class="lab" title="${esc(SIDE_TIP[s.matched?"matched":"unmatched"] + " · WeirdChat sample " + s.sample_index)}">${esc(replyLabelOf(replyBySample(byKey[S.key], s.sample_index)) || (s.matched?"flagged reply":"clean reply"))}${rd?"":" · no read"}</span><span class="snip">${esc(cut((s.text||"").replace(/\s+/g," "), 160))}</span></button>`; }).join("") + `</div>`;
   }
   box.innerHTML = h;
   box.querySelectorAll(".tok[data-pos]").forEach(t => t.onclick = () => selectRead(S.read, +t.dataset.pos));
@@ -2074,7 +2188,7 @@ function renderGrid(){
   const colw = Math.max(260, Math.floor((wrap.clientWidth - 58) / Math.max(1, cols.length)) - 1); wrap.style.setProperty("--col", colw + "px");
   const table = el("table"), thead = el("thead"), hr = el("tr"); hr.appendChild(el("th", "layer", "layer"));
   const lensesDiffer = new Set(cols.map(c => c.lens || "olens")).size > 1;
-  cols.forEach((c, j) => { const th = el("th", readDot(c), readName(c)); th.title = (SIDE_TIP[c.label] ? SIDE_TIP[c.label] + " · " : "") + c.id;
+  cols.forEach((c, j) => { const th = el("th", readDot(c), readName(c)); th.title = readTip(c);
     if (lensesDiffer) th.appendChild(el("span", "rate", (LENS_SHORT[c.lens||"olens"] || c.lens) + (c.source==="diag" ? " · study read" : "")));
     if (!identical && cols.length > 1) th.appendChild(el("span", "own", toks[j]==null ? "not read at pos " + p : JSON.stringify(toks[j])));
     if (S.colw[c.id]) th.style.width = S.colw[c.id] + "px";
@@ -2137,11 +2251,34 @@ function renderResults(){
 // ------------------------------------------------------------------- drawer
 function linkCells(text, data, ri){ let out = "", last = 0, cid = null; const re = /\b([wc]\d+[mu]?)\b|\bpos\s*~?\s*(\d+)/g; let m; text = text || "";
   while ((m = re.exec(text))){ out += esc(text.slice(last, m.index));
-    if (m[1]){ const r = data.convFor(m[1], ri); if (r) cid = m[1]; out += r ? `<a href="${patUrl(data.key, r.id, null)}">${esc(m[0])}</a>` : esc(m[0]); }
+    if (m[1]){ const r = data.convFor(m[1], ri); if (r) cid = m[1]; const rep = replyByCid(byKey[data.key], m[1]); out += r ? `<a href="${patUrl(data.key, r.id, null)}" title="${esc(m[1] + " · " + readTip(r))}">${esc(rep ? replyLabelOf(rep) : "probe " + parseInt(m[1].slice(1), 10))}</a>` : esc(rep ? replyLabelOf(rep) + " (" + m[1] + ")" : m[0]); }
     else { const r = cid ? data.convFor(cid, ri) : null, pos = +m[2]; const ok = r && (r.deferred || (r.rowByPos && r.rowByPos[pos])); out += ok ? `<a href="${patUrl(data.key, r.id, pos)}" title="open ${esc(r.id)} at position ${pos}">${esc(m[0])}</a>` : esc(m[0]); }
     last = m.index + m[0].length; }
   return out + esc(text.slice(last)); }
-function mechBlock(m, i, data, ri){ return `<div class="mech"><div><span class="n">${i+1}.</span>${esc(m.mechanism)}${m.confidence==null?"":` <span class="badge ${m.confidence>=0.7?"miss":(m.confidence>=0.4?"hold":"dim")}">confidence ${num(m.confidence)}</span>`}</div>` + (m.evidence ? `<div class="ev">${esc(m.evidence)}</div>` : "") + (m.readout_cells ? `<div class="cells">cells: ${linkCells(m.readout_cells, data, ri)}</div>` : "") + (m.would_test_by ? `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>` : "") + `</div>`; }
+function evidenceBlock(m, run, data){
+  // the contrast that drove the claim: the study replies and the probes the mechanism cites, by name
+  const pat = byKey[data.key], {study, probes} = evidenceCids(m); if (!study.length && !probes.length) return "";
+  const rows = [];
+  for (const cid of study){ const rep = replyByCid(pat, cid); if (!rep) continue; const rd = data.convFor(cid, run ? run.run_index : null) || (S.data.reads.find(x => x.source === "diag" && x.sample_index === rep.sample_index));
+    rows.push(`<button class="evr ${rep.side}" ${rd ? `data-read="${esc(rd.id)}"` : "disabled"} title="${esc(cid + (rep.sample_index!=null ? " · WeirdChat sample " + rep.sample_index : ""))}"><span class="nm">${esc(replyLabelOf(rep))}</span><span class="badge ${rep.side==="flagged"?"miss":"hit"}">${rep.side}</span><span class="snip">${esc(cut((rep.text||"").replace(/\s+/g, " "), 160))}</span></button>`); }
+  const groups = {}, missing = []; const pr = run && run.probes || {};
+  for (const cid of probes){ const pb = pr[cid]; if (!pb){ missing.push(cid); continue; } (groups[pb.call] = groups[pb.call] || {pb, cids: []}).cids.push(cid); }
+  const gs = Object.values(groups).sort((a, b) => a.pb.call - b.pb.call);
+  let shown = 0, total = rows.length + gs.reduce((n, g) => n + g.cids.length, 0);
+  const cap = 6, extra = [];
+  const rep = x => { shown++; return shown <= cap ? x : (extra.push(x), ""); };
+  let h = `<div class="evb"><h4>evidence replies (${total})</h4>` + rows.map(rep).join("");
+  for (const g of gs){ const pb = g.pb, ask = pb.user || "(no user text)";
+    h += `<div class="evg"><div class="ask"><b>probe · investigator ${pb.tool === "complete" ? "prefixed" : "asked"}</b>${esc(cut(ask.replace(/\s+/g, " "), 120))}${pb.prefill ? ` <span class="dim">· prefilled: ${esc(cut(pb.prefill, 60))}</span>` : ""}${pb.system ? ` <span class="dim">· system prompt set</span>` : ""}</div>` +
+      g.cids.map(cid => { const q = pr[cid]; return rep(`<div class="rep"><span class="pn" title="${esc(cid)}">probe ${parseInt(cid.slice(1), 10)}</span>${esc(cut((q.reply||"").replace(/\s+/g, " "), 160))}${q.truncated ? " …" : ""}</div>`); }).join("") +
+      (pb.siblings.length > g.cids.length ? `<div class="dim" style="font-size:11px">+${pb.siblings.length - g.cids.length} more repl${pb.siblings.length - g.cids.length === 1 ? "y" : "ies"} in this probe (same question)</div>` : "") + `</div>`; }
+  if (missing.length) h += `<div class="dim" style="font-size:11px">cited but not found in this run's transcript: ${esc(missing.join(", "))}</div>`;
+  if (extra.length) h += `<details><summary>show all ${total} evidence replies</summary>${extra.join("")}</details>`;
+  return h + `</div>`;
+}
+function mechBlock(m, i, data, ri){ const run = data && data.runs ? data.runs[ri] : null;
+  return `<div class="mech"><div class="mtitle"><span class="n">${i+1}.</span>${esc(shortOf(m))}${m.confidence==null?"":` <span class="badge ${m.confidence>=0.7?"miss":(m.confidence>=0.4?"hold":"dim")}">confidence ${num(m.confidence)}</span>`}<button class="more" data-more="1">more ▸</button></div>` +
+    `<div class="mmore" hidden>${m.short ? `<div class="mfull">${esc(m.mechanism)}</div>` : ""}` + (m.evidence ? `<div class="ev">${esc(m.evidence)}</div>` : "") + (m.readout_cells ? `<div class="cells">cells: ${linkCells(m.readout_cells, data, ri)}</div>` : "") + (m.would_test_by ? `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>` : "") + (data && data.runs ? evidenceBlock(m, run, data) : "") + `</div></div>`; }
 function showAll(text, n){ const t = text || ""; if (t.length <= n) return `<div class="body">${esc(t)}</div>`; return `<div class="body">${esc(t.slice(0, n))} …</div><details><summary>show all (${t.length} chars)</summary><div class="body">${esc(t)}</div></details>`; }
 function parseReplies(out){
   // the tool's _record format: "[c005] organism reply (N tokens)[ [truncated]]:\n<text>" blocks separated by blank lines
@@ -2169,7 +2306,7 @@ function stepBlock(s, i, data, run){ const rd = s.tool_index!=null ? data.byTool
   return h + `</div>`; }
 function agreeTab(ag){
   const A = armLabel(ag.arm || "olens"), B = armLabel(ag.arm_b || "blackbox");
-  const list = (items, label) => items.length ? items.map(m => `<div class="mech"><div><span class="badge dim">${esc(label)}</span> ${esc(m.mechanism)}${m.confidence==null?"":" "+confBadge(m.confidence)}</div></div>`).join("") : `<div class="empty">none</div>`;
+  const list = (items, label) => items.length ? items.map(m => `<div class="mech"><div class="mtitle"><span class="badge dim">${esc(label)}</span> ${esc(shortFor(m.mechanism))}${m.confidence==null?"":" "+confBadge(m.confidence)}${shortFor(m.mechanism) !== m.mechanism ? `<button class="more" data-more="1">more ▸</button>` : ""}</div>${shortFor(m.mechanism) !== m.mechanism ? `<div class="mmore" hidden><div class="mfull">${esc(m.mechanism)}</div></div>` : ""}</div>`).join("") : `<div class="empty">none</div>`;
   return `<div class="sub" style="margin:0 0 8px"><b>${esc(A)} vs ${esc(B)}</b> — top hypotheses agree: <b>${ag.top_match==null?"?":(ag.top_match?"yes":"no")}</b> · ${esc(A)} mechanisms with a ${esc(B)} counterpart ${ag.lens_with_counterpart==null?"?":ag.lens_with_counterpart}/${ag.n_lens==null?"?":ag.n_lens} · ${esc(B)} with a ${esc(A)} counterpart ${ag.blackbox_with_counterpart==null?"?":ag.blackbox_with_counterpart}/${ag.n_blackbox==null?"?":ag.n_blackbox} — agreement means the two arms told the same story, not that either is right</div>` +
     `<h3 style="margin:8px 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint)">only ${esc(A)} proposed (${ag.lens_only.length})</h3>` + (ag.lens_only_summary ? `<div class="sub" style="margin:0 0 6px">${esc(ag.lens_only_summary)}</div>` : "") + list(ag.lens_only, `only ${A} proposed`) +
     `<h3 style="margin:12px 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint)">only ${esc(B)} proposed (${ag.blackbox_only.length})</h3>` + (ag.blackbox_only_summary ? `<div class="sub" style="margin:0 0 6px">${esc(ag.blackbox_only_summary)}</div>` : "") + list(ag.blackbox_only, `only ${B} proposed`);
@@ -2179,7 +2316,7 @@ function scoreboard(){
   return `<div class="score"><span class="sub" style="border:0;background:none;padding:0">prediction scoreboard:</span>` + preds.slice().sort((a, b) => armRank(a.arm) - armRank(b.arm)).map(pr => { const s = pr.summary || {}; return `<span><b>${esc(armLabel(pr.arm))}</b> right ${s.right==null?"?":s.right} · wrong ${s.wrong==null?"?":s.wrong} · not predicted ${s.not_predicted==null?"?":s.not_predicted} of ${s.arms==null?"?":s.arms} arms across ${s.n_patterns==null?"?":s.n_patterns} patterns</span>`; }).join("") + `</div>`;
 }
 const DIR = {down: "↓", up: "↑", none: "–", flat: "–"};
-function predCell(row){ if (!row || !row.predicted || row.verdict === "not_predicted") return `<span class="pred np">not predicted</span>`; const v = row.verdict === "right" ? "right" : (row.verdict === "wrong" ? "wrong" : "np"); return `<span class="pred ${v}" title="${esc((row.mechanism||"") + (row.direction ? " · predicted " + row.direction : ""))}">${esc(DIR[(row.direction||"").toLowerCase()] || row.direction || "–")} ${v === "np" ? "" : v}</span>`; }
+function predCell(row){ if (!row || !row.predicted || row.verdict === "not_predicted") return `<span class="pred np">not predicted</span>`; const v = row.verdict === "right" ? "right" : (row.verdict === "wrong" ? "wrong" : "np"); return `<span class="pred ${v}" title="${esc(shortFor(row.mechanism||"") + (row.mechanism && shortFor(row.mechanism) !== row.mechanism ? " — " + row.mechanism : "") + (row.direction ? " · predicted " + row.direction : ""))}">${esc(DIR[(row.direction||"").toLowerCase()] || row.direction || "–")} ${v === "np" ? "" : v}</span>`; }
 function diffSpan(base, other){
   // the changed span of `other` against `base`: common prefix/suffix stripped, a little context kept
   if (other === base) return null;
@@ -2221,7 +2358,7 @@ function interventionsTab(iv, preds){
 function briefTab(data){
   const b = data.brief;
   if (!b || !b.text) return `<div class="empty">the brief could not be rebuilt — ${esc(b && b.error ? b.error : (D.brief_how || "prompts unavailable"))}</div>`;
-  let h = `<div class="sub" style="margin:0 0 6px">what the investigator was handed: the behavior, the judge's rubric, the prompt, and ${D.n_side||2} flagged + ${D.n_side||2} clean replies, pre-loaded as conversations ${esc((b.ids||[]).join("/"))}</div>`;
+  let h = `<div class="sub" style="margin:0 0 6px">what the investigator was handed: the behavior, the judge's rubric, the prompt, and ${D.n_side||2} flagged + ${D.n_side||2} clean replies, loaded as flagged reply A/B and clean reply A/B (ids ${esc((b.ids||[]).join("/"))})</div>`;
   if (D.system_prompt) h += `<details><summary>system prompt (${D.system_prompt.length} chars)</summary><pre class="brief">${esc(D.system_prompt)}</pre></details>`;
   h += `<pre class="brief">${esc(b.text)}</pre><div class="sub" style="margin-top:6px">rebuilt at build time from the pattern with the repo's prompts module (${esc(D.brief_how||"")})</div>`;
   return h;
@@ -2253,11 +2390,17 @@ function renderBelow(){
   else { const items = D.highlights || []; const mine = items.filter(x => x.pattern_key === S.key), rest = items.filter(x => x.pattern_key !== S.key);
     h = `<div class="sub" style="margin:0 0 6px">${mine.length} on this pattern · ${rest.length} elsewhere — lens cells a mechanism quotes that verify verbatim at build time; click to jump</div><div class="hlgrid">` + [...mine, ...rest].map(x => { const idx = items.indexOf(x);
       const smp = esc(x.sample.trim()).split(esc(x.quote)).join(`<mark>${esc(x.quote)}</mark>`), loc = esc(x.local.slice(0, x.local.length - x.token.length)) + `<b>${esc(x.token)}</b>`;
-      return `<button class="hlc ${esc(x.region)}" data-hl="${idx}"><div class="where"><b>${esc(x.behavior)}</b> ${esc(cut(x.summary, 50))} · <span title="${esc(SIDE_TIP[(x.read.match(/^diag:(\w+):/)||[])[1]]||"")}">${esc(nameOfId(x.read))}</span> · pos ${x.pos} · L${x.layer}${x.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div><div class="loc">${loc}</div><div class="q">${smp}</div><div class="n">${esc(x.note)}</div></button>`; }).join("") + `</div>`; }
+      return `<button class="hlc ${esc(x.region)}" data-hl="${idx}"><div class="where"><b>${esc(x.behavior)}</b> ${esc(cut(x.summary, 50))} · <span title="${esc((SIDE_TIP[(x.read.match(/^diag:(\w+):/)||[])[1]]||"") + " · " + x.read)}">${esc(nameOfId(x.read, x.pattern_key))}</span> · pos ${x.pos} · L${x.layer}${x.kind==="hand"?' · <span class="hand">hand-picked</span>':""}</div><div class="loc">${loc}</div><div class="q">${smp}</div><div class="n" title="${esc(x.note)}">${esc(shortFor(x.note))}</div></button>`; }).join("") + `</div>`; }
   $("#drawer").innerHTML = h;
   $("#drawer").querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { const x = (D.highlights||[])[+b.dataset.hl]; location.hash = patUrl(x.pattern_key, x.read, x.pos); });
   $("#drawer").querySelectorAll("[data-arm]").forEach(b => b.onclick = () => { S.arm = b.dataset.arm; renderBelow(); });
+  wireMore($("#drawer"));
   $("#drawer").querySelectorAll("[data-ex]").forEach(b => b.onclick = () => { const box = document.getElementById("ex-" + b.dataset.ex); if (box) box.hidden = !box.hidden; });
+}
+function wireMore(root){
+  if (!root) return;
+  root.querySelectorAll("[data-more]").forEach(b => b.onclick = e => { e.preventDefault(); const box = b.parentElement && b.parentElement.nextElementSibling; if (box){ box.hidden = !box.hidden; b.textContent = box.hidden ? "more ▸" : "less ▾"; } });
+  root.querySelectorAll(".evr[data-read]").forEach(b => b.onclick = () => selectRead(b.dataset.read, null));
 }
 function renderNote(){
   const r = curRead(), p = byKey[S.key];
@@ -2269,7 +2412,7 @@ function renderNote(){
 function renderThemes(focus){
   const cl = D.clusters || [];
   $("#themes-body").innerHTML = cl.length ? cl.map((k, i) => `<div class="theme" id="theme-${i}" style="${i===focus?"border-color:var(--accent)":""}"><div style="font-weight:600">${esc(k.name)}</div><div class="dim">${k.members.length} pattern${k.members.length===1?"":"s"} · ${k.behavior_ids.map(esc).join(", ")}</div>${k.description?`<div style="margin:4px 0">${esc(k.description)}</div>`:""}` +
-    k.members.map(m => { const p = byKey[m.pattern_key]; return `<div class="mem"><a href="${patUrl(m.pattern_key)}">${esc(p ? p.behavior_name + " · " + cut(p.group_summary, 40) : m.pattern_key)}</a>${p?"":' <span class="badge dim">not in this build</span>'} — ${esc(m.mechanism)}</div>`; }).join("") + `</div>`).join("")
+    k.members.map(m => { const p = byKey[m.pattern_key]; return `<div class="mem" title="${esc(m.mechanism)}"><a href="${patUrl(m.pattern_key)}">${esc(p ? p.behavior_name + " · " + cut(p.group_summary, 40) : m.pattern_key)}</a>${p?"":' <span class="badge dim">not in this build</span>'} — ${esc(shortFor(m.mechanism))}</div>`; }).join("") + `</div>`).join("")
     : `<div class="empty">no synth.json yet — clusters appear once the synthesis pass runs.</div>`;
   const d = $("#themes"); if (d && !d.open && d.showModal) d.showModal();
   if (focus!=null){ const t = document.getElementById("theme-" + focus); if (t && t.scrollIntoView) t.scrollIntoView({block:"start"}); }
