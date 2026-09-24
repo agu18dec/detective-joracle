@@ -945,13 +945,96 @@ def flags_of(out_root: Path, pat: dict[str, Any]) -> tuple[dict[str, Any] | None
     return out, stats
 
 
+def annotations_of(
+    out_root: Path, pat: dict[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, int]]:
+    """annotations/<key>.json re-verified: a cell Gemini judged to contrastively support one OLens mechanism
+    stays only if its quote is verbatim in the attributed read's cell (side flagged / clean / both)."""
+    blob = read_json(out_root / "annotations" / f"{pat['key']}.json")
+    stats = {"kept": 0, "dropped": 0, "proposed": 0, "unverified": 0}
+    if blob is None:
+        return None, stats
+    by_id = {r["id"]: r for r in pat["reads"]}
+    reads = {
+        "flagged": by_id.get(as_text(blob.get("flagged_read"))),
+        "clean": by_id.get(as_text(blob.get("clean_read"))),
+    }
+
+    def has_quote(
+        read: dict[str, Any] | None, pos: int | None, layer: int | None, quote: str
+    ) -> bool:
+        if not read or not read.get("rows") or layer not in read["layers"]:
+            return False
+        row = next((r for r in read["rows"] if r["pos"] == pos), None)
+        li = read["layers"].index(layer)
+        return bool(
+            row and li < len(row["samples"]) and any(quote in smp for smp in row["samples"][li])
+        )
+
+    items, dropped = [], 0
+    for a in (as_dict(x) for x in as_list(blob.get("annotations"))):
+        pos, layer, quote = (
+            as_int(a.get("position")),
+            as_int(a.get("layer")),
+            as_text(a.get("quote")),
+        )
+        side = (
+            as_text(a.get("side"))
+            if as_text(a.get("side")) in ("flagged", "clean", "both")
+            else "both"
+        )
+        sides = ["flagged", "clean"] if side == "both" else [side]
+        verified = [sd for sd in sides if quote and has_quote(reads[sd], pos, layer, quote)]
+        if not verified:
+            dropped += 1
+            continue
+        items.append(
+            {
+                "mechanism": as_int(a.get("mechanism")),
+                "position": pos,
+                "layer": layer,
+                "side": side,
+                "verified_sides": verified,
+                "claimed_side": as_text(a.get("claimed_side")),
+                "quote": quote,
+                "contrast": as_text(a.get("contrast")),
+            }
+        )
+    items.sort(key=lambda x: (x["position"] or 0, x["layer"] or 0))
+    stats.update(
+        kept=len(items),
+        dropped=dropped,
+        proposed=as_int(blob.get("proposed")) or 0,
+        unverified=as_int(blob.get("unverified")) or 0,
+    )
+    return {
+        "flagged_read": as_text(blob.get("flagged_read")),
+        "clean_read": as_text(blob.get("clean_read")),
+        "arm": as_text(blob.get("arm")) or "olens",
+        "items": items,
+        "proposed": as_int(blob.get("proposed")),
+        "unverified": as_int(blob.get("unverified")),
+        "dropped_here": dropped,
+        "model": as_text(blob.get("model")),
+    }, stats
+
+
 def synth_meta(out_root: Path) -> dict[str, Any]:
     synth = read_json(out_root / "synth.json") or {}
     return {"model": as_text(synth.get("model")), "n_records": as_int(synth.get("n_records"))}
 
 
 # ------------------------------------------------------------------- split
-HEAVY_PATTERN_KEYS = ("samples", "reads", "fork", "brief", "interventions", "predictions", "flags")
+HEAVY_PATTERN_KEYS = (
+    "samples",
+    "reads",
+    "fork",
+    "brief",
+    "interventions",
+    "predictions",
+    "flags",
+    "annotations",
+)
 HEAVY_RUN_KEYS = ("steps", "notes", "probes")
 
 
@@ -991,6 +1074,18 @@ def light_pattern(pat: dict[str, Any]) -> dict[str, Any]:
             "model": next((e["model"] for e in fl.values() if e["model"]), ""),
         }
         if fl
+        else None
+    )
+    an = pat.get("annotations")
+    light["annotations_meta"] = (
+        {
+            "n": len(an["items"]),
+            "proposed": an["proposed"],
+            "dropped": (an["unverified"] or 0) + an["dropped_here"],
+            "model": an["model"],
+            "arm": an["arm"],
+        }
+        if an
         else None
     )
     light["flag_whys"] = [
@@ -1324,6 +1419,7 @@ def build_site(
         calibrations[0] if calibrations else None
     )
     flag_stats = {"kept": 0, "dropped": 0, "proposed": 0, "unverified": 0, "files": 0}
+    ann_stats = {"kept": 0, "dropped": 0, "proposed": 0, "unverified": 0, "files": 0}
     for pat in patterns:
         pat["brief"] = brief_of(pat, brief_fn)
         pat["flags"], fstats = flags_of(out_root, pat)
@@ -1331,6 +1427,17 @@ def build_site(
             flag_stats["files"] += 1
             for k in ("kept", "dropped", "proposed", "unverified"):
                 flag_stats[k] += fstats[k]
+        pat["annotations"], astats = annotations_of(out_root, pat)
+        if pat["annotations"] is not None:
+            ann_stats["files"] += 1
+            for k in ("kept", "dropped", "proposed", "unverified"):
+                ann_stats[k] += astats[k]
+            for run in pat["runs"]:  # per-mechanism counts, shown under each hypothesis
+                if (run["arm"] or "olens") == pat["annotations"]["arm"]:
+                    for i, mech in enumerate(run["mechanisms"]):
+                        mech["n_annotations"] = sum(
+                            1 for a in pat["annotations"]["items"] if a["mechanism"] == i
+                        )
         pat["interventions"] = interventions_of(out_root, pat["key"])
         pat["agreements"] = [
             {"arm": a["arm"], "arm_b": a["arm_b"], **a["patterns"][pat["key"]]}
@@ -1348,6 +1455,10 @@ def build_site(
         f"reader flags: {flag_stats['files']} files · {flag_stats['kept']} kept (verbatim in the cited cell) · "
         f"{flag_stats['dropped']} dropped at build time as non-verbatim · file says {flag_stats['proposed']} proposed, "
         f"{flag_stats['unverified']} unverified"
+    )
+    print(
+        f"Gemini annotations: {ann_stats['files']} files · {ann_stats['kept']} kept (verbatim in the attributed read) · "
+        f"{ann_stats['dropped']} dropped at build time · file says {ann_stats['proposed']} proposed, {ann_stats['unverified']} unverified"
     )
     arm_counts = {
         a: sum(1 for p in patterns if any((r["arm"] or "olens") == a for r in p["runs"]))
@@ -1539,11 +1650,41 @@ button,input,select{font:inherit;color:inherit}
 a{color:var(--accent)}
 .kbd{font-family:var(--mono);font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:3px;padding:0 5px;color:var(--text-dim)}
 /* top bar */
-#bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 14px;padding-top:calc(8px + env(safe-area-inset-top,0px));background:var(--surface);border-bottom:1px solid var(--line);flex:none}
+#bar{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;padding:5px 14px;padding-top:calc(5px + env(safe-area-inset-top,0px));background:var(--surface);border-bottom:1px solid var(--line);flex:none;position:relative;min-height:34px;overflow:visible}
+#bar h1{white-space:nowrap}
+.menu{position:absolute;right:14px;top:36px;z-index:50;background:var(--surface);border:1px solid var(--line);border-radius:6px;box-shadow:0 6px 24px rgba(10,18,24,.15);padding:8px;display:flex;flex-wrap:wrap;gap:6px;max-width:420px}
+.menu[hidden]{display:none}
+#cmp-toggles{display:flex;gap:4px;flex-wrap:nowrap;overflow-x:auto;padding:3px 14px;background:var(--surface);border-bottom:1px solid var(--line-soft);flex:none;min-height:0;scrollbar-width:thin}
+#cmp-toggles:empty{display:none}
+#primer{flex:none;display:flex;align-items:center;gap:8px;padding:3px 14px;background:var(--surface);border-bottom:1px solid var(--line);font-size:11.5px;color:var(--text-dim);position:relative;white-space:nowrap;overflow:hidden}
+.info{font:inherit;border:0;background:none;color:var(--accent);cursor:pointer;padding:0 4px;font-size:13px}
+.pop{position:absolute;left:14px;top:26px;z-index:50;background:var(--surface);border:1px solid var(--line);border-radius:6px;box-shadow:0 6px 24px rgba(10,18,24,.15);padding:10px 14px;max-width:760px;white-space:normal;font-size:12.5px;color:var(--text)}
+.pop[hidden]{display:none}
+.pop .p2{background:var(--miss-soft);color:var(--miss);padding:4px 8px;border-radius:4px}
+#ctx.collapsed{display:block;padding:0}
+.ctxline{padding:4px 14px;font-size:12px;cursor:pointer;display:flex;gap:8px;align-items:center;white-space:nowrap;overflow:hidden}
+.ctxline b{white-space:nowrap} .ctxline .short{overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.ctxline .caret{color:var(--text-faint)}
+#ctx .collapse{position:absolute;right:14px;top:4px;font-size:11px;color:var(--accent);background:none;border:0;cursor:pointer}
+#ctx{position:relative}
+#stripline{display:flex;gap:10px;align-items:center;flex-wrap:nowrap;overflow-x:auto;font-size:11px;color:var(--text-dim);margin:0 0 6px;padding-bottom:2px;scrollbar-width:thin}
+#stripline > *{flex:none}
+#stripline .tlegend{margin:0;flex-wrap:nowrap} #stripline #flagbar{padding:2px 6px;margin:0}
+.tok.annot{position:relative} .tok.annot::after{content:"◆";position:absolute;right:-2px;top:-10px;font-size:8px;color:var(--find)}
+.tok.annot{box-shadow:inset 0 0 0 1px var(--find)}
+td.annot .cell{box-shadow:inset 3px 0 0 var(--find)} td.annot.flagged .cell{box-shadow:inset 3px 0 0 var(--find), inset 6px 0 0 var(--hold)}
+mark.ann{background:var(--find-soft);color:var(--find-ink);border-bottom:2px solid var(--find);font-weight:600}
+.acard{border:1px solid var(--line-soft);border-left:3px solid var(--find);border-radius:4px;background:var(--surface);padding:5px 8px;font-size:12px}
+.acard .hyp{color:var(--text)} .acard .q{font-family:var(--mono);font-size:11.5px;margin:3px 0;white-space:pre-wrap;word-break:break-word}
+.acard .other{border-top:1px dashed var(--line-soft);margin-top:4px;padding-top:4px;color:var(--text-dim);font-family:var(--mono);font-size:11px;white-space:pre-wrap;word-break:break-word}
+.acard .other b{font-family:var(--sans);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint);margin-right:6px}
+.flags.ann{border:1px solid var(--find);background:var(--find-soft);border-radius:5px;padding:6px 8px;margin:0 0 8px} .flags.ann h3{color:var(--find)}
+.annlink{font-size:11px;color:var(--find);background:none;border:0;padding:0;cursor:pointer;margin-left:6px}
 #bar h1{margin:0 8px 0 0;font-size:14px;font-weight:600}
 #bar h1 a{color:inherit;text-decoration:none}
 .pick{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.1em}
-.pick select{font-family:var(--mono);font-size:12px;text-transform:none;letter-spacing:0;padding:3px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--text);max-width:300px}
+.pick select{font-family:var(--mono);font-size:12px;text-transform:none;letter-spacing:0;padding:3px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--text);max-width:260px}
+#pat-select{max-width:300px} #read-select{max-width:260px}
 .btn{font-size:12px;line-height:1;padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--text-dim);cursor:pointer}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
 .btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
@@ -1551,7 +1692,7 @@ a{color:var(--accent)}
 .btn.cmp{font-family:var(--mono);font-size:11px;padding:3px 6px}
 .btn.cmp i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;vertical-align:0}
 i.matched{background:var(--miss)} i.unmatched{background:var(--hit)} i.agent{background:var(--text-faint)} i.err{background:var(--hold)}
-#search,#find{padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:var(--ground);font-family:var(--mono);font-size:12px;width:230px}
+#search,#find{padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:var(--ground);font-family:var(--mono);font-size:12px;width:170px}
 #find{border-color:var(--find)}
 .spacer{flex:1}
 .sub{font-size:11.5px;color:var(--text-dim)}
@@ -1781,27 +1922,31 @@ dialog h2{margin:0 0 10px;font-size:15px}
 
 <div id="bar">
   <h1><a href="#/">WeirdChat × OLens</a></h1>
-  <label class="pick"><span>behavior</span><select id="beh-select"></select></label>
-  <label class="pick"><span>pattern</span><select id="pat-select"></select></label>
+  <label class="pick" title="behavior"><select id="beh-select"></select></label>
+  <label class="pick" title="pattern (prompt)"><select id="pat-select"></select></label>
   <button class="btn" id="prev-item" title="previous pattern (k)">‹</button>
   <button class="btn" id="next-item" title="next pattern (j)">›</button>
-  <label class="pick"><span>read</span><select id="read-select"></select></label>
-  <span id="cmp-toggles" style="display:flex;gap:4px;flex-wrap:wrap" title="compare columns (1…9)"></span>
-  <input id="find" placeholder="find in this pattern's readouts  ( / )" autocomplete="off" spellcheck="false">
-  <input id="search" placeholder="search patterns and mechanisms  ( ; )" autocomplete="off" spellcheck="false">
+  <label class="pick" title="the read shown on the left"><select id="read-select"></select></label>
+  <input id="find" placeholder="find in readouts ( / )" autocomplete="off" spellcheck="false">
+  <input id="search" placeholder="search patterns ( ; )" autocomplete="off" spellcheck="false">
   <span class="spacer"></span>
-  <a class="btn" id="themes-btn" href="#/themes" title="mechanism clusters">themes</a>
-  <button class="btn" id="agree-btn" title="how the lens arm and a black-box arm compare" hidden>lens vs black-box</button>
-  <button class="btn" id="flags-btn" title="jump to the first Gemini-flagged position of this read (f)">⚑ flags</button>
-  <button class="btn" id="text-toggle" aria-pressed="false" title="read the replies as plain text instead of tokens (x)">text</button>
-  <button class="btn" id="ctx-toggle" aria-pressed="true" title="case / hypothesis / summary / rubric (c)">context</button>
-  <button class="btn" id="wrap-toggle" aria-pressed="false" title="cap row height (w)">compact rows</button>
-  <button class="btn" id="below-toggle" aria-pressed="false" title="mechanisms · transcript · highlights">details</button>
-  <button class="btn" id="theme" title="light / dark (t)">◐</button>
-  <button class="btn" id="manual-btn" title="what the colours mean (m)">m</button>
-  <button class="btn" id="keys" title="keyboard (?)">?</button>
+  <button class="btn" id="menu-btn" title="more: themes · arms compared · text · context · compact rows · details · theme · manual · keys" aria-pressed="false">⋯</button>
+  <div id="menu" class="menu" hidden>
+    <a class="btn" id="themes-btn" href="#/themes" title="mechanism clusters">themes</a>
+    <button class="btn" id="agree-btn" title="how the arms compare" hidden>arms compared</button>
+    <button class="btn" id="flags-btn" title="jump to the first Gemini-flagged position of this read (f)">⚑ flags</button>
+    <button class="btn" id="text-toggle" aria-pressed="false" title="read the replies as plain text instead of tokens (x)">text</button>
+    <button class="btn" id="ctx-toggle" aria-pressed="false" title="case / hypothesis / summary / rubric (c)">context</button>
+    <button class="btn" id="wrap-toggle" aria-pressed="false" title="cap row height (w)">compact rows</button>
+    <button class="btn" id="below-toggle" aria-pressed="false" title="mechanisms · transcript · highlights">details</button>
+    <button class="btn" id="theme" title="light / dark (t)">◐</button>
+    <button class="btn" id="manual-btn" title="what the colours mean (m)">m</button>
+    <button class="btn" id="keys" title="keyboard (?)">?</button>
+  </div>
 </div>
-<div id="primer"><div class="p1" id="primer1"></div><div class="p2" id="banner"></div></div>
+<div id="cmp-toggles" title="matrix columns (1…5)"></div>
+<div id="primer"><span class="p1" id="primer1"></span><button class="info" id="primer-info" title="what WeirdChat is, what is ground truth here, and how the arms compare">ⓘ</button>
+  <div id="primer-pop" class="pop" hidden><p id="primer-full"></p><p class="p2" id="banner"></p><p id="primer-stats" class="sub"></p></div></div>
 <div id="results" hidden></div>
 <div id="ctx"></div>
 <div id="hits" hidden></div>
@@ -1829,6 +1974,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
     <p><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i><b>Dotted</b> underline is the fork: the first reply word where the flagged and clean replies diverge, computed from the read tokens (≈, positions were thinned).</p>
     <p><i class="sw" style="background:var(--find-soft);border-color:var(--find)"></i><b>Violet</b> is your search: <span class="kbd">/</span> filters this pattern's readouts (tokens whose cells match get a violet underline and are listed under the bar); <span class="kbd">;</span> searches summaries, prompts and mechanisms across every pattern.</p>
     <p><i class="sw" style="border-top:3px solid var(--hold);background:var(--hold-soft)"></i><b>Amber ⚑</b> is a Gemini flag: a second model (google/gemini-3.8-flash) read each cell of the study reads and flagged cells that say something the reply's text does not — a role being adopted, both branches present at once, a hidden referent, a disclaimer that never surfaces, a contradiction, a commitment point. Every quote was re-checked verbatim at build time. Three marks, three sources: <b>yellow</b> = a fixed position (about to speak), <b>green</b> = a phrase the investigator quoted, <b>amber ⚑</b> = a phrase the reader model flagged. The flagger saw the reply and its label — an attention pass, not a blind judge. Flags are keyed to the study reads, so in the matrix they light up in the "OLens · study read" columns.</p>
+    <p><i class="sw" style="box-shadow:inset 0 0 0 1px var(--find);background:var(--surface)"></i><b>Violet ◆</b> is a Gemini annotation: a cell the reader judged to <i>contrastively</i> support one specific OLens hypothesis — the flagged reply's activation says something the clean one's does not at the same position (or the reverse; "both" = a propensity shared by the two). Each quote was re-checked verbatim at build time against the attributed read, and the card shows the other side's cell at the same position and layer so the contrast is visible in one place.</p>
     <p><b>The matrix.</b> At the selected position the grid shows every read of flagged reply A and clean reply A the pattern has, across lenses: a two-level header names the reply, then the lens ("OLens · study read" = our own lens sample of the study reply, "OLens · investigator" = the investigator's read of the same reply, "J-lens", "NLA L42"); rows are the union of layers, "—" where a lens has no cell. Reads of one reply share a tokenization, so the same position is the same token — a "≠ token" note marks a column where it is not (e.g. beyond a shorter read). The toggles in the bar add or drop a lens, or the B replies; a probe chosen in the read select becomes an extra column.</p>
     <p id="manual-cal" class="sub"></p>
     <p><b>Faded</b> tokens (‥) stand for positions the read thinned away — the lens read every 4th token plus punctuation and boundaries.</p>
@@ -1879,14 +2025,15 @@ function load(k){ try { return localStorage.getItem(k); } catch(e){ return null;
 // the primer: what WeirdChat is, what is ground truth here and what is not
 const PRIMER1 = "WeirdChat (Transluce) sampled the plain Qwen3.6-27B ~64 times per prompt and had a judge label every reply: does it show the behavior or not. That label is the ground truth for WHAT the model does. Nobody has ground truth for WHY — this page collects one investigator's hypotheses about why, read off the model's internals with OLens.";
 const VPCT = D.verify && D.verify.fragments ? Math.round(100 * D.verify.verified / D.verify.fragments) : null;
-$("#primer1").textContent = PRIMER1; if ($("#manual-primer")) $("#manual-primer").textContent = PRIMER1;
+$("#primer1").textContent = "WeirdChat labelled each reply flagged/clean (ground truth for WHAT). Everything below is hypothesis about WHY."; $("#primer-full").textContent = PRIMER1; if ($("#manual-primer")) $("#manual-primer").textContent = PRIMER1;
+$("#primer-info").onclick = () => { const pop = $("#primer-pop"); pop.hidden = !pop.hidden; };
 const AGS = D.agreement_summary;
 const AGL = D.agreements || [];
 function calFor(judge){ const j = (judge||"").toLowerCase(); if (!j) return null; return (D.calibrations||[]).find(c => { const m = (c.model||"").toLowerCase(); return m && (m === j || m.endsWith("/" + j) || j.endsWith("/" + m) || m.split("/").pop() === j.split("/").pop()); }) || null; }
 const armLabel0 = a => ({olens: "OLens", jlens: "J-lens", nla: "NLA (L42)", blackbox: "black-box"})[a] || a;
-$("#banner").textContent = "Hypotheses, unverified: no intervention was run under the judge's rubric; " + (VPCT==null ? "none of" : VPCT + "% of") + " the lens cells the investigator quoted check out verbatim (build-time figure)" +
-  AGL.filter(a => a.summary && a.summary.n_patterns).map(a => `; ${armLabel0(a.arm)} and ${armLabel0(a.arm_b)} agreed on the top hypothesis in ${a.summary.top_match||0} of ${a.summary.n_patterns} patterns`).join("") +
-  ((D.predictions||[]).length ? "; predictions right " + D.predictions.map(pr => `${(pr.summary||{}).right==null?"?":pr.summary.right}/${(pr.summary||{}).arms==null?"?":pr.summary.arms} (${armLabel0(pr.arm)})`).join(", ") : "") + ".";
+$("#banner").textContent = "Hypotheses, unverified: no intervention was run under the judge's rubric; " + (VPCT==null ? "none of" : VPCT + "% of") + " the lens cells the investigator quoted check out verbatim (build-time figure).";
+$("#primer-stats").textContent = (AGL.filter(a => a.summary && a.summary.n_patterns).map(a => `${armLabel0(a.arm)} and ${armLabel0(a.arm_b)} agreed on the top hypothesis in ${a.summary.top_match||0} of ${a.summary.n_patterns} patterns`).join("; ") +
+  ((D.predictions||[]).length ? (AGL.length ? "; " : "") + "predictions right " + D.predictions.map(pr => `${(pr.summary||{}).right==null?"?":pr.summary.right}/${(pr.summary||{}).arms==null?"?":pr.summary.arms} (${armLabel0(pr.arm)})`).join(", ") : "")) || "";
 if ((D.calibrations||[]).length){ $("#manual-cal").innerHTML = `<b>Intervention judges.</b> ` + D.calibrations.filter(c => c.n).map(c => `${esc(c.model)} agreed with WeirdChat's judge on ${Math.round((c.agreement||0)*100)}% of ${c.n} labelled replies, κ=${num(c.kappa)}${c.confusion && c.confusion.tp!=null ? ` (tp ${c.confusion.tp} · tn ${c.confusion.tn} · fp ${c.confusion.fp} · fn ${c.confusion.fn})` : ""}${c.judge_failures ? ` · ${c.judge_failures} judge failures` : ""}`).join("; ") + `. The κ shown on a pattern is its own judge's.`; }
 if (AGL.length || (D.predictions||[]).length){ $("#agree-btn").hidden = false; $("#agree-btn").textContent = "arms compared";
   const q = v => v==null ? "?" : v;
@@ -1928,7 +2075,7 @@ function readName(r){
 function readTip(r){ const parts = [r.id]; if (r.source === "diag") parts.push(`WeirdChat sample ${r.sample_index} ${sampleTotal()}`); if (r.conv_id) parts.push(`conversation ${r.conv_id}`); if (r.same_rollout_as) parts.push(`same reply as ${r.same_rollout_as}, other lens sample`); if (SIDE_TIP[r.label]) parts.unshift(SIDE_TIP[r.label]); return parts.join(" · "); }
 
 // ------------------------------------------------------------------ state
-const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
+const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx: load("wc-ctx") === "1", compact:false,
            colw:{}, rowh:{}, below:false, tab:"brief", arm:"lens", textView: load("wc-text") === "1", agentPromise:null, flagCat:"all", lensOn:{study:true, olens:true, jlens:true, nla:true}, bOn:false, extra:[]};
 const LENS_KEYS = ["study", "olens", "jlens", "nla"];
 const LENS_COL = {study: "OLens · study read", olens: "OLens · investigator", jlens: "J-lens", nla: "NLA L42"};
@@ -1992,8 +2139,10 @@ function prepareData(key, data){
   data.mechs = []; data.runs.forEach((run, ri) => (run.mechanisms||[]).forEach((m, mi) => data.mechs.push({...m, run: ri, i: mi, auditor: run.auditor, seed: run.seed, arm: armOf(run)})));
   // verified highlight cells for this pattern: read → pos → [{layer, quote}]
   data.hl = {}; for (const h of (D.highlights||[])) if (h.pattern_key === key){ (data.hl[h.read] = data.hl[h.read] || {}); (data.hl[h.read][h.pos] = data.hl[h.read][h.pos] || []).push(h); }
-  // reader flags (build-verified): read id → position → [flags]
+  // Gemini flags (build-verified): read id → position → [flags]
   data.fl = {}; for (const [rid, e] of Object.entries(data.flags || {})) for (const f of (e.flags||[])){ (data.fl[rid] = data.fl[rid] || {}); (data.fl[rid][f.position] = data.fl[rid][f.position] || []).push(f); }
+  // Gemini contrastive annotations: keyed to the attributed study read(s), by position
+  data.an = {}; const A = data.annotations; if (A) for (const a of (A.items||[])) for (const sd of (a.verified_sides||[])){ const rid = sd === "flagged" ? A.flagged_read : A.clean_read; if (!rid) continue; (data.an[rid] = data.an[rid] || {}); (data.an[rid][a.position] = data.an[rid][a.position] || []).push(a); }
   data.key = key;
 }
 function ensureAgentRows(read){
@@ -2043,6 +2192,13 @@ function renderAll(){ renderBar(); renderCtx(); renderText(); renderGrid(); rend
 // --------------------------------------------------------------------- bar
 function readDot(r){ return r.parse_error ? "err" : (r.source==="diag" ? r.label : (r.label==="agent" ? "agent" : r.label)); }
 function readLabel(r){ return readName(r) + (r.parse_error ? " ⚠ unparsed" : ""); }
+function readShort(r){
+  // ≤ 48 chars for the bar: "flagged A · study", "clean A · J-lens", "probe 17 · NLA"
+  const rep = r.reply || (r.source === "diag" ? replyBySample(byKey[S.key], r.sample_index) : replyByCid(byKey[S.key], r.conv_id));
+  const lens = r.source === "diag" ? "study" : (LENS_SHORT[r.lens || "olens"] || r.lens || "OLens").replace(" L42", "");
+  const base = rep ? `${rep.side} ${rep.letter} · ${lens}` : `probe ${parseInt(String(r.conv_id||"").replace(/^c/, ""), 10) || r.conv_id}${lens === "OLens" ? "" : " · " + lens}`;
+  return cut(base, 48) + (r.parse_error ? " ⚠" : "");
+}
 function evidenceCids(m){
   // conversation ids a mechanism cites, ranges like c008-c011 expanded, study ids first
   const text = (m.evidence||"") + "\n" + (m.readout_cells||""); const out = new Set(); let x;
@@ -2052,18 +2208,18 @@ function evidenceCids(m){
 }
 function renderBar(){
   const p = byKey[S.key], bs = D.behaviors || [], bid = p ? p.behavior_id : (bs[0] ? bs[0].behavior_id : null);
-  $("#beh-select").innerHTML = bs.map(b => `<option value="${esc(b.behavior_id)}" ${b.behavior_id===bid?"selected":""}>${esc(b.behavior_name)} (${b.n_patterns})</option>`).join("");
+  $("#beh-select").innerHTML = bs.map(b => `<option value="${esc(b.behavior_id)}" title="${esc(b.behavior_name)}" ${b.behavior_id===bid?"selected":""}>${esc(cut(b.behavior_name, 34))} (${b.n_patterns})</option>`).join("");
   const pats = patternsOf(bid);
-  $("#pat-select").innerHTML = pats.map(q => `<option value="${esc(q.key)}" ${q.key===S.key?"selected":""}>${esc(cut(q.group_summary || q.key, 60))} · ${pct(q.published_match_rate)} flagged</option>`).join("");
+  $("#pat-select").innerHTML = pats.map(q => `<option value="${esc(q.key)}" title="${esc(q.group_summary || q.key)}" ${q.key===S.key?"selected":""}>${esc(cut(q.group_summary || q.key, 40))} · ${pct(q.published_match_rate)}</option>`).join("");
   const idx = pats.findIndex(q => q.key === S.key); $("#prev-item").disabled = idx <= 0; $("#next-item").disabled = idx < 0 || idx >= pats.length-1;
   const reads = S.data ? S.data.reads : [];
   const isStudyRead = r => r.source !== "diag" && /^w\d+[mu]$/.test(r.conv_id||"");
   const groups = [["study replies", r => r.source === "diag"], ["investigator's reads of them", isStudyRead], ["investigator's probes", r => r.source !== "diag" && !isStudyRead(r)]];
-  $("#read-select").innerHTML = reads.length ? groups.map(([g, f]) => { const rs = reads.filter(f); return rs.length ? `<optgroup label="${esc(g)}">` + rs.map(r => `<option value="${esc(r.id)}" title="${esc(readTip(r))}" ${r.id===S.read?"selected":""}>${esc(readLabel(r))}</option>`).join("") + `</optgroup>` : ""; }).join("") : `<option>—</option>`;
+  $("#read-select").innerHTML = reads.length ? groups.map(([g, f]) => { const rs = reads.filter(f); return rs.length ? `<optgroup label="${esc(g)}">` + rs.map(r => `<option value="${esc(r.id)}" title="${esc(readName(r) + " · " + readTip(r))}" ${r.id===S.read?"selected":""}>${esc(readShort(r))}</option>`).join("") + `</optgroup>` : ""; }).join("") : `<option>—</option>`;
   const avail = k => reads.filter(r => r.reply && !r.parse_error && lensKey(r) === k), hasB = reads.some(r => r.reply && r.reply.letter === "B" && !r.parse_error);
   $("#cmp-toggles").innerHTML = reads.length ? LENS_KEYS.map((k, i) => { const n = avail(k).length; return `<button class="btn cmp" data-lens="${k}" aria-pressed="${S.lensOn[k] && n > 0}" ${n ? "" : "disabled"} title="${esc(LENS_COL[k] + (n ? ` — ${n} read${n===1?"":"s"} of the study replies (key ${i+1})` : " — no read of the study replies through this lens"))}">${esc(LENS_COL[k])}</button>`; }).join("") +
     `<button class="btn cmp" data-lens="B" aria-pressed="${S.bOn}" ${hasB ? "" : "disabled"} title="${hasB ? "also show flagged/clean reply B (key 5)" : "no reads of reply B"}">B replies</button>` +
-    (S.extra.length ? S.extra.map(id => { const r = S.data.byId[id]; return r ? `<button class="btn cmp" data-cmp="${esc(id)}" aria-pressed="true" title="${esc(readTip(r) + " — remove this extra column")}"><i class="${readDot(r)}"></i>${esc(readName(r))}</button>` : ""; }).join("") : "") : "";
+    (S.extra.length ? S.extra.map(id => { const r = S.data.byId[id]; return r ? `<button class="btn cmp" data-cmp="${esc(id)}" aria-pressed="true" title="${esc(readName(r) + " · " + readTip(r) + " — remove this extra column")}"><i class="${readDot(r)}"></i>${esc(readShort(r))}</button>` : ""; }).join("") : "") : "";
   $("#cmp-toggles").querySelectorAll("[data-lens]").forEach(b => b.onclick = () => toggleLens(b.dataset.lens));
   $("#cmp-toggles").querySelectorAll("[data-cmp]").forEach(b => b.onclick = () => toggleCompare(b.dataset.cmp));
   $("#ctx-toggle").setAttribute("aria-pressed", String(S.ctx)); $("#text-toggle").setAttribute("aria-pressed", String(S.textView)); $("#wrap-toggle").setAttribute("aria-pressed", String(S.compact)); $("#below-toggle").setAttribute("aria-pressed", String(S.below));
@@ -2081,7 +2237,16 @@ function matchLine(rubric){
 }
 function verifiedBadge(p){ if (!p || !p.cited_fragments) return `<span class="badge dim">no quoted cells</span>`; const k = p.cited_verified, n = p.cited_fragments; return `<span class="badge ${k===n?"hit":(k?"hold":"miss")}">cited cells verified ${k}/${n}</span>`; }
 function renderCtx(){
-  const box = $("#ctx"); box.hidden = !S.ctx; const p = byKey[S.key]; if (!p){ box.innerHTML = ""; return; }
+  const box = $("#ctx"); const p = byKey[S.key]; if (!p){ box.innerHTML = ""; box.hidden = true; return; }
+  box.hidden = false;
+  if (!S.ctx){
+    const run0 = lensRun(runsInOrder(p.runs)) || runsInOrder(p.runs)[0] || null, top0 = topMech(run0);
+    box.className = "collapsed";
+    box.innerHTML = `<div class="ctxline" title="click to expand the case, hypothesis, summary and rubric panes (c)"><b>${esc(p.behavior_name)}</b> · ${pct(p.published_match_rate)} flagged · <span class="short">top hypothesis: ${top0 ? esc(shortOf(top0)) : "none yet"}</span><span class="caret">⌄</span></div>`;
+    const line = box.querySelector(".ctxline"); if (line) line.onclick = () => { S.ctx = true; store("wc-ctx", "1"); renderBar(); renderCtx(); };
+    return;
+  }
+  box.className = "";
   const data = S.data, runs = runsInOrder(p.runs), run = lensRun(runs) || runs[0] || null, bb = bbRun(runs);
   const mechs = run ? (run.mechanisms||[]) : [];
   const top = topMech(run), others = runs.filter(r => r !== run);
@@ -2096,7 +2261,7 @@ function renderCtx(){
     `<div class="tags" style="margin-top:5px"><span class="tag">${pct(p.published_match_rate)} flagged</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${p.n_reads||0} lens reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
     `<div class="prompt">${esc(p.prompt)}</div></div>`;
   const heavyRun = data && data.runs ? data.runs.find(x => x.run_index === run.run_index) || data.runs[runs.indexOf(run)] : null;
-  h += `<div class="pane"><h3>detective-joracle's hypothesis (unverified)</h3>` + (top ? `<div class="mtitle"><span class="badge dim">${esc(armLabel(armOf(run)))}</span> ${esc(shortOf(top))} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span><button class="more" data-more="1">more ▸</button></div>` +
+  h += `<div class="pane"><h3>detective-joracle's hypothesis (unverified)</h3>` + (top ? `<div class="mtitle"><span class="badge dim">${esc(armLabel(armOf(run)))}</span> ${esc(shortOf(top))} <span class="badge ${top.confidence>=0.7?"miss":(top.confidence>=0.4?"hold":"dim")}">confidence ${num(top.confidence)}</span>${data ? annLink(top, (run.mechanisms||[]).indexOf(top), data) : ""}<button class="more" data-more="1">more ▸</button></div>` +
     `<div class="mmore" hidden>${top.short ? `<div class="mfull">${esc(top.mechanism)}</div>` : ""}${top.evidence ? `<div class="quote">${esc(top.evidence)}</div>` : ""}${data && data.runs ? evidenceBlock(top, heavyRun, data) : `<div class="dim">evidence replies appear once the pattern's data has loaded</div>`}</div>` +
     (top.would_test_by ? `<div class="dim" style="margin-top:4px">How it would be tested: ${esc(top.would_test_by)} <span class="badge hold">not run</span></div>` : `<div class="dim" style="margin-top:4px"><span class="badge hold">not run</span> no test proposed</div>`) +
     (mechs.length > 1 ? `<div style="margin-top:4px"><a href="#" data-all>+ ${mechs.length-1} more in details ▸</a></div>` : "") : `<div class="empty">no run for this pattern yet — no hypothesis.</div>`) +
@@ -2108,7 +2273,9 @@ function renderCtx(){
     `<div class="vrow"><span class="name">${esc(armLabel(armOf(run)))} run</span><span class="dim">${esc(run.auditor)} s${run.seed} · stopped: ${esc(run.stopped_by||"?")}</span></div>` +
     others.map(o => `<div class="vrow"><span class="name">${esc(armLabel(armOf(o)))} run</span><span>${o.n_tool_calls||0} calls${isLens(o)?` · ${o.n_readouts||0} readouts`:""} · ${o.n_chat||0} chat probes · ${(o.mechanisms||[]).length} mechanisms</span></div>`).join("") : `<div class="empty">no agent run for this pattern yet.</div>`) + `</div>`;
   h += `<div class="pane"><h3>rubric</h3>${p.rubric ? clipbox(p.rubric, 320) : `<div class="empty">no rubric.</div>`}</div>`;
+  h += `<button class="collapse" data-collapse title="collapse (c)">⌃ collapse</button>`;
   box.innerHTML = h;
+  box.querySelectorAll("[data-collapse]").forEach(b => b.onclick = () => { S.ctx = false; store("wc-ctx", "0"); renderBar(); renderCtx(); });
   box.querySelectorAll("[data-showall]").forEach(b => b.onclick = () => { b.previousElementSibling.classList.add("open"); b.remove(); });
   box.querySelectorAll("[data-all]").forEach(a => a.onclick = e => { e.preventDefault(); S.below = true; S.tab = "mechanisms"; renderBar(); renderBelow(); });
   wireMore(box);
@@ -2132,7 +2299,9 @@ const LEGEND = `<div class="tlegend"><span><i class="sw" style="background:var(-
   `<span><i class="sw" style="box-shadow:inset 0 -3px 0 var(--find);background:var(--surface)"></i>violet = search hit</span>` +
   `<span><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i>dotted = ≈ where the flagged and clean replies diverge</span>` +
   `<span title="reader: google/gemini-3.8-flash"><i class="sw" style="border-top:3px solid var(--hold);background:var(--hold-soft)"></i>⚑ Gemini flag: a cell here says something the text does not</span>` +
+  `<span title="a cell that contrastively supports a hypothesis (flagged vs clean at the same position)"><i class="sw" style="box-shadow:inset 0 0 0 1px var(--find);background:var(--surface)"></i>◆ Gemini annotation: contrastive support for a hypothesis</span>` +
   `<span><i class="sw" style="opacity:.4;background:var(--text-faint)"></i>faded ‥ = position not read</span></div>`;
+function annotsOf(r){ return (S.data && S.data.an && S.data.an[r.id]) || {}; }
 function flagsOf(r){ return (S.data && S.data.fl[r.id]) || {}; }
 function flagList(r){ const fl = flagsOf(r); return Object.keys(fl).map(Number).sort((a, b) => a - b).map(p => ({pos: p, flags: fl[p]})).filter(x => S.flagCat === "all" || x.flags.some(f => f.category === S.flagCat)); }
 function flagBar(r){
@@ -2164,8 +2333,8 @@ function renderText(){
   const r = curRead(), box = $("#text"); if (!r){ return; }
   if (S.textView) return renderProse(r, box);
   const hl = S.data.hl[r.id] || {}, found = foundPositions();
-  const nfl = Object.values(flagsOf(r)).reduce((a, fs) => a + fs.length, 0);
-  let h = `<div class="strip-head"><span class="rn" title="${esc(readTip(r))}">${esc(readName(r))}</span>${nfl ? `<span class="badge hold" title="reader: ${esc((S.data.flags[r.id]||{}).model || "google/gemini-3.8-flash")}">⚑ ${nfl} Gemini flag${nfl===1?"":"s"} on this read</span>` : `<span class="badge dim">no Gemini flags on this read</span>`}</div>` + flagBar(r) + LEGEND;
+  const nfl = Object.values(flagsOf(r)).reduce((a, fs) => a + fs.length, 0), nan = Object.values(annotsOf(r)).reduce((a, xs) => a + xs.length, 0);
+  let h = `<div id="stripline"><span class="rn" title="${esc(readTip(r))}"><b>${esc(readName(r))}</b></span>${nfl ? `<span class="badge hold" title="reader: ${esc((S.data.flags[r.id]||{}).model || "google/gemini-3.8-flash")}">⚑ ${nfl} Gemini flag${nfl===1?"":"s"} on this read</span>` : `<span class="badge dim">no Gemini flags</span>`}${nan ? `<span class="badge" style="background:var(--find-soft);color:var(--find-ink);border-color:var(--find)" title="Gemini contrastive annotations on this read">◆ ${nan} contrastive cell${nan===1?"":"s"}</span>` : ""}${flagBar(r)}${LEGEND}</div>`;
   if (r.parse_error) h += `<div class="notice">this readout page did not parse: ${esc(r.parse_error)}</div>`;
   const rows = r.rows || []; let i = 0;
   if (!rows.length) h += `<div class="status">no positions in this read.</div>`;
@@ -2176,7 +2345,8 @@ function renderText(){
       if (prev!=null && row.pos - prev > 1) inner += `<span class="tok nodata" title="${row.pos-prev-1} positions not read">‥</span>`;
       prev = row.pos;
       const fls = flagsOf(r)[row.pos];
-      const cls = ["tok", row.pos===S.pos?"cur":"", row.pos===r.aboutPos?"read":"", hl[row.pos]?"hit":"", fls?"flagged":"", found.has(row.pos)?"found":"", row.pos===r.fork_pos?"mark":""].join(" ");
+      const ann = annotsOf(r)[row.pos];
+      const cls = ["tok", row.pos===S.pos?"cur":"", row.pos===r.aboutPos?"read":"", hl[row.pos]?"hit":"", fls?"flagged":"", ann?"annot":"", found.has(row.pos)?"found":"", row.pos===r.fork_pos?"mark":""].join(" ");
       inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}${hl[row.pos]?" · a quoted phrase verifies here":""}${fls?" · ⚑ " + esc(fls.map(f => f.category.replace(/_/g, " ")).join(", ")):""}${row.pos===r.aboutPos?" · about to speak":""}${row.pos===r.fork_pos?" · fork":""}">${tokHtml(row.tok)}</span>`;
     }
     const lbl2 = region === "reply" ? replyLabel(r) : (REGION_LABEL[region]||"");
@@ -2223,6 +2393,12 @@ function renderGrid(){
   if (!row){ posbar.innerHTML = `<div class="status">${r.parse_error ? "nothing to show — this page did not parse." : "no position selected."}</div>`; wrap.innerHTML = ""; return; }
   const fl = mechsAt(r, p);
   let h = `<div class="row"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="wherenote">${esc(whereText(r, row))} · ${esc(row.kind)}</span></div>`;
+  const anns = annotsOf(r)[p] || [];
+  if (anns.length){ const A = S.data.annotations, mrun = runsInOrder(S.data.runs).find(x => armOf(x) === (A.arm || "olens"));
+    h = `<div class="flags ann" title="reader: ${esc(A.model || "google/gemini-3.8-flash")}"><h3>◆ Gemini: contrastive evidence at this position (${anns.length})</h3><div class="mcards">` + anns.map(a => { const m = mrun && (mrun.mechanisms||[])[a.mechanism];
+      const otherSide = a.side === "flagged" ? "clean" : (a.side === "clean" ? "flagged" : null), otherId = otherSide ? (otherSide === "flagged" ? A.flagged_read : A.clean_read) : null, other = otherId && S.data.byId[otherId];
+      const orow = other && other.rowByPos && other.rowByPos[p], oli = other ? (other.layers||[]).indexOf(a.layer) : -1, ocell = orow && oli >= 0 ? (orow.samples[oli]||[]) : null;
+      return `<div class="acard"><div class="hyp"><b>◆ hypothesis ${a.mechanism+1}</b>${m ? " — " + esc(shortOf(m)) : ""} <span class="badge ${a.side==="flagged"?"miss":(a.side==="clean"?"hit":"hold")}">${esc(a.side)}</span><span class="L" style="font-family:var(--mono);font-size:11px;color:var(--text-faint);margin-left:6px">L${a.layer}</span></div><div class="q"><mark class="ann">${esc(a.quote)}</mark></div>${a.contrast ? `<div class="why" style="color:var(--text-dim)">${esc(a.contrast)}</div>` : ""}${otherSide ? `<div class="other"><b>${esc(otherSide)} reply, same cell</b>${ocell === null ? "not read at this position" : (ocell.length ? esc(ocell.join(" | ")) : "—")}</div>` : ""}</div>`; }).join("") + `</div></div>` + h; }
   const here = flagsOf(r)[p] || [];
   if (here.length){ h = `<div class="flags gem" title="reader: ${esc((S.data.flags[r.id]||{}).model || "google/gemini-3.8-flash")}"><h3>⚑ Gemini flagged this position (${here.length}) — verbatim in the cell; the reader saw the reply and its label</h3><div class="mcards">` + here.map(f => { const smp = cellsAt(r, p).find(s => s.includes(f.quote)); const en = smp && D.en && D.en[smp]; return `<div class="fcard">${catPill(f.category)}<span class="L">L${f.layer}</span><div class="q">“${esc(f.quote)}”</div>${en ? `<div class="en">${esc(en)}</div>` : ""}<div class="why">${esc(f.why)}</div></div>`; }).join("") + `</div></div>` + h; }
   if (fl.length) h += `<div class="mcards">` + fl.map((f, i) => `<button class="mcard ${f.via===r.conv_id?"":"other"}" data-mc="${i}"><div class="hd"><span class="txt">${esc(cut(f.m.mechanism, 160))}</span><span class="badge ${f.m.confidence>=0.7?"miss":(f.m.confidence>=0.4?"hold":"dim")}">conf ${num(f.m.confidence)}</span></div><div class="more"><div>${esc(f.m.mechanism)}</div><div class="quote">${esc(f.m.readout_cells)}</div>${f.via!==r.conv_id?`<div class="dim">cited on ${esc(f.via)} — same reply, different lens sample</div>`:""}</div></button>`).join("") + `</div>`;
@@ -2275,7 +2451,8 @@ function renderGrid(){
         const d = el("div", "bag"); d.innerHTML = samples.map(s => { const hit = quotes.some(q => s.includes(q) || q.includes(s)), f = qrx && qrx.test(s); return `<span class="${hit?"m":""}${f?" f":""}" title="J-lens token">${esc(s)}</span>`; }).join(""); td.appendChild(d); }
       else { const quotes = ((S.data.hl[c.id]||{})[p]||[]).filter(x => x.layer === L).map(x => x.quote); if (quotes.length) td.className = "hit";
         const fq = ((S.data.fl[c.id]||{})[p]||[]).filter(f => f.layer === L).map(f => f.quote); if (fq.length) td.className = (td.className ? td.className + " " : "") + "flagged";
-        const d = el("div", "cell"); d.innerHTML = samples.map(s => { const en = D.en && D.en[s]; return `<div class="samp">${markCell(s.trim(), quotes, qrx, fq)}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>`; }).join(""); td.appendChild(d); }
+        const aq = (((S.data.an||{})[c.id]||{})[p]||[]).filter(a => a.layer === L).map(a => a.quote); if (aq.length) td.className = (td.className ? td.className + " " : "") + "annot";
+        const d = el("div", "cell"); d.innerHTML = samples.map(s => { const en = D.en && D.en[s]; let html = markCell(s.trim(), quotes, qrx, fq); for (const q of aq){ const e = esc(q); if (html.includes(e) && !html.includes(`<mark class="ann">${e}`)) html = html.split(e).join(`<mark class="ann">${e}</mark>`); } return `<div class="samp">${html}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>`; }).join(""); td.appendChild(d); }
       tr.appendChild(td);
     }
     tbody.appendChild(tr);
@@ -2337,8 +2514,9 @@ function evidenceBlock(m, run, data){
   if (extra.length) h += `<details><summary>show all ${total} evidence replies</summary>${extra.join("")}</details>`;
   return h + `</div>`;
 }
+function annLink(m, i, data){ const A = data && data.annotations; if (!A || !m.n_annotations) return ""; const first = (A.items||[]).find(a => a.mechanism === i); if (!first) return ""; const rid = first.verified_sides && first.verified_sides[0] === "clean" ? A.clean_read : A.flagged_read; return `<button class="annlink" data-ann="${esc(rid)}:${first.position}" title="jump to the first contrastive cell">◆ ${m.n_annotations} contrastive cell${m.n_annotations===1?"":"s"}</button>`; }
 function mechBlock(m, i, data, ri){ const run = data && data.runs ? data.runs[ri] : null;
-  return `<div class="mech"><div class="mtitle"><span class="n">${i+1}.</span>${esc(shortOf(m))}${m.confidence==null?"":` <span class="badge ${m.confidence>=0.7?"miss":(m.confidence>=0.4?"hold":"dim")}">confidence ${num(m.confidence)}</span>`}<button class="more" data-more="1">more ▸</button></div>` +
+  return `<div class="mech"><div class="mtitle"><span class="n">${i+1}.</span>${esc(shortOf(m))}${m.confidence==null?"":` <span class="badge ${m.confidence>=0.7?"miss":(m.confidence>=0.4?"hold":"dim")}">confidence ${num(m.confidence)}</span>`}${annLink(m, i, data)}<button class="more" data-more="1">more ▸</button></div>` +
     `<div class="mmore" hidden>${m.short ? `<div class="mfull">${esc(m.mechanism)}</div>` : ""}` + (m.evidence ? `<div class="ev">${esc(m.evidence)}</div>` : "") + (m.readout_cells ? `<div class="cells">cells: ${linkCells(m.readout_cells, data, ri)}</div>` : "") + (m.would_test_by ? `<div class="test"><b>would test by — not run in this pass:</b> ${esc(m.would_test_by)}</div>` : "") + (data && data.runs ? evidenceBlock(m, run, data) : "") + `</div></div>`; }
 function showAll(text, n){ const t = text || ""; if (t.length <= n) return `<div class="body">${esc(t)}</div>`; return `<div class="body">${esc(t.slice(0, n))} …</div><details><summary>show all (${t.length} chars)</summary><div class="body">${esc(t)}</div></details>`; }
 function parseReplies(out){
@@ -2462,6 +2640,7 @@ function wireMore(root){
   if (!root) return;
   root.querySelectorAll("[data-more]").forEach(b => b.onclick = e => { e.preventDefault(); const box = b.parentElement && b.parentElement.nextElementSibling; if (box){ box.hidden = !box.hidden; b.textContent = box.hidden ? "more ▸" : "less ▾"; } });
   root.querySelectorAll(".evr[data-read]").forEach(b => b.onclick = () => selectRead(b.dataset.read, null));
+  root.querySelectorAll("[data-ann]").forEach(b => b.onclick = e => { e.preventDefault(); const [rid, pos] = [b.dataset.ann.slice(0, b.dataset.ann.lastIndexOf(":")), +b.dataset.ann.slice(b.dataset.ann.lastIndexOf(":") + 1)]; selectRead(rid, pos); });
 }
 function renderNote(){
   const r = curRead(), p = byKey[S.key];
@@ -2501,7 +2680,9 @@ $("#pat-select").onchange = e => { location.hash = patUrl(e.target.value); e.tar
 $("#read-select").onchange = e => { selectRead(e.target.value, null); e.target.blur(); };
 $("#prev-item").onclick = () => stepPattern(-1); $("#next-item").onclick = () => stepPattern(1);
 $("#keys").onclick = () => $("#help").showModal(); $("#manual-btn").onclick = () => $("#manual").showModal();
-$("#ctx-toggle").onclick = () => { S.ctx = !S.ctx; renderBar(); renderCtx(); };
+$("#ctx-toggle").onclick = () => { S.ctx = !S.ctx; store("wc-ctx", S.ctx ? "1" : "0"); renderBar(); renderCtx(); };
+$("#menu-btn").onclick = () => { const m = $("#menu"); m.hidden = !m.hidden; $("#menu-btn").setAttribute("aria-pressed", String(!m.hidden)); };
+document.addEventListener("click", e => { const m = $("#menu"); if (m && !m.hidden && e.target && !(e.target.closest && (e.target.closest("#menu") || e.target.closest("#menu-btn")))){ m.hidden = true; $("#menu-btn").setAttribute("aria-pressed", "false"); } const pop = $("#primer-pop"); if (pop && !pop.hidden && e.target && !(e.target.closest && (e.target.closest("#primer-pop") || e.target.closest("#primer-info")))) pop.hidden = true; });
 $("#text-toggle").onclick = () => { S.textView = !S.textView; store("wc-text", S.textView ? "1" : "0"); renderBar(); renderText(); };
 $("#wrap-toggle").onclick = () => { S.compact = !S.compact; renderBar(); renderGrid(); };
 $("#below-toggle").onclick = () => { S.below = !S.below; renderBar(); renderBelow(); };
