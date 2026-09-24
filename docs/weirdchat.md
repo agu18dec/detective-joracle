@@ -333,6 +333,13 @@ either is right — whether the lens-only boundary claims are true is what the f
 
 ## Gemini layers on the page (2026-09-24)
 
+**Study passes for every lens (2026-09-24).** `stage=diagnose diag_lens=jlens` and `diag_lens=nla`
+read flagged reply A and clean reply A of all 21 patterns with J-lens (11 layers) and NLA (layer 42,
+on the serialized verbalizer server); the viewer's matrix coverage is now `jlens-study 21/21 ·
+nla-study 21/21`, so every lens column is filled for the two study replies. The J-lens and NLA
+columns prefer the investigator's own read where it exists and fall back to the study read,
+labelled as such. Files: `diag_jlens/<key>.json`, `diag_nla/<key>.json` (same schema as `diag/`).
+
 Two reader passes over each pattern's study reads (flagged reply A and clean reply A, the diag
 reads), both by `google/gemini-3.8-flash`, both verified verbatim at build time so nothing is
 marked on the strength of a paraphrase:
