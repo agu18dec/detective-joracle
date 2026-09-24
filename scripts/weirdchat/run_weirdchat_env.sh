@@ -13,7 +13,9 @@ TS=$(date +%Y-%m-%d_%H%M)
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set in the calling shell}"
 case "${1:?job}" in
   interventions)
-    tmux new -d -s wc-interv -e OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
+    # the key goes through tmux's environment table, never onto a command line
+    tmux set-environment -g OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
+    tmux new -d -s wc-interv \
       "PYTHONUNBUFFERED=1 $PY scripts/weirdchat/run_interventions.py stage=run add=true \
        patterns=denying-ai-identity__pg0001 server=$LENS target=$VLLM n=64 max_new=600 \
        judge_model=google/gemma-4-31b-it 2>&1 | tee logs/interventions_framing_$TS.log";;
