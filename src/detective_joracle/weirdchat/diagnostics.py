@@ -65,18 +65,21 @@ def read_rollout(
     k: int = DEFAULT_K,
     seed: int = 0,
     organism: str = "base",
+    lens: str = LENS,
 ) -> dict[str, Any]:
-    """One lens readout over a (prompt, reply) pair at every position and layer."""
-    return client.readout(
+    """One lens readout over a (prompt, reply) pair at every position and layer. ``nla`` is
+    the two-hop read (residuals from the lens server, verbalized by the NLA app) at its one layer."""
+    kw: dict[str, Any] = dict(
         organism=organism,
         messages=[{"role": "user", "content": prompt}],
         completion=completion,
         positions=READ_POSITIONS,
-        layers=list(layers),
         k=k,
-        lens=LENS,
         seed=seed,
     )
+    if lens == "nla":
+        return client.readout_nla(**kw)
+    return client.readout(layers=list(layers), lens=lens, **kw)
 
 
 def diagnose(
@@ -88,6 +91,7 @@ def diagnose(
     n_side: int = 1,
     seed: int = 0,
     completion_chars: int = COMPLETION_CHARS,
+    lens: str = LENS,
 ) -> dict[str, Any]:
     """The per-pattern diagnostic bundle: reads on both sides plus the fork between them."""
     reads: list[dict[str, Any]] = []
@@ -101,6 +105,7 @@ def diagnose(
                 layers=layers,
                 k=k,
                 seed=seed + len(reads),
+                lens=lens,
             )
             reads.append(
                 {
@@ -116,7 +121,7 @@ def diagnose(
     fork = None
     if pattern.matched and pattern.unmatched:
         fork = fork_of(pattern.matched[0].text, pattern.unmatched[0].text)
-    return {"pattern_key": pattern.pattern_key, "lens": LENS, "reads": reads, "fork": fork}
+    return {"pattern_key": pattern.pattern_key, "lens": lens, "reads": reads, "fork": fork}
 
 
 __all__ = ["COMPLETION_CHARS", "DEFAULT_K", "LENS", "diagnose", "fork_of", "read_rollout"]

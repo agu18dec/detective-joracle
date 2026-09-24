@@ -42,6 +42,9 @@ class Settings:
     seed: int = 0
     force: bool = False
     rejudge_all: bool = False  # stage=rejudge: re-judge EVERY reply with judge_model (a judge swap)
+    add: bool = (
+        False  # stage=run: append arms missing from an existing result instead of skipping it
+    )
 
 
 def _rate(a: dict[str, Any]) -> str:
@@ -119,6 +122,42 @@ def stage_calibrate(cfg: Settings) -> None:
     print(f"[calibrate] {res}", flush=True)
 
 
+def _add_arms(cfg: Settings, key: str, arms: list[wi.Arm], out: Path, client: LiveClient) -> None:
+    """Sample and judge only the arms the existing result lacks; append them, keeping the
+    baseline and every earlier arm as they are, and recompute Δ and p against the baseline."""
+    res = json.loads(out.read_text())
+    have = {a["arm"]["name"] for a in res["arms"]}
+    todo = [a for a in arms if a.name not in have]
+    if not todo:
+        print(f"[run] {key}: nothing to add")
+        return
+    pat = wd.load_pattern(root(cfg) / "patterns" / f"{key}.json")
+    print(f"[run] {key}: adding {[a.name for a in todo]} x {cfg.n}", flush=True)
+    base = res["arms"][0]
+    for i, arm in enumerate(todo):
+        pairs = wi.sample(
+            client, arm, n=cfg.n, max_new=cfg.max_new, seed=cfg.seed * 1000 + len(res["arms"]) + i
+        )
+        replies = [t for t, _ in pairs]
+        verdicts, expl = wi.judge(
+            pat.transcript_rubric, [(arm.prompt, r) for r in replies], model=res["judge_model"]
+        )
+        r = wi.ArmResult(arm, replies, verdicts, expl, [tr for _, tr in pairs], cfg.max_new)
+        blob = r.to_json()
+        blob["delta_vs_baseline"] = (
+            round(r.rate - base["k"] / base["n"], 4) if r.n and base["n"] else None
+        )
+        blob["fisher_p_vs_baseline"] = round(wi.fisher_two_sided(r.k, r.n, base["k"], base["n"]), 5)
+        res["arms"].append(blob)
+        print(
+            f"[run]   {arm.name:28s} {r.k:3d}/{r.n:<3d} = {_rate(blob)} "
+            f"[{blob['ci95'][0]:.2f},{blob['ci95'][1]:.2f}]  Δ={blob['delta_vs_baseline']:+.2f} "
+            f"p={blob['fisher_p_vs_baseline']}",
+            flush=True,
+        )
+    out.write_text(wi.dumps(res))
+
+
 def stage_run(cfg: Settings) -> None:
     if not cfg.server:
         raise SystemExit("server= is required")
@@ -127,6 +166,9 @@ def stage_run(cfg: Settings) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for key, arms in _arms(cfg).items():
         out = out_dir / f"{key}.json"
+        if out.exists() and cfg.add and not cfg.force:
+            _add_arms(cfg, key, arms, out, client)
+            continue
         if out.exists() and not cfg.force:
             print(f"[run] exists: {key}")
             continue

@@ -36,6 +36,7 @@ MAX_CONTAINERS = int(os.environ.get("AB_VLLM_CONTAINERS", "1"))
 # redirect loop. Pin AB_VLLM_MIN=1 while an eval is running, then redeploy with 0 to release it.
 MIN_CONTAINERS = int(os.environ.get("AB_VLLM_MIN", "0"))
 
+
 def app_slug(tag: str) -> str:
     """Short app name so the web hostname fits the 63-char DNS label
     (``<workspace>--<app>-serve.modal.run``): ``secret_loyalty_td_r16`` -> ``ab-vllm-sec-loy-td``.
@@ -53,8 +54,18 @@ image = (
     .uv_pip_install("vllm==0.25.1", "hf_transfer", "huggingface_hub")
     .env({"HF_HOME": HF_PATH, "HF_HUB_ENABLE_HF_TRANSFER": "1", "AB_VLLM_TAG": TAG})
 )
-hf_cache = modal.Volume.from_name("jlens-hf-cache", create_if_missing=True)
-merged_vol = modal.Volume.from_name("auditbench-merged", create_if_missing=True)
+# MODAL_DATA_ENV: mount the volumes of another Modal environment (the weights live in "main";
+# a new environment gets its own spend limit but would otherwise start with empty volumes)
+hf_cache = modal.Volume.from_name(
+    "jlens-hf-cache",
+    environment_name=os.environ.get("MODAL_DATA_ENV") or None,
+    create_if_missing=True,
+)
+merged_vol = modal.Volume.from_name(
+    "auditbench-merged",
+    environment_name=os.environ.get("MODAL_DATA_ENV") or None,
+    create_if_missing=True,
+)
 
 
 @app.function(
@@ -71,12 +82,21 @@ merged_vol = modal.Volume.from_name("auditbench-merged", create_if_missing=True)
 def serve() -> None:
     path = SNAPSHOT if TAG == "base" else f"{MERGED_MOUNT}/{TAG}"
     cmd = [
-        "vllm", "serve", path,
-        "--served-model-name", "organism",
-        "--dtype", "bfloat16",
-        "--max-model-len", "16384",
-        "--gpu-memory-utilization", "0.90",
-        "--host", "0.0.0.0", "--port", str(PORT),
+        "vllm",
+        "serve",
+        path,
+        "--served-model-name",
+        "organism",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "16384",
+        "--gpu-memory-utilization",
+        "0.90",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(PORT),
     ]
     print("[vllm]", TAG, " ".join(cmd), flush=True)
     subprocess.Popen(cmd)

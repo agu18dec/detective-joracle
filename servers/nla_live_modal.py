@@ -42,7 +42,12 @@ for _p in (
         sys.path.insert(0, str(_p))
 from runner_common import hf_secrets  # noqa: E402
 
-hf_cache = modal.Volume.from_name("jlens-hf-cache", create_if_missing=True)
+# MODAL_DATA_ENV: mount the volume of another Modal environment (weights live in "main")
+hf_cache = modal.Volume.from_name(
+    "jlens-hf-cache",
+    environment_name=os.environ.get("MODAL_DATA_ENV") or None,
+    create_if_missing=True,
+)
 
 LENS = "nla-rl400"
 LAYER = 42
@@ -139,8 +144,14 @@ class NLA:
 
         spec = dataclasses.replace(self.spec, k=k)
         generate = self._mk(
-            self.model, self.tok, self._ids, self.injector, spec,
-            temperature=float(req.get("temperature", 1.0)), top_p=0.95, top_k=0,
+            self.model,
+            self.tok,
+            self._ids,
+            self.injector,
+            spec,
+            temperature=float(req.get("temperature", 1.0)),
+            top_p=0.95,
+            top_k=0,
         )
         torch.manual_seed(int(req.get("seed") or 0))
         out: list = []

@@ -55,6 +55,9 @@ class Settings:
     patterns: str = ""  # comma-separated pattern keys, overriding the selection
     n_side: int = 2  # study rollouts per side handed to the agent
     diag_side: int = 1  # study rollouts per side read in the diagnose stage
+    diag_lens: str = (
+        "olens"  # stage=diagnose lens: olens (-> diag/), jlens or nla (-> diag_<lens>/)
+    )
     layers: str = ",".join(str(e) for e in READ_LAYERS)
     k: int = 1  # lens samples per cell
     auditor: str = "anthropic/claude-opus-5"
@@ -175,7 +178,7 @@ def stage_data(cfg: Settings) -> None:
 def stage_diagnose(cfg: Settings) -> None:
     """Read both sides of each pattern's contrast with the lens, before any agent sees it."""
     client_layers = [int(x) for x in _csv(cfg.layers)]
-    out = root(cfg) / "diag"
+    out = root(cfg) / ("diag" if cfg.diag_lens == "olens" else f"diag_{cfg.diag_lens}")
     out.mkdir(parents=True, exist_ok=True)
     todo = [p for p in pattern_paths(cfg) if cfg.force or not (out / p.name).exists()]
     print(f"[diagnose] {len(todo)} patterns ({cfg.workers} workers)", flush=True)
@@ -188,7 +191,13 @@ def stage_diagnose(cfg: Settings) -> None:
         pat = wd.load_pattern(path)
         client = _client(cfg)
         blob = wdiag.diagnose(
-            pat, client, layers=client_layers, k=cfg.k, n_side=cfg.diag_side, seed=0
+            pat,
+            client,
+            layers=client_layers,
+            k=cfg.k,
+            n_side=cfg.diag_side,
+            seed=0,
+            lens=cfg.diag_lens,
         )
         blob["extras"] = record_extras(client)
         (out / path.name).write_text(json.dumps(blob, ensure_ascii=False, indent=1))
