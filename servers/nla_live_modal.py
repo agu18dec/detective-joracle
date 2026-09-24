@@ -55,7 +55,9 @@ BATCH_POS = 48
 MAX_ROWS = 4096
 MIN_CONTAINERS = int(os.environ.get("AB_NLA_MIN", "0"))
 
-app = modal.App("auditbench-nla-live")
+# AB_NLA_APP: a short name keeps the web hostname under Modal's 63-char label limit when the
+# workspace name carries an environment suffix (e.g. AB_NLA_APP=nla)
+app = modal.App(os.environ.get("AB_NLA_APP", "auditbench-nla-live"))
 # wsbench_nla_modal.image, rebuilt with fastapi in the pip stage: Modal refuses a build step
 # after add_local_*, and the web endpoint needs fastapi in the image.
 image = (

@@ -83,6 +83,7 @@ DEFAULT_LAYERS = (20, 36, 44, 52, 60)
 # of the conversation at all 11 layers. A 25-token question with a 256-token reply is ~300
 # positions = ~3300 cells, so the cap has to clear that or "every position" quietly becomes a
 # sample. Thinning, when it does bite, only ever drops positions — never layers.
+MIN_CONTAINERS = int(os.environ.get("AB_ORG_MIN", "0"))  # pin a warm container (AB_ORG_MIN=1)
 MAX_CELLS = 4400
 MAX_K = 4
 MAX_N = 4
@@ -196,6 +197,7 @@ def plain_adapter_dir(src: Path) -> Path:
     cpu=8,
     secrets=hf_secrets(),
     max_containers=MAX_CONTAINERS,
+    min_containers=MIN_CONTAINERS,
     scaledown_window=900,
 )
 @modal.concurrent(max_inputs=1)
