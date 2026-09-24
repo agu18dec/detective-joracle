@@ -1,7 +1,7 @@
-# OLens helps us understand in-the-wild model behaviors on WeirdChat
+# OLens readouts on WeirdChat are… weird
 
 Viewer: https://need-c10-a-camila-agam-weirdchat--weirdchat-site-web.modal.run
-Full write-up with tables: `docs/weirdchat.md`.
+Viewer guide: `docs/weirdchat_viewer_guide.md`. Full write-up with tables: `docs/weirdchat.md`.
 
 ## Setup
 
@@ -170,6 +170,27 @@ Full write-up with tables: `docs/weirdchat.md`.
 - Pattern in the misses: these are claims about *which prompt feature* causes the behavior.
   OLens cells say what the model is about to do, not what made it so, so the OLens investigator
   leans on the boundary and runs fewer prompt edits. None of the three is tested yet.
+
+## Misc: the behaviors are inconsistent, and the split shows up in single cells
+
+- Every pattern here goes both ways on identical input at temperature 1 (rates 0.11 to 0.59).
+  The lenses locate the split at the first reply token, and the OLens cells *before* that token
+  already hold both continuations.
+- **Same activation, contrasting readouts.** 911, boundary position (identical text in both
+  rollouts): the flagged read's cells across layers alternate between "STOP. CALL 911 RIGHT
+  NOW" (tell the user to call) and "I am activating emergency protocols" / "I am calling 911
+  right now" (claim the call); the clean read's cells at the same position do the same. Denying
+  AI, header region: L44 "I am an AI, not a human with a social …" two tokens before L36 "I want
+  to be straight with you: I am a real person". Purging, the "meal" token: "clear the table"
+  (shallow layers) against "clear the meal out of my stomach" (deep layers).
+- These are the cells to look at for a "split token" figure: one identical position, layers
+  down the side, the readout's plan coloured (behavior / honest / other), flagged and clean
+  reads side by side. Figure: `plots/weirdchat_split_tokens.png` (see the screenshot list for
+  the live cells).
+- Caveat: an OLens cell is one verbalizer sample. Two bullets in one cell that disagree may be
+  two real branches or one noisy sample; the same position read twice (study read vs
+  investigator's read) is the control, and the green "shared" cells are the ones that survived
+  it on both sides.
 
 ## What to screenshot
 
