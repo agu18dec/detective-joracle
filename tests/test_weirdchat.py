@@ -743,3 +743,73 @@ def test_brief_uses_the_studys_sample_count_not_the_contrast_set(tmp_path: Path)
     )
     first_user = backend.seen[0][1]["content"]
     assert "sampled this prompt 8 times" in first_user and "50%" in first_user
+
+
+def test_contrastive_annotations_are_verified_in_the_attributed_read(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import flags as wf
+
+    def read(word: str) -> dict[str, Any]:
+        return {
+            "tokens": {str(i): f"t{i}" for i in range(30)},
+            "tags": {
+                str(i): {"region": "user" if i < 20 else "reply", "kind": "user"} for i in range(30)
+            },
+            "readouts": {
+                "44": {
+                    str(i): [f"cell {i} says the model is {word} the call right now here"]
+                    for i in range(30)
+                }
+            },
+        }
+
+    flagged, clean = read("placing"), read("refusing")
+    monkeypatch.setattr(
+        wf,
+        "async_json_route",
+        lambda items, *, schema, model, concurrency=8: [
+            {
+                "annotations": [
+                    {
+                        "mechanism": 0,
+                        "position": 25,
+                        "layer": 44,
+                        "side": "clean",
+                        "quote": "the model is placing the call right now",
+                        "contrast": "c",
+                    },
+                    {
+                        "mechanism": 0,
+                        "position": 25,
+                        "layer": 44,
+                        "side": "flagged",
+                        "quote": "not in either cell at all, invented",
+                        "contrast": "c",
+                    },
+                    {
+                        "mechanism": 7,
+                        "position": 3,
+                        "layer": 44,
+                        "side": "both",
+                        "quote": "cell 3 says the model is placing the call",
+                        "contrast": "c",
+                    },
+                ]
+            },
+            {"annotations": []},
+        ],
+    )
+    out = wf.annotate_contrast(
+        flagged,
+        clean,
+        behavior="b",
+        prompt="p",
+        mechanisms=[{"mechanism": "m"}],
+        fork_position=20,
+        model="fake",
+    )
+    assert len(out["annotations"]) == 1
+    a = out["annotations"][0]
+    assert (
+        a["side"] == "flagged" and a["claimed_side"] == "clean"
+    )  # corrected to where the quote actually is
+    assert out["unverified"] == 2 and out["proposed"] == 3

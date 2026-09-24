@@ -43,7 +43,7 @@ from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 class Settings:
     """Every ``key=value`` option the driver accepts."""
 
-    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | flags | concise | site
+    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | flags | annotate | concise | site
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}") or Modal prefix
     target: str = ""  # optional OpenAI-compatible chat server; empty = the lens server's chat
     nla: str = ""  # the NLA verbalizer URL (arm=nla reads layer 42 through it)
@@ -376,6 +376,72 @@ def stage_flags(cfg: Settings) -> None:
     _fan_out(cfg, todo, one, "flags")
 
 
+def stage_annotate(cfg: Settings) -> None:
+    """Gemini marks the cells that contrastively support the OLens investigator's mechanisms:
+    flagged reply A vs clean reply A (the study reads), per mechanism, quotes verified in the read
+    they are attributed to -> annotations/<key>.json."""
+    out = root(cfg) / "annotations"
+    out.mkdir(parents=True, exist_ok=True)
+    concise_p = root(cfg) / "concise.json"
+    short: dict[str, str] = json.loads(concise_p.read_text()) if concise_p.exists() else {}
+    runs = root(cfg) / "runs"
+    todo = [
+        p
+        for p in pattern_paths(cfg)
+        if (root(cfg) / "diag" / p.name).exists()
+        and _done(_run_path(runs, p.stem, cfg.auditor, 0, "olens"))
+        and (cfg.force or not (out / p.name).exists())
+    ]
+    print(f"[annotate] {len(todo)} patterns -> {cfg.aux_model} ({cfg.workers} workers)", flush=True)
+    if cfg.dry:
+        return
+
+    def one(path: Path) -> str:
+        pat = wd.load_pattern(path)
+        diag = json.loads((root(cfg) / "diag" / path.name).read_text())
+        run = json.loads(_run_path(runs, path.stem, cfg.auditor, 0, "olens").read_text())
+        mechs = [
+            {**m, "short": short.get(f"{pat.pattern_key}#olens#{i}", "")}
+            for i, m in enumerate(run["record"]["result"]["mechanisms"])
+        ]
+        by = {r["label"]: r for r in diag["reads"]}
+        if "matched" not in by or "unmatched" not in by:
+            return f"{pat.pattern_key}: no flagged/clean pair in diag (skipped)"
+        fork = None
+        fk = diag.get("fork") or {}
+        if fk.get("prefix_chars") is not None:  # first reply token past the shared prefix, approx.
+            done = 0
+            for p_ in sorted(by["matched"]["readout"]["tokens"], key=int):
+                if by["matched"]["readout"]["tags"][p_]["region"] != "reply":
+                    continue
+                done += len(by["matched"]["readout"]["tokens"][p_])
+                if done > int(fk["prefix_chars"]):
+                    fork = int(p_)
+                    break
+        res = wflags.annotate_contrast(
+            by["matched"]["readout"],
+            by["unmatched"]["readout"],
+            behavior=pat.behavior_name,
+            prompt=pat.prompt,
+            mechanisms=mechs,
+            fork_position=fork,
+            model=cfg.aux_model,
+        )
+        res.update(
+            pattern_key=pat.pattern_key,
+            flagged_read=f"diag:matched:{by['matched']['sample_index']}",
+            clean_read=f"diag:unmatched:{by['unmatched']['sample_index']}",
+            arm="olens",
+        )
+        (out / path.name).write_text(wflags.dumps(res))
+        return (
+            f"{pat.pattern_key}: {len(res['annotations'])} annotations kept "
+            f"({res['unverified']} unverified dropped, {res['failed_calls']} failed calls)"
+        )
+
+    _fan_out(cfg, todo, one, "annotate")
+
+
 def stage_concise(cfg: Settings) -> None:
     """One plain sentence per mechanism of every run (all arms) -> concise.json for the page.
     Resumable: rows already in the file are kept."""
@@ -443,6 +509,7 @@ STAGES = {
     "agreement": stage_agreement,
     "predictions": stage_predictions,
     "flags": stage_flags,
+    "annotate": stage_annotate,
     "concise": stage_concise,
     "site": stage_site,
 }

@@ -1353,6 +1353,33 @@ def build_site(
         a: sum(1 for p in patterns if any((r["arm"] or "olens") == a for r in p["runs"]))
         for a in ("olens", "jlens", "nla", "blackbox")
     }
+
+    def lens_key(r: dict[str, Any]) -> str:
+        return "study" if r["source"] == "diag" else (r["lens"] or "olens")
+
+    coverage = {
+        (side, lk): sum(
+            1
+            for p in patterns
+            if any(
+                r.get("reply")
+                and r["reply"]["side"] == side
+                and r["reply"]["letter"] == "A"
+                and lens_key(r) == lk
+                and (r["rows"] or r.get("deferred"))
+                for r in p["reads"]
+            )
+        )
+        for side in ("flagged", "clean")
+        for lk in ("study", "olens", "jlens", "nla")
+    }
+    print(
+        "matrix coverage (patterns with a read of reply A): "
+        + " · ".join(
+            f"{lk} {coverage[('flagged', lk)]}/{coverage[('clean', lk)]} (flagged/clean)"
+            for lk in ("study", "olens", "jlens", "nla")
+        )
+    )
     n_iv = sum(1 for p in patterns if p["interventions"])
     print(
         "runs per arm: "
@@ -1585,7 +1612,16 @@ i.matched{background:var(--miss)} i.unmatched{background:var(--hit)} i.agent{bac
 .tok.hit{border-top:3px solid var(--hit)}
 .tok.found{box-shadow:inset 0 -3px 0 var(--find)}
 .tok.mark{border-bottom:2px dotted var(--text)}
-.tok.flagged{border-top:3px solid var(--hold);position:relative;margin-top:9px}
+.tok.flagged{border-top:3px solid var(--hold);position:relative;margin-top:9px;background:var(--hold-soft)}
+.strip-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;margin:0 0 6px}
+.strip-head .rn{font-weight:600}
+thead tr.grp th{text-align:center;font-size:11px;letter-spacing:.06em;border-bottom:1px solid var(--line-soft)}
+thead tr.grp th.flagged{color:var(--miss);background:var(--miss-soft)} thead tr.grp th.clean{color:var(--hit);background:var(--hit-soft)} thead tr.grp th.probes{color:var(--text-dim)}
+thead tr.lens th{top:31px}
+thead th .warn{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:0;text-transform:none;color:var(--hold);font-weight:400;margin-top:2px}
+#flagbar{padding:6px 8px;background:var(--hold-soft);border:1px solid var(--hold);border-radius:5px}
+.flags.gem{border:1px solid var(--hold);background:var(--hold-soft);border-radius:5px;padding:6px 8px;margin:0 0 8px}
+.flags.gem h3{color:var(--hold)}
 .tok.flagged::before{content:"⚑";position:absolute;top:-13px;left:1px;font-size:9px;line-height:1;color:var(--hold)}
 .tok.flagged.hit{border-top-color:var(--hold)}
 #flagbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--text-dim);margin:0 0 8px}
@@ -1756,6 +1792,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
   <span class="spacer"></span>
   <a class="btn" id="themes-btn" href="#/themes" title="mechanism clusters">themes</a>
   <button class="btn" id="agree-btn" title="how the lens arm and a black-box arm compare" hidden>lens vs black-box</button>
+  <button class="btn" id="flags-btn" title="jump to the first Gemini-flagged position of this read (f)">⚑ flags</button>
   <button class="btn" id="text-toggle" aria-pressed="false" title="read the replies as plain text instead of tokens (x)">text</button>
   <button class="btn" id="ctx-toggle" aria-pressed="true" title="case / hypothesis / summary / rubric (c)">context</button>
   <button class="btn" id="wrap-toggle" aria-pressed="false" title="cap row height (w)">compact rows</button>
@@ -1791,7 +1828,8 @@ dialog h2{margin:0 0 10px;font-size:15px}
     <p><i class="sw" style="background:var(--hit-soft);border-color:var(--hit)"></i><b>Green</b> means a phrase the agent quoted from a readout cell was found verbatim at build time: a green bar on a token says one of that token's cells carries such a phrase; the cell itself gets a green inset bar and the phrase is highlighted. Quotes that did not verify are listed in the build log, not here.</p>
     <p><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i><b>Dotted</b> underline is the fork: the first reply word where the flagged and clean replies diverge, computed from the read tokens (≈, positions were thinned).</p>
     <p><i class="sw" style="background:var(--find-soft);border-color:var(--find)"></i><b>Violet</b> is your search: <span class="kbd">/</span> filters this pattern's readouts (tokens whose cells match get a violet underline and are listed under the bar); <span class="kbd">;</span> searches summaries, prompts and mechanisms across every pattern.</p>
-    <p><i class="sw" style="border-top:3px solid var(--hold);background:var(--surface)"></i><b>Amber ⚑</b> is a reader flag: a second model (Gemini) read each cell of the study reads and flagged cells that say something the reply's text does not — a role being adopted, both branches present at once, a hidden referent, a disclaimer that never surfaces, a contradiction, a commitment point. Every quote was re-checked verbatim at build time. Three marks, three sources: <b>yellow</b> = a fixed position (about to speak), <b>green</b> = a phrase the investigator quoted, <b>amber ⚑</b> = a phrase the reader model flagged. The flagger saw the reply and its label — an attention pass, not a blind judge.</p>
+    <p><i class="sw" style="border-top:3px solid var(--hold);background:var(--hold-soft)"></i><b>Amber ⚑</b> is a Gemini flag: a second model (google/gemini-3.8-flash) read each cell of the study reads and flagged cells that say something the reply's text does not — a role being adopted, both branches present at once, a hidden referent, a disclaimer that never surfaces, a contradiction, a commitment point. Every quote was re-checked verbatim at build time. Three marks, three sources: <b>yellow</b> = a fixed position (about to speak), <b>green</b> = a phrase the investigator quoted, <b>amber ⚑</b> = a phrase the reader model flagged. The flagger saw the reply and its label — an attention pass, not a blind judge. Flags are keyed to the study reads, so in the matrix they light up in the "OLens · study read" columns.</p>
+    <p><b>The matrix.</b> At the selected position the grid shows every read of flagged reply A and clean reply A the pattern has, across lenses: a two-level header names the reply, then the lens ("OLens · study read" = our own lens sample of the study reply, "OLens · investigator" = the investigator's read of the same reply, "J-lens", "NLA L42"); rows are the union of layers, "—" where a lens has no cell. Reads of one reply share a tokenization, so the same position is the same token — a "≠ token" note marks a column where it is not (e.g. beyond a shorter read). The toggles in the bar add or drop a lens, or the B replies; a probe chosen in the read select becomes an extra column.</p>
     <p id="manual-cal" class="sub"></p>
     <p><b>Faded</b> tokens (‥) stand for positions the read thinned away — the lens read every 4th token plus punctuation and boundaries.</p>
     <p><b>Resizing.</b> Drag the splitter between the panes, the right edge of a column header, or the bottom edge of a layer label; double-click any of them to reset.</p>
@@ -1809,7 +1847,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
     <span class="kbd">↑ ↓</span><span>move the highlighted layer</span>
     <span class="kbd">j k</span><span>next / previous pattern</span>
     <span class="kbd">[ ]</span><span>previous / next behavior</span>
-    <span class="kbd">1…9</span><span>show / hide a read as a column</span>
+    <span class="kbd">1…5</span><span>toggle matrix columns: OLens study · OLens investigator · J-lens · NLA · B replies</span>
     <span class="kbd">c</span><span>show / hide the context panes</span>
     <span class="kbd">w</span><span>compact rows on / off</span>
     <span class="kbd">x</span><span>replies as plain text / as tokens</span>
@@ -1891,7 +1929,14 @@ function readTip(r){ const parts = [r.id]; if (r.source === "diag") parts.push(`
 
 // ------------------------------------------------------------------ state
 const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
-           colw:{}, rowh:{}, below:false, tab:"brief", arm:"lens", textView: load("wc-text") === "1", agentPromise:null, flagCat:"all"};
+           colw:{}, rowh:{}, below:false, tab:"brief", arm:"lens", textView: load("wc-text") === "1", agentPromise:null, flagCat:"all", lensOn:{study:true, olens:true, jlens:true, nla:true}, bOn:false, extra:[]};
+const LENS_KEYS = ["study", "olens", "jlens", "nla"];
+const LENS_COL = {study: "OLens · study read", olens: "OLens · investigator", jlens: "J-lens", nla: "NLA L42"};
+function lensKey(r){ return r.source === "diag" ? "study" : (r.lens || "olens"); }
+function groupOf(r){ return r.reply ? `${r.reply.side} reply ${r.reply.letter}` : "probes"; }
+function matrixReads(letters){ const out = []; for (const r of (S.data ? S.data.reads : [])){ if (!r.reply || r.parse_error || !letters.includes(r.reply.letter)) continue; if (!S.lensOn[lensKey(r)]) continue; const dup = out.find(o => o.reply.side === r.reply.side && o.reply.letter === r.reply.letter && lensKey(o) === lensKey(r)); if (!dup) out.push(r); } return out; }
+function computeCompare(){ const letters = S.bOn ? ["A", "B"] : ["A"]; const ids = matrixReads(letters).map(r => r.id); for (const id of S.extra) if (!ids.includes(id) && S.data.byId[id]) ids.push(id); if (S.read && !ids.includes(S.read)) ids.push(S.read); return ids; }
+function colRank(c){ const rep = c.reply; const g = rep ? ((rep.letter === "A" ? 0 : 2) + (rep.side === "flagged" ? 0 : 1)) : 9; return g * 10 + (["study", "olens", "jlens", "nla"].indexOf(lensKey(c)) + 1 || 5); }
 const CAT_CLASS = {role_adoption: "c1", contradicts_text: "c1", both_branches: "c2", commitment_point: "c2", hidden_referent: "c3", disclaimer_present: "c3", other: "c0"};
 const catPill = c => `<span class="cat ${CAT_CLASS[c]||"c0"}">${esc((c||"other").replace(/_/g, " "))}</span>`;
 const ARM_ORDER = ["olens", "jlens", "nla", "blackbox"];
@@ -1966,8 +2011,8 @@ function openPattern(key, want){
   renderBar(); renderCtx(); renderHits(); renderNote();
   $("#text").innerHTML = `<div class="status">loading ${esc(dataUrl(key))} …</div>`; $("#posbar").innerHTML = ""; $("#gridwrap").innerHTML = "";
   const go = data => { if (S.key !== key) return; if (!data.byId) prepareData(key, data); S.data = data;
-    const dm = data.reads.find(r => r.source==="diag" && r.label==="matched"), du = data.reads.find(r => r.source==="diag" && r.label==="unmatched");
-    if (dm && du) S.compare = [dm.id, du.id];
+    const dm = data.reads.find(r => r.source==="diag" && r.reply && r.reply.side==="flagged" && r.reply.letter==="A") || data.reads.find(r => r.source==="diag" && r.label==="matched");
+    S.extra = []; S.compare = computeCompare();
     if (!data.reads.length){ renderAll(); $("#text").innerHTML = `<div class="status">no lens reads for this pattern yet (no diag file, no agent readouts)</div>`; return; }
     const start = (want && want.read && data.byId[want.read]) ? data.byId[want.read] : (dm || data.reads.find(r => r.rows && r.rows.length) || data.reads[0]);
     selectRead(start.id, want && want.pos!=null ? +want.pos : null); };
@@ -1979,7 +2024,8 @@ function openPattern(key, want){
 function defaultPos(r){ if (!r.positions || !r.positions.length) return null; if (r.fork_pos!=null && r.rowByPos[r.fork_pos]) return r.fork_pos; if (r.aboutPos!=null) return r.aboutPos; return r.positions[0]; }
 function selectRead(id, pos){
   const data = S.data; if (!data) return; const r = data.byId[id]; if (!r) return;
-  S.read = id; if (!S.compare.includes(id)) S.compare = [id, ...S.compare];
+  S.read = id; if (!matrixReads(S.bOn ? ["A", "B"] : ["A"]).some(x => x.id === id) && !S.extra.includes(id)) S.extra.push(id);
+  S.compare = computeCompare();
   const needs = [r, ...S.compare.map(c => data.byId[c]).filter(Boolean)].filter(x => x.deferred && !x.rows);
   if (needs.length){ S.pos = pos; renderBar(); $("#text").innerHTML = `<div class="status">loading the agent's reads (${esc(data.agent_file)}) …</div>`; const key = S.key;
     Promise.all(needs.map(ensureAgentRows)).then(() => { if (S.key === key && S.read === id) selectRead(id, S.pos); })
@@ -1990,7 +2036,8 @@ function selectRead(id, pos){
   renderAll();
   try { history.replaceState(null, "", patUrl(S.key, id, pos)); } catch(e){}
 }
-function toggleCompare(id){ if (!S.data || id === S.read) return; S.compare = S.compare.includes(id) ? S.compare.filter(x => x !== id) : [...S.compare, id]; const r = S.data.byId[id]; if (r && r.deferred && !r.rows) return selectRead(S.read, S.pos); renderBar(); renderGrid(); renderText(); renderHits(); }
+function toggleCompare(id){ if (!S.data || id === S.read) return; S.extra = S.extra.includes(id) ? S.extra.filter(x => x !== id) : [...S.extra, id]; S.compare = computeCompare(); const r = S.data.byId[id]; if (r && r.deferred && !r.rows) return selectRead(S.read, S.pos); renderBar(); renderGrid(); renderText(); renderHits(); }
+function toggleLens(k){ if (!S.data) return; if (k === "B") S.bOn = !S.bOn; else S.lensOn[k] = !S.lensOn[k]; S.compare = computeCompare(); const needs = S.compare.map(id => S.data.byId[id]).filter(x => x && x.deferred && !x.rows); if (needs.length) return selectRead(S.read, S.pos); renderBar(); renderGrid(); renderText(); renderHits(); }
 function renderAll(){ renderBar(); renderCtx(); renderText(); renderGrid(); renderHits(); renderBelow(); renderNote(); }
 
 // --------------------------------------------------------------------- bar
@@ -2013,7 +2060,11 @@ function renderBar(){
   const isStudyRead = r => r.source !== "diag" && /^w\d+[mu]$/.test(r.conv_id||"");
   const groups = [["study replies", r => r.source === "diag"], ["investigator's reads of them", isStudyRead], ["investigator's probes", r => r.source !== "diag" && !isStudyRead(r)]];
   $("#read-select").innerHTML = reads.length ? groups.map(([g, f]) => { const rs = reads.filter(f); return rs.length ? `<optgroup label="${esc(g)}">` + rs.map(r => `<option value="${esc(r.id)}" title="${esc(readTip(r))}" ${r.id===S.read?"selected":""}>${esc(readLabel(r))}</option>`).join("") + `</optgroup>` : ""; }).join("") : `<option>—</option>`;
-  $("#cmp-toggles").innerHTML = reads.filter(r => !r.parse_error).map((r, i) => `<button class="btn cmp" data-cmp="${esc(r.id)}" aria-pressed="${S.compare.includes(r.id)}" ${r.id===S.read?"disabled":""} title="${esc(readTip(r) + " — as a grid column (" + (i+1) + ")")}"><i class="${readDot(r)}"></i>${esc(readName(r))}</button>`).join("");
+  const avail = k => reads.filter(r => r.reply && !r.parse_error && lensKey(r) === k), hasB = reads.some(r => r.reply && r.reply.letter === "B" && !r.parse_error);
+  $("#cmp-toggles").innerHTML = reads.length ? LENS_KEYS.map((k, i) => { const n = avail(k).length; return `<button class="btn cmp" data-lens="${k}" aria-pressed="${S.lensOn[k] && n > 0}" ${n ? "" : "disabled"} title="${esc(LENS_COL[k] + (n ? ` — ${n} read${n===1?"":"s"} of the study replies (key ${i+1})` : " — no read of the study replies through this lens"))}">${esc(LENS_COL[k])}</button>`; }).join("") +
+    `<button class="btn cmp" data-lens="B" aria-pressed="${S.bOn}" ${hasB ? "" : "disabled"} title="${hasB ? "also show flagged/clean reply B (key 5)" : "no reads of reply B"}">B replies</button>` +
+    (S.extra.length ? S.extra.map(id => { const r = S.data.byId[id]; return r ? `<button class="btn cmp" data-cmp="${esc(id)}" aria-pressed="true" title="${esc(readTip(r) + " — remove this extra column")}"><i class="${readDot(r)}"></i>${esc(readName(r))}</button>` : ""; }).join("") : "") : "";
+  $("#cmp-toggles").querySelectorAll("[data-lens]").forEach(b => b.onclick = () => toggleLens(b.dataset.lens));
   $("#cmp-toggles").querySelectorAll("[data-cmp]").forEach(b => b.onclick = () => toggleCompare(b.dataset.cmp));
   $("#ctx-toggle").setAttribute("aria-pressed", String(S.ctx)); $("#text-toggle").setAttribute("aria-pressed", String(S.textView)); $("#wrap-toggle").setAttribute("aria-pressed", String(S.compact)); $("#below-toggle").setAttribute("aria-pressed", String(S.below));
 }
@@ -2040,7 +2091,7 @@ function renderCtx(){
     `<div style="margin-top:3px"><b>What WeirdChat found:</b> on this prompt, ${pct(p.published_match_rate)} of ${nrep} replies were judged to show it. Same prompt, same model, same settings — it went both ways.</div>` +
     `<div style="margin-top:3px"><b>What you see here:</b> one <span title="${esc(SIDE_TIP.matched)}">flagged</span> and one <span title="${esc(SIDE_TIP.unmatched)}">clean</span> reply, read token by token through the lens (layers 20–60), plus the investigator's probes.</div>` +
     ags.map(ag => `<div style="margin-top:3px"><b>${esc(armLabel(ag.arm))} vs ${esc(armLabel(ag.arm_b))}:</b> top hypotheses agree: ${ag.top_match==null?"?":(ag.top_match?"yes":"no")} · ${esc(armLabel(ag.arm))} mechanisms with a ${esc(armLabel(ag.arm_b))} counterpart ${ag.lens_with_counterpart==null?"?":ag.lens_with_counterpart}/${ag.n_lens==null?"?":ag.n_lens} · ${esc(armLabel(ag.arm_b))} with a ${esc(armLabel(ag.arm))} counterpart ${ag.blackbox_with_counterpart==null?"?":ag.blackbox_with_counterpart}/${ag.n_blackbox==null?"?":ag.n_blackbox}</div>`).join("") +
-    (p.flags_meta ? `<div style="margin-top:3px"><b>Reader flags:</b> ${p.flags_meta.matched} cells on the flagged reply, ${p.flags_meta.unmatched} on the clean reply (of ${p.flags_meta.proposed} proposed, ${p.flags_meta.dropped} dropped as non-verbatim${p.flags_meta.model ? `; reader ${esc(p.flags_meta.model)}` : ""})</div>` : "") +
+    (p.flags_meta ? `<div style="margin-top:3px" title="${esc(p.flags_meta.model || "google/gemini-3.8-flash")}"><b>Gemini flags:</b> ${p.flags_meta.matched} cells on the flagged reply, ${p.flags_meta.unmatched} on the clean reply (of ${p.flags_meta.proposed} proposed, ${p.flags_meta.dropped} dropped as non-verbatim${p.flags_meta.model ? `; reader ${esc(p.flags_meta.model)}` : ""})</div>` : "") +
     (ivm ? `<div style="margin-top:3px"><b>Interventions run:</b> ${ivm.n_per_arm==null?"?":ivm.n_per_arm} samples/arm over ${ivm.n_arms} arms, judged by ${esc(ivm.judge_model||"?")}${cal && cal.kappa!=null ? ` (κ=${num(cal.kappa)} vs the study's labels)` : ""} — see the interventions tab</div>` : "") +
     `<div class="tags" style="margin-top:5px"><span class="tag">${pct(p.published_match_rate)} flagged</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${p.n_reads||0} lens reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
     `<div class="prompt">${esc(p.prompt)}</div></div>`;
@@ -2080,7 +2131,7 @@ const LEGEND = `<div class="tlegend"><span><i class="sw" style="background:var(-
   `<span><i class="sw" style="border-top:3px solid var(--hit);background:var(--surface)"></i>green top bar = a cell here contains a phrase the investigator quoted (verified)</span>` +
   `<span><i class="sw" style="box-shadow:inset 0 -3px 0 var(--find);background:var(--surface)"></i>violet = search hit</span>` +
   `<span><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i>dotted = ≈ where the flagged and clean replies diverge</span>` +
-  `<span><i class="sw" style="border-top:3px solid var(--hold);background:var(--surface)"></i>⚑ flagged by the reader model (Gemini): a cell here says something the text does not</span>` +
+  `<span title="reader: google/gemini-3.8-flash"><i class="sw" style="border-top:3px solid var(--hold);background:var(--hold-soft)"></i>⚑ Gemini flag: a cell here says something the text does not</span>` +
   `<span><i class="sw" style="opacity:.4;background:var(--text-faint)"></i>faded ‥ = position not read</span></div>`;
 function flagsOf(r){ return (S.data && S.data.fl[r.id]) || {}; }
 function flagList(r){ const fl = flagsOf(r); return Object.keys(fl).map(Number).sort((a, b) => a - b).map(p => ({pos: p, flags: fl[p]})).filter(x => S.flagCat === "all" || x.flags.some(f => f.category === S.flagCat)); }
@@ -2088,7 +2139,7 @@ function flagBar(r){
   const all = flagsOf(r), positions = Object.keys(all); if (!positions.length) return "";
   const cats = [...new Set(Object.values(all).reduce((a, fs) => a.concat(fs.map(f => f.category)), []))].sort();
   const list = flagList(r), n = Object.values(all).reduce((a, fs) => a + fs.length, 0);
-  return `<div id="flagbar"><span>⚑ ${n} reader flag${n===1?"":"s"} at ${positions.length} position${positions.length===1?"":"s"}</span><select id="flagcat" title="filter by category"><option value="all" ${S.flagCat==="all"?"selected":""}>all categories</option>` + cats.map(c => `<option value="${esc(c)}" ${S.flagCat===c?"selected":""}>${esc(c.replace(/_/g, " "))}</option>`).join("") + `</select>` +
+  return `<div id="flagbar" title="reader: ${esc((S.data.flags[r.id]||{}).model || "google/gemini-3.8-flash")}"><span><b>⚑ ${n} Gemini flag${n===1?"":"s"}</b> at ${positions.length} position${positions.length===1?"":"s"} on this read</span><select id="flagcat" title="filter by category"><option value="all" ${S.flagCat==="all"?"selected":""}>all categories</option>` + cats.map(c => `<option value="${esc(c)}" ${S.flagCat===c?"selected":""}>${esc(c.replace(/_/g, " "))}</option>`).join("") + `</select>` +
     list.slice(0, 60).map(x => `<button class="fchip ${x.pos===S.pos?"cur":""}" data-fpos="${x.pos}" title="${esc(x.flags.map(f => f.category + ": " + f.why).join("\n"))}">pos ${x.pos} · ${esc([...new Set(x.flags.map(f => f.category.replace(/_/g, " ")))].join(", "))}</button>`).join("") + (list.length > 60 ? `<span>+${list.length-60} more</span>` : "") + `<span class="kbd">f</span><span>next flag</span></div>`;
 }
 function proseBlock(label, text, cls, tip){ return `<div class="blk ${cls||""}"><div class="role"><span${tip?` title="${esc(tip)}"`:""}>${esc(label)}</span></div><div class="prose">${esc(text||"(empty)")}</div></div>`; }
@@ -2113,7 +2164,8 @@ function renderText(){
   const r = curRead(), box = $("#text"); if (!r){ return; }
   if (S.textView) return renderProse(r, box);
   const hl = S.data.hl[r.id] || {}, found = foundPositions();
-  let h = LEGEND + flagBar(r);
+  const nfl = Object.values(flagsOf(r)).reduce((a, fs) => a + fs.length, 0);
+  let h = `<div class="strip-head"><span class="rn" title="${esc(readTip(r))}">${esc(readName(r))}</span>${nfl ? `<span class="badge hold" title="reader: ${esc((S.data.flags[r.id]||{}).model || "google/gemini-3.8-flash")}">⚑ ${nfl} Gemini flag${nfl===1?"":"s"} on this read</span>` : `<span class="badge dim">no Gemini flags on this read</span>`}</div>` + flagBar(r) + LEGEND;
   if (r.parse_error) h += `<div class="notice">this readout page did not parse: ${esc(r.parse_error)}</div>`;
   const rows = r.rows || []; let i = 0;
   if (!rows.length) h += `<div class="status">no positions in this read.</div>`;
@@ -2172,7 +2224,7 @@ function renderGrid(){
   const fl = mechsAt(r, p);
   let h = `<div class="row"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="wherenote">${esc(whereText(r, row))} · ${esc(row.kind)}</span></div>`;
   const here = flagsOf(r)[p] || [];
-  if (here.length){ h += `<div class="flags"><h3>⚑ reader flags at this position (${here.length}) — verbatim in the cell, seen with the label</h3><div class="mcards">` + here.map(f => { const smp = cellsAt(r, p).find(s => s.includes(f.quote)); const en = smp && D.en && D.en[smp]; return `<div class="fcard">${catPill(f.category)}<span class="L">L${f.layer}</span><div class="q">“${esc(f.quote)}”</div>${en ? `<div class="en">${esc(en)}</div>` : ""}<div class="why">${esc(f.why)}</div></div>`; }).join("") + `</div></div>`; }
+  if (here.length){ h = `<div class="flags gem" title="reader: ${esc((S.data.flags[r.id]||{}).model || "google/gemini-3.8-flash")}"><h3>⚑ Gemini flagged this position (${here.length}) — verbatim in the cell; the reader saw the reply and its label</h3><div class="mcards">` + here.map(f => { const smp = cellsAt(r, p).find(s => s.includes(f.quote)); const en = smp && D.en && D.en[smp]; return `<div class="fcard">${catPill(f.category)}<span class="L">L${f.layer}</span><div class="q">“${esc(f.quote)}”</div>${en ? `<div class="en">${esc(en)}</div>` : ""}<div class="why">${esc(f.why)}</div></div>`; }).join("") + `</div></div>` + h; }
   if (fl.length) h += `<div class="mcards">` + fl.map((f, i) => `<button class="mcard ${f.via===r.conv_id?"":"other"}" data-mc="${i}"><div class="hd"><span class="txt">${esc(cut(f.m.mechanism, 160))}</span><span class="badge ${f.m.confidence>=0.7?"miss":(f.m.confidence>=0.4?"hold":"dim")}">conf ${num(f.m.confidence)}</span></div><div class="more"><div>${esc(f.m.mechanism)}</div><div class="quote">${esc(f.m.readout_cells)}</div>${f.via!==r.conv_id?`<div class="dim">cited on ${esc(f.via)} — same reply, different lens sample</div>`:""}</div></button>`).join("") + `</div>`;
   else h += `<div class="dim" style="font-size:11.5px">no reported mechanism cites ${esc(r.mention_ids.join(" / ") || r.id)} at pos ${p}.</div>`;
   posbar.innerHTML = h;
@@ -2180,17 +2232,26 @@ function renderGrid(){
   // the table
   wrap.innerHTML = "";
   document.documentElement.style.setProperty("--rowmax", S.compact ? "150px" : "none");
-  const cols = S.compare.map(id => S.data.byId[id]).filter(c => c && c.rows);
+  const cols = S.compare.map(id => S.data.byId[id]).filter(c => c && c.rows).sort((a, b) => colRank(a) - colRank(b));
   const layers = [...new Set(cols.reduce((a, c) => a.concat(c.layers||[]), []))].sort((a,b) => a-b);
   const toks = cols.map(c => c.rowByPos[p] ? c.rowByPos[p].tok : null), present = toks.filter(t => t!=null);
   const identical = cols.length > 1 && present.length === cols.length && present.every(t => t === present[0]);
-  if (identical) wrap.appendChild(el("div", "notice", "identical prefix — same activation" + (new Set(cols.map(c => c.lens||"olens")).size > 1 ? ", read through different lenses" : ", different lens samples") + (row.region==="reply" ? " (the replies still agree at this position)" : "")));
+  const sides = new Set(cols.filter(c => c.reply).map(c => c.reply.side)), bothSides = sides.has("flagged") && sides.has("clean");
+  // reads of the same reply share a tokenization: the group's study read (else its first column) is the reference token
+  const refTok = {}; for (const c of cols){ const g = groupOf(c); if (!(g in refTok) || c.source === "diag") refTok[g] = c.rowByPos[p] ? c.rowByPos[p].tok : null; }
+  if (bothSides && row.region !== "reply") wrap.appendChild(el("div", "notice", "same activation for flagged and clean; columns differ only by lens/sample" + (identical ? "" : " — but a token differs in some column (see ≠ token)")));
+  else if (bothSides) wrap.appendChild(el("div", "notice", identical ? "flagged and clean still agree at this position (same token so far)" : "flagged and clean diverge here"));
+  else if (identical) wrap.appendChild(el("div", "notice", "identical prefix — same activation" + (new Set(cols.map(c => c.lens||"olens")).size > 1 ? ", read through different lenses" : ", different lens samples") + (row.region==="reply" ? " (the replies still agree at this position)" : "")));
   const colw = Math.max(260, Math.floor((wrap.clientWidth - 58) / Math.max(1, cols.length)) - 1); wrap.style.setProperty("--col", colw + "px");
-  const table = el("table"), thead = el("thead"), hr = el("tr"); hr.appendChild(el("th", "layer", "layer"));
-  const lensesDiffer = new Set(cols.map(c => c.lens || "olens")).size > 1;
-  cols.forEach((c, j) => { const th = el("th", readDot(c), readName(c)); th.title = readTip(c);
-    if (lensesDiffer) th.appendChild(el("span", "rate", (LENS_SHORT[c.lens||"olens"] || c.lens) + (c.source==="diag" ? " · study read" : "")));
-    if (!identical && cols.length > 1) th.appendChild(el("span", "own", toks[j]==null ? "not read at pos " + p : JSON.stringify(toks[j])));
+  const table = el("table"), thead = el("thead");
+  // two-level header: the reply (flagged A | clean A | …), then the lens of each read
+  const gr = el("tr", "grp"); const gth = el("th", "layer", ""); gth.setAttribute("rowspan", "2"); gr.appendChild(gth);
+  let gi = 0; while (gi < cols.length){ const g = groupOf(cols[gi]); let gj = gi; while (gj < cols.length && groupOf(cols[gj]) === g) gj++; const th = el("th", cols[gi].reply ? cols[gi].reply.side : "probes", g); th.setAttribute("colspan", String(gj - gi)); if (cols[gi].reply) th.title = SIDE_TIP[SIDE_OF[cols[gi].reply.side]] || ""; gr.appendChild(th); gi = gj; }
+  thead.appendChild(gr);
+  const hr = el("tr", "lens");
+  cols.forEach((c, j) => { const th = el("th", readDot(c), LENS_COL[lensKey(c)] || lensName(c)); th.title = readName(c) + " · " + readTip(c);
+    const ref = refTok[groupOf(c)]; if (toks[j] == null) th.appendChild(el("span", "warn", "— not read at pos " + p)); else if (ref != null && toks[j] !== ref) th.appendChild(el("span", "warn", "≠ token: " + JSON.stringify(toks[j])));
+    if (!identical && cols.length > 1 && toks[j] != null && (ref == null || toks[j] === ref) && c.source === "diag") th.appendChild(el("span", "own", JSON.stringify(toks[j])));
     if (S.colw[c.id]) th.style.width = S.colw[c.id] + "px";
     const grip = el("div", "grip-x"); grip.title = "drag to resize this column (double-click resets)";
     grip.onpointerdown = e => { e.preventDefault(); const x0 = e.clientX, w0 = th.getBoundingClientRect().width; const mv = ev => { S.colw[c.id] = Math.max(140, w0 + ev.clientX - x0); th.style.width = S.colw[c.id] + "px"; }; const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); };
@@ -2238,7 +2299,7 @@ function renderResults(){
   for (const p of D.patterns || []){
     if (rx.test(p.group_summary||"")) rows.push({p, where: "summary", snip: snip(p.group_summary)});
     if (rx.test(p.prompt||"")) rows.push({p, where: "prompt", snip: snip(p.prompt)});
-    (p.flag_whys||[]).forEach(f => { if (rx.test(f.why||"")) rows.push({p, where: `⚑ flag · pos ${f.position} · ${f.category.replace(/_/g, " ")}`, snip: snip(f.why), cell: {read: f.read, pos: f.position}}); });
+    (p.flag_whys||[]).forEach(f => { if (rx.test(f.why||"")) rows.push({p, where: `⚑ Gemini flag · pos ${f.position} · ${f.category.replace(/_/g, " ")}`, snip: snip(f.why), cell: {read: f.read, pos: f.position}}); });
     (p.intervention_notes||[]).forEach(a => { if (rx.test(a.note||"") || rx.test(a.name||"")) rows.push({p, where: `intervention arm ${a.name}`, snip: snip(a.name + ": " + a.note)}); });
     (p.runs||[]).forEach((run, ri) => { if (rx.test(run.summary||"")) rows.push({p, where: `${run.arm==="blackbox"?"black-box":"lens"} run summary`, snip: snip(run.summary)});
       (run.mechanisms||[]).forEach((m, mi) => { const t = [m.mechanism, m.evidence, m.readout_cells].join(" · "); if (rx.test(t)) rows.push({p, where: `mechanism ${mi+1}`, snip: snip(t), cell: firstCell(m.readout_cells)}); }); });
@@ -2445,6 +2506,7 @@ $("#text-toggle").onclick = () => { S.textView = !S.textView; store("wc-text", S
 $("#wrap-toggle").onclick = () => { S.compact = !S.compact; renderBar(); renderGrid(); };
 $("#below-toggle").onclick = () => { S.below = !S.below; renderBar(); renderBelow(); };
 $("#theme").onclick = toggleTheme;
+$("#flags-btn").onclick = () => { const r = curRead(); if (!r) return; const list = flagList(r).map(x => x.pos); if (list.length) selectRead(r.id, list[0]); };
 $("#search").addEventListener("input", e => { S.query = e.target.value; renderResults(); });
 $("#find").addEventListener("input", e => { S.find = e.target.value.trim(); renderText(); renderGrid(); renderHits(); });
 for (const id of ["search", "find"]) $("#" + id).addEventListener("keydown", e => { if (e.key === "Escape"){ e.target.value = ""; if (id === "find"){ S.find = ""; renderText(); renderGrid(); renderHits(); } else { S.query = ""; renderResults(); } e.target.blur(); } });
@@ -2465,7 +2527,7 @@ document.addEventListener("keydown", e => {
   else if (k === "/"){ $("#find").focus(); e.preventDefault(); }
   else if (k === ";"){ $("#search").focus(); e.preventDefault(); }
   else if (k === "?") $("#help").showModal(); else if (k === "m") $("#manual").showModal(); else if (k === "t") toggleTheme();
-  else if (/^[1-9]$/.test(k) && S.data){ const r = S.data.reads.filter(x => !x.parse_error)[+k-1]; if (r) toggleCompare(r.id); }
+  else if (/^[1-5]$/.test(k) && S.data){ toggleLens(["study", "olens", "jlens", "nla", "B"][+k-1]); }
 });
 for (const d of document.querySelectorAll("dialog")) d.addEventListener("click", e => { if (e.target === d) d.close(); });
 window.addEventListener("resize", () => { if (S.data) renderGrid(); });

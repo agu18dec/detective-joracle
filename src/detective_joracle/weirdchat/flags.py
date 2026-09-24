@@ -172,3 +172,155 @@ def dumps(blob: Mapping[str, Any]) -> str:
 
 
 __all__ = ["CATEGORIES", "SCHEMA", "WINDOW", "dumps", "flag_read", "verify", "windows"]
+
+
+# ------------------------------------------------------- contrastive annotations
+ANNOTATE_SYSTEM = (
+    "You annotate interpretability-lens output for a language model. An investigator explained "
+    "why the model shows a behavior on a prompt, as a ranked list of mechanisms. You are given "
+    "those mechanisms, the prompt, and — for a window of token positions — the lens cells of TWO "
+    "replies to that prompt: one the judge FLAGGED as showing the behavior, one judged CLEAN. Up to "
+    "the point where the two replies diverge the cells come from the identical text, so a "
+    "difference there is lens noise; after it, a difference can be real. For each mechanism, mark "
+    "the cells that CONTRASTIVELY support it: a cell where the flagged reply's activation says "
+    "something the clean reply's does not at the same position (or the reverse), and that is what "
+    "the mechanism claims. Also mark cells where both replies share the same readout that the "
+    "mechanism rests on (propensity evidence), labelled as such. Quote the cell VERBATIM (at least "
+    "25 consecutive characters exactly as written). At most 6 annotations per window; skip windows "
+    "with nothing that bears on a mechanism."
+)
+ANNOTATE_USER = (
+    "<behavior>{behavior}</behavior>\n<prompt>\n{prompt}\n</prompt>\n\n<mechanisms>\n{mechs}\n</mechanisms>\n\n"
+    "Replies diverge from position {fork} onward (positions before it are identical text).\n"
+    "Window {w}/{n_windows}, positions {lo}–{hi}. For each position: the token, then per layer the "
+    "FLAGGED cell and the CLEAN cell.\n\n{cells}\n\nReturn the annotations for this window."
+)
+ANNOTATE_SCHEMA = schema_block(
+    "annotations",
+    {
+        "annotations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "mechanism": {"type": "integer"},
+                    "position": {"type": "integer"},
+                    "layer": {"type": "integer"},
+                    "side": {"type": "string", "enum": ["flagged", "clean", "both"]},
+                    "quote": {"type": "string"},
+                    "contrast": {"type": "string"},
+                },
+                "required": ["mechanism", "position", "layer", "side", "quote", "contrast"],
+            },
+        }
+    },
+    ["annotations"],
+)
+ANNOTATE_WINDOW = 24
+
+
+def _render_pair(flagged: Mapping[str, Any], clean: Mapping[str, Any], pos: Sequence[str]) -> str:
+    layers = sorted(set(flagged["readouts"]) | set(clean["readouts"]), key=int)
+    out = []
+    for p in pos:
+        tf = flagged["tokens"].get(p)
+        tc = clean["tokens"].get(p)
+        tok = f"{tf!r}" if tf == tc else f"flagged {tf!r} / clean {tc!r}"
+        out.append(
+            f"pos {p} [{flagged['tags'].get(p, clean['tags'].get(p, {})).get('region', '?')}] {tok}"
+        )
+        for L in layers:
+            f = " | ".join(s[:CELL_CHARS] for s in flagged["readouts"].get(L, {}).get(p) or [])
+            c = " | ".join(s[:CELL_CHARS] for s in clean["readouts"].get(L, {}).get(p) or [])
+            if f or c:
+                out.append(f"  L{L} FLAGGED: {f or '—'}\n  L{L} CLEAN:   {c or '—'}")
+    return "\n".join(out)
+
+
+def _verify_side(
+    flagged: Mapping[str, Any], clean: Mapping[str, Any], a: Mapping[str, Any]
+) -> str | None:
+    """Which read(s) hold the quote verbatim at (position, layer): 'flagged', 'clean', 'both', or None."""
+    q = str(a.get("quote", ""))
+    if len(q) < MIN_QUOTE:
+        return None
+    L, p = str(a.get("layer")), str(a.get("position"))
+    in_f = any(q in s for s in flagged["readouts"].get(L, {}).get(p) or [])
+    in_c = any(q in s for s in clean["readouts"].get(L, {}).get(p) or [])
+    return "both" if in_f and in_c else "flagged" if in_f else "clean" if in_c else None
+
+
+def annotate_contrast(
+    flagged: Mapping[str, Any],
+    clean: Mapping[str, Any],
+    *,
+    behavior: str,
+    prompt: str,
+    mechanisms: Sequence[Mapping[str, Any]],
+    fork_position: int | None,
+    model: str,
+    concurrency: int = 8,
+) -> dict[str, Any]:
+    """Cells that contrastively support the investigator's mechanisms, verified verbatim in the
+    read they are attributed to (the side is corrected to what the grids actually show)."""
+    pos = sorted(set(flagged["tokens"]) | set(clean["tokens"]), key=int)
+    wins = windows(pos, ANNOTATE_WINDOW)
+    mechs = "\n".join(
+        f"[{i}] {str(m.get('short') or m.get('mechanism', ''))[:400]}"
+        for i, m in enumerate(mechanisms)
+    )
+    items = [
+        (
+            ANNOTATE_SYSTEM,
+            ANNOTATE_USER.format(
+                behavior=behavior,
+                prompt=prompt[:3000],
+                mechs=mechs,
+                fork=fork_position if fork_position is not None else "(unknown)",
+                w=i + 1,
+                n_windows=len(wins),
+                lo=w[0],
+                hi=w[-1],
+                cells=_render_pair(flagged, clean, w),
+            ),
+        )
+        for i, w in enumerate(wins)
+    ]
+    outs = async_json_route(items, schema=ANNOTATE_SCHEMA, model=model, concurrency=concurrency)
+    kept: list[dict[str, Any]] = []
+    proposed = failed = unverified = 0
+    for o in outs:
+        if o is None:
+            failed += 1
+            continue
+        for a in o.get("annotations") or []:
+            proposed += 1
+            side = _verify_side(flagged, clean, a)
+            mi = int(a.get("mechanism", -1))
+            if side is None or not (0 <= mi < len(mechanisms)):
+                unverified += 1
+                continue
+            kept.append(
+                {
+                    "mechanism": mi,
+                    "position": int(a["position"]),
+                    "layer": int(a["layer"]),
+                    "side": side,
+                    "claimed_side": str(a.get("side")),
+                    "quote": str(a["quote"]),
+                    "contrast": str(a.get("contrast", ""))[:400],
+                }
+            )
+    kept.sort(key=lambda a: (a["mechanism"], a["position"], a["layer"]))
+    return {
+        "annotations": kept,
+        "n_windows": len(wins),
+        "failed_calls": failed,
+        "proposed": proposed,
+        "unverified": unverified,
+        "model": model,
+    }
+
+
+__all__ += ["ANNOTATE_SCHEMA", "ANNOTATE_WINDOW", "annotate_contrast"]
