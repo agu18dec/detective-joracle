@@ -573,3 +573,62 @@ def test_rejudge_fills_missing_verdicts_and_recomputes(monkeypatch: Any) -> None
         res["arms"][1]["delta_vs_baseline"] == -0.75
         and res["arms"][1]["fisher_p_vs_baseline"] is not None
     )
+
+
+def test_flagger_keeps_only_verbatim_quotes(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import flags as wf
+
+    read: dict[str, Any] = {
+        "tokens": {str(i): f"t{i}" for i in range(100)},
+        "tags": {
+            str(i): {"region": "user" if i < 60 else "reply", "kind": "user"} for i in range(100)
+        },
+        "readouts": {
+            "44": {
+                str(i): [
+                    f"cell {i}: the model is calling emergency services right now for you"
+                    if i == 61
+                    else f"cell {i}"
+                ]
+                for i in range(100)
+            }
+        },
+    }
+    tokens: dict[str, str] = read["tokens"]
+    assert len(wf.windows(sorted(tokens, key=int))) == 3  # 48 + 48 + 4
+    monkeypatch.setattr(
+        wf,
+        "async_json_route",
+        lambda items, *, schema, model, concurrency=8: [
+            {
+                "flags": [
+                    {
+                        "position": 61,
+                        "layer": 44,
+                        "category": "role_adoption",
+                        "quote": "the model is calling emergency services right now",
+                        "why": "w",
+                    },
+                    {
+                        "position": 61,
+                        "layer": 44,
+                        "category": "other",
+                        "quote": "paraphrase that is not in the cell at all",
+                        "why": "w",
+                    },
+                    {
+                        "position": 5,
+                        "layer": 44,
+                        "category": "other",
+                        "quote": "cell 5",
+                        "why": "too short",
+                    },
+                ]
+            },
+            None,
+            {"flags": []},
+        ],
+    )
+    out = wf.flag_read(read, behavior="b", prompt="p", reply="r", flagged=True, model="fake")
+    assert [f["position"] for f in out["flags"]] == [61]
+    assert out["proposed"] == 3 and out["unverified"] == 2 and out["failed_calls"] == 1

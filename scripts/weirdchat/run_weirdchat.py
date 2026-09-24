@@ -33,6 +33,7 @@ from detective_joracle.weirdchat import agreement as wagr  # noqa: E402
 from detective_joracle.weirdchat import data as wd  # noqa: E402
 from detective_joracle.weirdchat import diagnostics as wdiag  # noqa: E402
 from detective_joracle.weirdchat import explain as wex  # noqa: E402
+from detective_joracle.weirdchat import flags as wflags  # noqa: E402
 from detective_joracle.weirdchat import predictions as wpred  # noqa: E402
 from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 
@@ -41,9 +42,7 @@ from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 class Settings:
     """Every ``key=value`` option the driver accepts."""
 
-    stage: str = (
-        ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | site
-    )
+    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | flags | site
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}") or Modal prefix
     target: str = ""  # optional OpenAI-compatible chat server; empty = the lens server's chat
     nla: str = ""  # the NLA verbalizer URL (arm=nla reads layer 42 through it)
@@ -339,6 +338,43 @@ def stage_predictions(cfg: Settings) -> None:
     print(f"[predictions] {cfg.arm}: {blob['summary']}", flush=True)
 
 
+def stage_flags(cfg: Settings) -> None:
+    """An LLM flagger over each pattern's study reads (diag): the cells worth attention, verified
+    verbatim; written to flags/<key>.json as {read_id: {flags, …}} for the viewer."""
+    out = root(cfg) / "flags"
+    out.mkdir(parents=True, exist_ok=True)
+    todo = [
+        p
+        for p in pattern_paths(cfg)
+        if (root(cfg) / "diag" / p.name).exists() and (cfg.force or not (out / p.name).exists())
+    ]
+    print(f"[flags] {len(todo)} patterns -> {cfg.aux_model} ({cfg.workers} workers)", flush=True)
+    if cfg.dry:
+        return
+
+    def one(path: Path) -> str:
+        pat = wd.load_pattern(path)
+        diag = json.loads((root(cfg) / "diag" / path.name).read_text())
+        reads: dict[str, Any] = {}
+        for r in diag["reads"]:
+            rid = f"diag:{r['label']}:{r['sample_index']}"
+            reads[rid] = wflags.flag_read(
+                r["readout"],
+                behavior=pat.behavior_name,
+                prompt=pat.prompt,
+                reply=r["conversation"]["completion"],
+                flagged=r["label"] == "matched",
+                model=cfg.aux_model,
+            )
+        (out / path.name).write_text(wflags.dumps({"pattern_key": pat.pattern_key, "reads": reads}))
+        n = sum(len(v["flags"]) for v in reads.values())
+        bad = sum(v["unverified"] for v in reads.values())
+        fails = sum(v["failed_calls"] for v in reads.values())
+        return f"{pat.pattern_key}: {n} flags kept, {bad} unverified quotes dropped, {fails} failed calls"
+
+    _fan_out(cfg, todo, one, "flags")
+
+
 def stage_site(cfg: Settings) -> None:
     """Render the viewer."""
     sys.path.insert(0, str(REPO / "scripts" / "weirdchat"))
@@ -387,6 +423,7 @@ STAGES = {
     "synth": stage_synth,
     "agreement": stage_agreement,
     "predictions": stage_predictions,
+    "flags": stage_flags,
     "site": stage_site,
 }
 
