@@ -1146,13 +1146,29 @@ def read_stub(read: dict[str, Any]) -> dict[str, Any]:
     return stub
 
 
-def write_pattern_files(pat: dict[str, Any], data_dir: Path) -> list[tuple[str, int]]:
-    """data/<key>.json, splitting the agent reads into data/<key>.agent.json when over budget."""
+def pattern_samples(pat: dict[str, Any]) -> set[str]:
+    return {s for r in pat["reads"] for row in r["rows"] or [] for ss in row["samples"] for s in ss}
+
+
+def write_pattern_files(
+    pat: dict[str, Any], data_dir: Path, en: dict[str, str] | None = None
+) -> list[tuple[str, int]]:
+    """data/<key>.json (+ .agent.json when over budget, + .en.json with this pattern's translations)."""
     main_path = data_dir / f"{pat['key']}.json"
     agent_path = data_dir / f"{pat['key']}.agent.json"
+    en_path = data_dir / f"{pat['key']}.en.json"
+    written: list[tuple[str, int]] = []
+    mine = {smp: en[smp] for smp in pattern_samples(pat) if smp in en} if en else {}
+    if (
+        mine
+    ):  # translations ride beside the pattern, fetched when it opens — never inlined into the index
+        en_path.write_text(dumps(mine))
+        written.append((f"data/{en_path.name}", en_path.stat().st_size))
+        pat = dict(pat, en_file=f"data/{en_path.name}")
+    elif en_path.exists():
+        en_path.unlink()
     text = dumps(pat)
     agent_reads = [r for r in pat["reads"] if r["source"] == "agent" and r["rows"]]
-    written: list[tuple[str, int]] = []
     if len(text.encode()) > DATA_FILE_BUDGET and agent_reads:
         deferred = {r["id"] for r in agent_reads}
         split = dict(pat)
@@ -1609,7 +1625,7 @@ def build_site(
         data_dir.mkdir(exist_ok=True)
         for pat in patterns:
             pat["en"] = {t: en[t] for t in all_samples([pat]) if t in en}
-            for name, size in write_pattern_files(pat, data_dir):
+            for name, size in write_pattern_files(pat, data_dir, en):
                 sizes.append((name, size))
                 if size > DATA_FILE_BUDGET:
                     warnings.append(f"{name} is {mb(size)} > {mb(DATA_FILE_BUDGET)} budget")
@@ -1642,6 +1658,7 @@ def build_site(
         f"{len(to_translate)} cells to translate (non-Latin script) → {cells_path.name} "
         f"({mb(cells_size)}, a work file — not counted in the site total); "
         f"{len(en)} translations attached from the cache"
+        f"{'' if single else ' (as per-pattern data/<key>.en.json shards, fetched on open)'}"
         f"{' (' + str(translations) + ')' if translations else ''}"
     )
     c = data["counts"]
@@ -2248,7 +2265,8 @@ function openPattern(key, want){
   S.key = key; S.data = null; S.read = null; S.pos = null; S.compare = []; S.find = ""; $("#find").value = "";
   renderBar(); renderCtx(); renderHits(); renderNote();
   $("#text").innerHTML = `<div class="status">loading ${esc(dataUrl(key))} …</div>`; $("#posbar").innerHTML = ""; $("#gridwrap").innerHTML = "";
-  const go = data => { if (S.key !== key) return; if (!data.byId) prepareData(key, data); S.data = data; if (data.en){ D.en = D.en || {}; Object.assign(D.en, data.en); }
+  const go = data => { if (S.key !== key) return; if (!data.byId) prepareData(key, data); S.data = data;
+    if (data.en_file && !data.enLoaded){ data.enLoaded = true; fetchJson(data.en_file).then(map => { D.en = Object.assign(D.en || {}, map); if (S.key === key){ renderGrid(); if (S.below) renderBelow(); } }, () => {}); } if (data.en){ D.en = D.en || {}; Object.assign(D.en, data.en); }
     const dmStudy = data.reads.find(r => r.source==="diag" && r.reply && r.reply.side==="flagged" && r.reply.letter==="A") || data.reads.find(r => r.source==="diag" && r.label==="matched");
     const dmInv = data.reads.find(r => r.source!=="diag" && r.reply && r.reply.side==="flagged" && r.reply.letter==="A" && (r.lens||"olens")==="olens" && !r.parse_error);
     const dm = dmInv || dmStudy;
