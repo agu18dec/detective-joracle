@@ -36,12 +36,17 @@ class Settings:
     arms_file: str = str(ARMS_FILE)
     patterns: str = ""  # comma-separated keys; default = every pattern in the arms file
     n: int = 64  # samples per arm
-    max_new: int = 400
+    max_new: int = 1500  # body-located behaviors need the full reply (the study's run ~4k chars)
     judge_model: str = "google/gemini-3.8-flash"
     n_calib: int = 300  # study-labelled replies to score the judge on
     seed: int = 0
     force: bool = False
     rejudge_all: bool = False  # stage=rejudge: re-judge EVERY reply with judge_model (a judge swap)
+
+
+def _rate(a: dict[str, Any]) -> str:
+    """A rate for the table, or '—' when every judge call failed."""
+    return f"{a['rate']:.2f}" if a.get("rate") is not None else "  — "
 
 
 def _csv(s: str) -> list[str]:
@@ -139,7 +144,7 @@ def stage_run(cfg: Settings) -> None:
         out.write_text(wi.dumps(res))
         for a in res["arms"]:
             print(
-                f"[run]   {a['arm']['name']:28s} {a['k']:3d}/{a['n']:<3d} = {a['rate']:.2f} "
+                f"[run]   {a['arm']['name']:28s} {a['k']:3d}/{a['n']:<3d} = {_rate(a)} "
                 f"[{a['ci95'][0]:.2f},{a['ci95'][1]:.2f}]"
                 + (
                     f"  Δ={a['delta_vs_baseline']:+.2f} p={a['fisher_p_vs_baseline']}"
@@ -172,7 +177,7 @@ def stage_rejudge(cfg: Settings) -> None:
         for a in res["arms"]:
             delta = a.get("delta_vs_baseline")
             print(
-                f"[rejudge]   {a['arm']['name']:28s} {a['k']:3d}/{a['n']:<3d} = {a['rate']:.2f}"
+                f"[rejudge]   {a['arm']['name']:28s} {a['k']:3d}/{a['n']:<3d} = {_rate(a)}"
                 + (f"  Δ={delta:+.2f} p={a['fisher_p_vs_baseline']}" if delta is not None else ""),
                 flush=True,
             )
@@ -195,7 +200,7 @@ def stage_report(cfg: Settings) -> None:
         for a in r["arms"]:
             d_ = a["delta_vs_baseline"]
             print(
-                f"  {a['arm']['name']:28s} {a['rate']:.2f} [{a['ci95'][0]:.2f},{a['ci95'][1]:.2f}]"
+                f"  {a['arm']['name']:28s} {_rate(a)} [{a['ci95'][0]:.2f},{a['ci95'][1]:.2f}]"
                 + (
                     f"  Δ={d_:+.2f} p={a['fisher_p_vs_baseline']}"
                     if d_ is not None

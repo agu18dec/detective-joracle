@@ -100,7 +100,7 @@ def diagnose(
                 text,
                 layers=layers,
                 k=k,
-                seed=seed + s.sample_index,
+                seed=seed + len(reads),
             )
             reads.append(
                 {

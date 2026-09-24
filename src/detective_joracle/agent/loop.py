@@ -152,6 +152,7 @@ def run_tool_loop(
         {"role": "user", "content": first_user},
     ]
     reduced = False
+    forced_retries = 0
     salvaged = ""
     failures = 0
     force: str | None = None
@@ -211,6 +212,13 @@ def run_tool_loop(
             force = "finish"  # the paper's reduction step: the next turn MUST be finish()
             continue
         if over and reduced:
+            last = rec.turns[-1].content if rec.turns and rec.turns[-1].role == "tool" else ""
+            if forced_retries < 1 and last.startswith("tool error"):
+                forced_retries += (
+                    1  # the forced finish itself failed (truncated, wrong shape): once more
+                )
+                force = "finish"
+                continue
             rec.stopped_by = "budget" if rec.output_tokens >= budget.output_tokens else "max_calls"
             break
         if not calls:  # plain text with no tool call: nudge once, then it is the model's problem

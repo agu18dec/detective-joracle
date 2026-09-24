@@ -660,3 +660,86 @@ def test_concise_rewrite_keeps_keys_and_caps_length(monkeypatch: Any) -> None:
         and out["k#jlens#0"].endswith("…")
         and len(out["k#jlens#0"].split()) == wc.MAX_WORDS
     )
+
+
+def test_rejudge_everything_never_keeps_the_old_judges_verdict(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import interventions as wi
+
+    res: dict[str, Any] = {
+        "judge_model": "old",
+        "arms": [
+            {
+                "arm": {"name": "baseline", "prompt": "P"},
+                "replies": ["a", "b"],
+                "verdicts": [True, True],
+                "explanations": ["", ""],
+                "n": 2,
+                "k": 2,
+                "judge_failures": 0,
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        wi, "judge", lambda rubric, ex, model, concurrency=8: ([False, None], ["new", ""])
+    )
+    wi.rejudge(res, "rubric", model="new", everything=True)
+    a = res["arms"][0]
+    assert (
+        res["judge_model"] == "new"
+        and a["verdicts"] == [False, None]
+        and a["n"] == 1
+        and a["judge_failures"] == 1
+    )
+
+
+def test_forced_finish_gets_one_retry_when_it_errors(tmp_path: Path) -> None:
+    pat = _cached_pattern(tmp_path)
+    steps: list[tuple[str, list[tuple[str, dict[str, Any]]], int]] = [
+        ("spend", [("note", {"text": "n"})], 20_000),
+        ("cut off", [("finish", {"_raw": '{"summ'})], 40),
+        (
+            "shorter",
+            [
+                (
+                    "finish",
+                    {"mechanisms": [{"mechanism": "m", "evidence": "e", "would_test_by": "t"}]},
+                )
+            ],
+            40,
+        ),
+    ]
+    rec, _ = wex.run_explain_agent(
+        pat,
+        FakeClient(),
+        FakeBackend(steps),
+        auditor="t/a",
+        seed=0,
+        budget=Budget(1_000, 20),
+        n_side=1,
+    )
+    assert rec.result is not None and [m["mechanism"] for m in rec.result["mechanisms"]] == ["m"]
+
+
+def test_brief_uses_the_studys_sample_count_not_the_contrast_set(tmp_path: Path) -> None:
+    pat = _cached_pattern(tmp_path)
+    assert (
+        pat.n_study_samples == 8 and pat.prompt_match_rate == 0.5
+    )  # the fixture's 8 'estimate' replies
+    steps: list[tuple[str, list[tuple[str, dict[str, Any]]], int]] = [
+        (
+            "done",
+            [
+                (
+                    "finish",
+                    {"mechanisms": [{"mechanism": "m", "evidence": "e", "would_test_by": "t"}]},
+                )
+            ],
+            20,
+        ),
+    ]
+    backend = FakeBackend(steps)
+    wex.run_explain_agent(
+        pat, FakeClient(), backend, auditor="t/a", seed=0, budget=Budget(10_000, 20), n_side=1
+    )
+    first_user = backend.seen[0][1]["content"]
+    assert "sampled this prompt 8 times" in first_user and "50%" in first_user

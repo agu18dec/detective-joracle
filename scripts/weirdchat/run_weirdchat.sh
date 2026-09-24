@@ -23,10 +23,13 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   exit 1
 fi
 
-CMD="cd $REPO && PYTHONUNBUFFERED=1 PYTHONPATH=src OPENROUTER_API_KEY=$OPENROUTER_API_KEY \
-  $PY scripts/weirdchat/run_weirdchat.py stage=data,diagnose,agent,synth,site \
-  server='$SERVER' auditor='$AUDITOR' per_behavior=$PER_BEHAVIOR \"\$@\" 2>&1 | tee -a $LOG"
+EXTRA=""
+for a in "$@"; do EXTRA+=" $(printf '%q' "$a")"; done
+CMD="cd $REPO && PYTHONUNBUFFERED=1 PYTHONPATH=src \\
+  $PY scripts/weirdchat/run_weirdchat.py stage=data,diagnose,agent,synth,site \\
+  server='$SERVER' auditor='$AUDITOR' per_behavior=$PER_BEHAVIOR$EXTRA 2>&1 | tee -a $LOG"
 
-tmux new-session -d -s "$SESSION" "bash -lc \"$CMD\""
+# the key travels in the session's environment (tmux -e), never on a command line ps can read
+tmux new-session -d -s "$SESSION" -e OPENROUTER_API_KEY="$OPENROUTER_API_KEY" "bash -lc \"$CMD\""
 echo "tmux session '$SESSION' started"
 echo "monitor: tail -f $LOG"

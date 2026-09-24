@@ -177,8 +177,12 @@ def run_explain_agent(
             rubric=pattern.transcript_rubric,
             group_summary=pattern.group_summary,
             prompt=pattern.prompt,
-            match_rate=pattern.published_match_rate,
-            n_samples=len(pattern.samples),
+            match_rate=(
+                pattern.prompt_match_rate
+                if pattern.prompt_match_rate is not None
+                else pattern.published_match_rate
+            ),
+            n_samples=pattern.n_study_samples or 64,
             rollouts=rollouts,
             lens=lens is not None,
         ),

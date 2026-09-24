@@ -65,6 +65,8 @@ class ArmResult:
     replies: list[str]
     verdicts: list[bool | None]
     explanations: list[str] = field(default_factory=list)
+    truncated: list[bool] = field(default_factory=list)  # the server hit max_new on this reply
+    max_new: int = 0
 
     @property
     def n(self) -> int:
@@ -87,6 +89,9 @@ class ArmResult:
             "rate": round(self.rate, 4) if self.n else None,
             "ci95": [round(lo, 4), round(hi, 4)],
             "judge_failures": sum(1 for v in self.verdicts if v is None),
+            "max_new": self.max_new,
+            "n_truncated": sum(1 for t in self.truncated if t),
+            "truncated": self.truncated,
             "replies": self.replies,
             "verdicts": self.verdicts,
             "explanations": self.explanations,
@@ -128,12 +133,13 @@ def sample(
     seed: int = 0,
     per_call: int = 4,
     workers: int = 8,
-) -> list[str]:
-    """``n`` replies to the arm's prompt at temperature 1 (the study's setting), batched per call."""
+) -> list[tuple[str, bool]]:
+    """``n`` ``(reply, truncated)`` pairs at temperature 1 (the study's setting), batched per call.
+    ``truncated`` is the server's flag that the reply hit ``max_new``; the arm table reports it."""
     rng = random.Random(seed)
     calls = [(min(per_call, n - i), rng.randrange(1 << 30)) for i in range(0, n, per_call)]
 
-    def one(job: tuple[int, int]) -> list[str]:
+    def one(job: tuple[int, int]) -> list[tuple[str, bool]]:
         k, s = job
         res = client.chat(
             organism="base",
@@ -146,9 +152,9 @@ def sample(
             seed=s,
             mode="assistant",
         )
-        return [str(r["text"]) for r in res["replies"]]
+        return [(str(r["text"]), bool(r.get("truncated"))) for r in res["replies"]]
 
-    out: list[str] = []
+    out: list[tuple[str, bool]] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for reps in ex.map(one, calls):
             out.extend(reps)
@@ -194,11 +200,12 @@ def run_arms(
     """Sample and judge every arm of one pattern; the first arm is the baseline."""
     results: list[ArmResult] = []
     for i, arm in enumerate(arms):
-        replies = sample(client, arm, n=n, max_new=max_new, seed=seed * 1000 + i)
+        pairs = sample(client, arm, n=n, max_new=max_new, seed=seed * 1000 + i)
+        replies = [t for t, _ in pairs]
         verdicts, expl = judge(
             pattern.transcript_rubric, [(arm.prompt, r) for r in replies], model=judge_model
         )
-        results.append(ArmResult(arm, replies, verdicts, expl))
+        results.append(ArmResult(arm, replies, verdicts, expl, [tr for _, tr in pairs], max_new))
     base = results[0]
     rows = []
     for r in results:
@@ -250,6 +257,11 @@ def rejudge(
                 a["verdicts"][i] = v[j]
                 a["explanations"][i] = e[j]
                 filled += 1
+            elif (
+                everything
+            ):  # a judge swap must not leave the old judge's verdict under the new name
+                a["verdicts"][i] = None
+                a["explanations"][i] = ""
         a["n"] = sum(1 for x in a["verdicts"] if x is not None)
         a["k"] = sum(1 for x in a["verdicts"] if x)
         a["rate"] = round(a["k"] / a["n"], 4) if a["n"] else None

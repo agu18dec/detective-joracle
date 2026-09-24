@@ -62,8 +62,10 @@ class Pattern:
     group_id: str
     group_summary: str
     prompt: str
-    published_match_rate: float
+    published_match_rate: float  # WeirdChat's rate for the pattern (may span several prompts)
     elo: float
+    n_study_samples: int = 0  # the study's estimate-phase replies to THIS prompt
+    prompt_match_rate: float | None = None  # flagged share of those replies
     elo_axes: dict[str, float] = field(default_factory=dict)
     n_group_members: int = 0
     transcript_rubric: str = ""
@@ -89,6 +91,8 @@ class Pattern:
             "prompt": self.prompt,
             "published_match_rate": self.published_match_rate,
             "elo": self.elo,
+            "n_study_samples": self.n_study_samples,
+            "prompt_match_rate": self.prompt_match_rate,
             "elo_axes": dict(self.elo_axes),
             "n_group_members": self.n_group_members,
             "transcript_rubric": self.transcript_rubric,
@@ -141,7 +145,7 @@ def select_patterns(
     rollouts and the matched/unmatched contrast is mostly sampling noise. The Elo is WeirdChat's
     own interestingness ranking (naturalness + unexpectedness + harmfulness).
     """
-    keep = [r for r in rows if float(r.get("metrics", {}).get("match_rate") or 0.0) >= min_rate]
+    keep = [r for r in rows if float((r.get("metrics") or {}).get("match_rate") or 0.0) >= min_rate]
     if behaviors:
         keep = [r for r in keep if r["behavior_id"] in behaviors]
     by_behavior: dict[str, list[dict[str, Any]]] = {}
@@ -200,14 +204,18 @@ def fetch_pattern(
         order = sorted(range(len(pool)), key=lambda i: abs(i - mid))[:n_side]
         for i in sorted(order):
             s = pool[i]
+            idx = s.get("sample_index")
             samples.append(
                 Sample(
-                    sample_index=int(s.get("sample_index") or i),
+                    sample_index=int(idx) if idx is not None else i,
                     matched=side,
                     text=_clean(str(s.get("response_text") or "")),
                     phase=str(s.get("phase") or ""),
                 )
             )
+    study = [
+        s for s in detail.get("response_samples") or [] if s.get("phase") == "estimate"
+    ] or list(detail.get("response_samples") or [])
     axes = {
         str(a.get("axis")): float(a.get("elo") or 0.0)
         for a in ((row.get("interestingness") or {}).get("scores") or [])
@@ -222,6 +230,10 @@ def fetch_pattern(
         prompt=prompt,
         published_match_rate=float((row.get("metrics") or {}).get("match_rate") or 0.0),
         elo=float((row.get("interestingness") or {}).get("elo") or 0.0),
+        n_study_samples=len(study),
+        prompt_match_rate=(sum(1 for s in study if s.get("matched")) / len(study))
+        if study
+        else None,
         elo_axes=axes,
         n_group_members=int(row.get("group_member_count") or 0),
         transcript_rubric=str((detail.get("transcript_rubric") or {}).get("text") or ""),
