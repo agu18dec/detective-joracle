@@ -26,7 +26,7 @@ case "${1:?job}" in
   nla)
     tmux new -d -s wc-diag-nla \
       "PYTHONUNBUFFERED=1 $PY scripts/weirdchat/run_weirdchat.py stage=diagnose diag_lens=nla \
-       server=$LENS nla=$NLA workers=2 2>&1 | tee logs/diag_nla_$TS.log";;
+       server=$LENS nla=$NLA workers=${WORKERS:-2} 2>&1 | tee logs/diag_nla_$TS.log";;
   *) echo "unknown job $1"; exit 2;;
 esac
 echo "started $1 — tail -f logs/*_$TS.log"
