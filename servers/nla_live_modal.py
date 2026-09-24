@@ -42,7 +42,12 @@ for _p in (
         sys.path.insert(0, str(_p))
 from runner_common import hf_secrets  # noqa: E402
 
-hf_cache = modal.Volume.from_name("jlens-hf-cache", create_if_missing=True)
+# MODAL_DATA_ENV: mount the volume of another Modal environment (weights live in "main")
+hf_cache = modal.Volume.from_name(
+    "jlens-hf-cache",
+    environment_name=os.environ.get("MODAL_DATA_ENV") or None,
+    create_if_missing=True,
+)
 
 LENS = "nla-rl400"
 LAYER = 42
@@ -50,7 +55,9 @@ BATCH_POS = 48
 MAX_ROWS = 4096
 MIN_CONTAINERS = int(os.environ.get("AB_NLA_MIN", "0"))
 
-app = modal.App("auditbench-nla-live")
+# AB_NLA_APP: a short name keeps the web hostname under Modal's 63-char label limit when the
+# workspace name carries an environment suffix (e.g. AB_NLA_APP=nla)
+app = modal.App(os.environ.get("AB_NLA_APP", "auditbench-nla-live"))
 # wsbench_nla_modal.image, rebuilt with fastapi in the pip stage: Modal refuses a build step
 # after add_local_*, and the web endpoint needs fastapi in the image.
 image = (
@@ -93,11 +100,15 @@ image = (
     timeout=6 * 3600,
     scaledown_window=60 * 60,
     min_containers=MIN_CONTAINERS,
-    max_containers=4,
+    max_containers=int(os.environ.get("AB_NLA_MAX", "6")),
     memory=131072,
     cpu=8,
 )
-@modal.concurrent(max_inputs=4)
+# ONE request per container: the injector hook (NormMatchInjector) and the generator are shared
+# state on the instance, so two concurrent verbalize calls overwrite each other's vectors — a shape
+# error when the batch sizes differ, silently cross-contaminated readouts when they match
+# (seen 2026-09-24 under 6 parallel readers). Throughput comes from containers, not threads.
+@modal.concurrent(max_inputs=1)
 class NLA:
     @modal.enter()
     def load(self) -> None:
@@ -120,6 +131,17 @@ class NLA:
         self.injector = NormMatchInjector(self.model, mp)
         self._ids = ids
         self._mk = make_generator
+        # One serial warm-up generation before the endpoint opens: torch's lazily-initialised
+        # linalg kernels (solve_triangular in the gated delta rule) raise "lazy wrapper should be
+        # called at most once" when a fresh container's first calls arrive concurrently.
+        import torch
+
+        try:
+            warm = make_generator(self.model, self.tok, ids, self.injector, self.spec)
+            warm(torch.zeros(1, self.model.config.hidden_size, device="cuda"))
+            print(f"[nla-live] warm-up generation ok", flush=True)
+        except Exception as e:  # the endpoint still opens; the first real call will show the error
+            print(f"[nla-live] warm-up failed: {type(e).__name__}: {e}", flush=True)
         print(f"[nla-live] {LENS} ready, prompt {len(ids)} toks, marker {mp}", flush=True)
 
     @modal.fastapi_endpoint(method="POST")
@@ -139,8 +161,14 @@ class NLA:
 
         spec = dataclasses.replace(self.spec, k=k)
         generate = self._mk(
-            self.model, self.tok, self._ids, self.injector, spec,
-            temperature=float(req.get("temperature", 1.0)), top_p=0.95, top_k=0,
+            self.model,
+            self.tok,
+            self._ids,
+            self.injector,
+            spec,
+            temperature=float(req.get("temperature", 1.0)),
+            top_p=0.95,
+            top_k=0,
         )
         torch.manual_seed(int(req.get("seed") or 0))
         out: list = []

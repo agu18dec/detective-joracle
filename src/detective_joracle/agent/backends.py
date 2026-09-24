@@ -148,9 +148,10 @@ def _gemini_extra() -> dict[str, Any]:
     return extra
 
 
-def make_backend_factory(kind: str) -> Callable[[str], Backend]:
+def make_backend_factory(kind: str, *, max_tokens: int = 4000) -> Callable[[str], Backend]:
     """``openrouter`` -> an OpenAI client on OpenRouter (``OPENROUTER_API_KEY`` per command);
-    ``openai`` -> a plain client on ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``."""
+    ``openai`` -> a plain client on ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``. ``max_tokens`` caps
+    one turn's output; a ``finish`` whose arguments outgrow it comes back as invalid JSON."""
     from openai import OpenAI
 
     if kind == "openrouter":
@@ -174,7 +175,11 @@ def make_backend_factory(kind: str) -> Callable[[str], Backend]:
         if kind == "openrouter" and "gemini" in model:
             extra.update(_gemini_extra())
         return openai_compatible_backend(
-            client, model, extra_body=extra, cache=model.startswith("anthropic/")
+            client,
+            model,
+            extra_body=extra,
+            max_tokens=max_tokens,
+            cache=model.startswith("anthropic/"),
         )
 
     return factory

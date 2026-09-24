@@ -83,6 +83,7 @@ DEFAULT_LAYERS = (20, 36, 44, 52, 60)
 # of the conversation at all 11 layers. A 25-token question with a 256-token reply is ~300
 # positions = ~3300 cells, so the cap has to clear that or "every position" quietly becomes a
 # sample. Thinning, when it does bite, only ever drops positions — never layers.
+MIN_CONTAINERS = int(os.environ.get("AB_ORG_MIN", "0"))  # pin a warm container (AB_ORG_MIN=1)
 MAX_CELLS = 4400
 MAX_K = 4
 MAX_N = 4
@@ -119,6 +120,8 @@ image = (
         "accelerate>=1.0",
         "peft>=0.18",
         "fastapi[standard]",
+        "requests>=2.32",  # detective_joracle.tools.live (imported by the server) needs it
+        "openai>=1.0",
     )
     .env(
         {
@@ -133,12 +136,25 @@ image = (
     .add_local_dir(str(LENS_STACK / "src"), f"{APP_REPO}/src", ignore=["**/__pycache__"])
     # this repository's package (position tags, held-out prompts, the byte-level decoder)
     .add_local_dir(str(REPO / "src"), f"{APP_REPO}/joracle/src", ignore=["**/__pycache__"])
-    .add_local_file(str(LENS_STACK / "scripts" / "olens_suite" / "runner_common.py"), "/root/runner_common.py")
     .add_local_file(
-        str(LENS_STACK / "scripts" / "olens_suite" / "workspace_bench" / "wsbench_capture_modal.py"),
+        str(LENS_STACK / "scripts" / "olens_suite" / "runner_common.py"), "/root/runner_common.py"
+    )
+    .add_local_file(
+        str(
+            LENS_STACK / "scripts" / "olens_suite" / "workspace_bench" / "wsbench_capture_modal.py"
+        ),
         "/root/wsbench_capture_modal.py",
     )
 )
+if os.environ.get("MODAL_DATA_ENV"):  # deploy in one environment, read the weights from another
+    hf_cache = modal.Volume.from_name(
+        "jlens-hf-cache", environment_name=os.environ["MODAL_DATA_ENV"], create_if_missing=True
+    )
+    organisms_vol = modal.Volume.from_name(
+        "auditbench-organisms",
+        environment_name=os.environ["MODAL_DATA_ENV"],
+        create_if_missing=True,
+    )
 volumes: dict[str | PurePosixPath, modal.Volume] = {
     PurePosixPath(HF_MOUNT): hf_cache,
     PurePosixPath(ORG_MOUNT): organisms_vol,
@@ -165,7 +181,10 @@ def plain_adapter_dir(src: Path) -> Path:
         return src
     dst = Path("/root/ao_plain")
     dst.mkdir(parents=True, exist_ok=True)
-    save_file({k.replace("_orig_mod.", ""): v for k, v in weights.items()}, str(dst / "adapter_model.safetensors"))
+    save_file(
+        {k.replace("_orig_mod.", ""): v for k, v in weights.items()},
+        str(dst / "adapter_model.safetensors"),
+    )
     (dst / "adapter_config.json").write_text((src / "adapter_config.json").read_text())
     print(f"[server] stripped _orig_mod. from {len(weights)} AO keys -> {dst}", flush=True)
     return dst
@@ -180,6 +199,7 @@ def plain_adapter_dir(src: Path) -> Path:
     cpu=8,
     secrets=hf_secrets(),
     max_containers=MAX_CONTAINERS,
+    min_containers=MIN_CONTAINERS,
     scaledown_window=900,
 )
 @modal.concurrent(max_inputs=1)
@@ -213,8 +233,13 @@ class Organism:
         self.blocks = R.resolve_blocks(self.model)
         self.wv = {e: renderer_for(self.contract.prompt_kind)(self.tok, layer=e) for e in AO_LAYERS}
         self.sample_rows = R.make_sampler(
-            self.model, self.tok, self.wv, 0.0, self.dev,
-            transform=self.contract.transform, alpha=self.contract.alpha,
+            self.model,
+            self.tok,
+            self.wv,
+            0.0,
+            self.dev,
+            transform=self.contract.transform,
+            alpha=self.contract.alpha,
         )
         self.ctl = ControlIds.from_tokenizer(self.tok)
         self.eos = int(self.ctl.im_end)
@@ -222,7 +247,9 @@ class Organism:
         self.jac = stacked_jacobians(lens, device=self.dev, dtype=torch.float32)
         self.w_u = base.lm_head.weight.detach().float()
         self.lm_head = base.lm_head
-        self.final_norm = base.model.norm if hasattr(base.model, "norm") else base.model.language_model.norm
+        self.final_norm = (
+            base.model.norm if hasattr(base.model, "norm") else base.model.language_model.norm
+        )
         self.n_layers = int(base.config.num_hidden_layers)
         self.denom = jlens_token_norms(self.jac, self.w_u)
         from detective_joracle.util.text import decode_byte_level
@@ -235,7 +262,8 @@ class Organism:
         self.loaded: set[str] = set()
         print(
             f"[server] ready: contract={CONTRACT_NAME} J={tuple(self.jac.shape)} "
-            f"W_U={tuple(self.w_u.shape)}", flush=True,
+            f"W_U={tuple(self.w_u.shape)}",
+            flush=True,
         )
 
     # -- adapters
@@ -277,9 +305,13 @@ class Organism:
     def fixed(self, req: dict) -> dict:
         """The precomputed fixed-prompt readouts for (organism, lens, layer, k) — see
         ``_precompute_fixed``; the paper's ``get_fixed_prompt_*_analysis`` tool is this file."""
-        p = fixed_path(str(req.get("organism") or "base"), str(req.get("lens") or "olens"),
-                       [int(x) for x in (req.get("layers") or [FIXED_LAYER])],
-                       int(req.get("k") or FIXED_K), str(req.get("prompts") or "heldout"))
+        p = fixed_path(
+            str(req.get("organism") or "base"),
+            str(req.get("lens") or "olens"),
+            [int(x) for x in (req.get("layers") or [FIXED_LAYER])],
+            int(req.get("k") or FIXED_K),
+            str(req.get("prompts") or "heldout"),
+        )
         organisms_vol.reload()
         if not p.exists():
             return {"error": f"not precomputed: {p}"}
@@ -323,7 +355,10 @@ class Organism:
         tensors: dict[str, torch.Tensor] = {}
         rows = []
         for i, r in enumerate(load_held_out_prompts()):
-            msgs = [{"role": "system", "content": PRISM_SYSTEM}, {"role": "user", "content": r["prompt"]}]
+            msgs = [
+                {"role": "system", "content": PRISM_SYSTEM},
+                {"role": "user", "content": r["prompt"]},
+            ]
             text = self.tok.apply_chat_template(
                 msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False
             )
@@ -332,17 +367,30 @@ class Organism:
             tokens = self.tok.convert_ids_to_tokens(id_list)
             dense = position_set_all(id_list, tokens, self.ctl)
             regions = regions_of(id_list, tokens, self.ctl)
-            with torch.no_grad(), self._active(tag), ActivationRecorder(self.blocks, at=layers) as rec:
+            with (
+                torch.no_grad(),
+                self._active(tag),
+                ActivationRecorder(self.blocks, at=layers) as rec,
+            ):
                 self.model(ids.to(self.dev), use_cache=False)
                 for e in layers:
                     tensors[f"f{i:02d}/L{e}"] = rec.activations[e][0].to(torch.float16).cpu()
-            rows.append({
-                "id": f"f{i:02d}", "user": r["prompt"], "n_tokens": len(id_list),
-                "tokens": {str(p): decode_byte_level(tokens[p]) for p in range(len(id_list))},
-                "tags": {str(p): dense.get(p, PositionTag(regions[p], regions[p])).to_json() for p in range(len(id_list))},
-            })
+            rows.append(
+                {
+                    "id": f"f{i:02d}",
+                    "user": r["prompt"],
+                    "n_tokens": len(id_list),
+                    "tokens": {str(p): decode_byte_level(tokens[p]) for p in range(len(id_list))},
+                    "tags": {
+                        str(p): dense.get(p, PositionTag(regions[p], regions[p])).to_json()
+                        for p in range(len(id_list))
+                    },
+                }
+            )
         save_file(tensors, str(st_path))
-        js_path.write_text(json.dumps({"organism": tag, "layers": layers, "prompts": rows}, ensure_ascii=False))
+        js_path.write_text(
+            json.dumps({"organism": tag, "layers": layers, "prompts": rows}, ensure_ascii=False)
+        )
         organisms_vol.commit()
         return {"path": str(st_path), "cached": False, "n_prompts": len(rows)}
 
@@ -358,29 +406,65 @@ class Organism:
         layers = [int(x) for x in (req.get("layers") or [FIXED_LAYER])]
         k = int(req.get("k") or FIXED_K)
         which = str(req.get("prompts") or "heldout")  # heldout = the paper's K.13 set
-        positions = str(req.get("positions") or "all")  # all = every position incl. the system prompt
+        positions = str(
+            req.get("positions") or "all"
+        )  # all = every position incl. the system prompt
         out_path = fixed_path(tag, lens, layers, k, which)
         organisms_vol.reload()
         if out_path.exists() and not req.get("force"):
             return {"path": str(out_path), "cached": True}
         if which != "heldout":
-            return {"error": f"unknown prompt set {which!r}; this server precomputes the held-out set"}
+            return {
+                "error": f"unknown prompt set {which!r}; this server precomputes the held-out set"
+            }
         users = [r["prompt"] for r in load_held_out_prompts()]
         rows = []
         for i, user in enumerate(users):
             msgs = [{"role": "system", "content": PRISM_SYSTEM}, {"role": "user", "content": user}]
-            r = self._readout({"organism": tag, "messages": msgs, "completion": "", "positions": positions,
-                               "layers": layers, "k": k, "lens": lens, "seed": i,
-                               "max_new": 64, "temperature": 1.0, "_internal": True, "max_cells": 8192})
+            r = self._readout(
+                {
+                    "organism": tag,
+                    "messages": msgs,
+                    "completion": "",
+                    "positions": positions,
+                    "layers": layers,
+                    "k": k,
+                    "lens": lens,
+                    "seed": i,
+                    "max_new": 64,
+                    "temperature": 1.0,
+                    "_internal": True,
+                    "max_cells": 8192,
+                }
+            )
             if "error" in r:
                 return r
-            rows.append({"id": f"f{i:02d}", "user": user, "n_tokens": r["n_tokens"],
-                         "tokens": r["tokens"], "tags": r["tags"], "readouts": r["readouts"],
-                         "extra": r.get("extra", {})})
+            rows.append(
+                {
+                    "id": f"f{i:02d}",
+                    "user": user,
+                    "n_tokens": r["n_tokens"],
+                    "tokens": r["tokens"],
+                    "tags": r["tags"],
+                    "readouts": r["readouts"],
+                    "extra": r.get("extra", {}),
+                }
+            )
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps({"organism": tag, "lens": lens, "layers": layers, "k": k,
-                                        "prompts_set": which, "positions": positions, "prompts": rows},
-                                       ensure_ascii=False))
+        out_path.write_text(
+            json.dumps(
+                {
+                    "organism": tag,
+                    "lens": lens,
+                    "layers": layers,
+                    "k": k,
+                    "prompts_set": which,
+                    "positions": positions,
+                    "prompts": rows,
+                },
+                ensure_ascii=False,
+            )
+        )
         organisms_vol.commit()
         return {"path": str(out_path), "cached": False, "n_prompts": len(rows)}
 
@@ -399,13 +483,20 @@ class Organism:
         max_new = max(1, min(int(req.get("max_new") or 256), MAX_NEW_CHAT))
         mode = str(req.get("mode") or "assistant")
         if mode == "assistant":  # the model answers as the assistant (optionally prefilled)
-            text = self.tok.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-            ) + prefill
+            text = (
+                self.tok.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+                )
+                + prefill
+            )
         elif mode == "user_turn":  # user-persona sampling: the model writes the NEXT USER turn
-            text = self.tok.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
-            ) + "<|im_start|>user\n" + prefill
+            text = (
+                self.tok.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
+                )
+                + "<|im_start|>user\n"
+                + prefill
+            )
         elif mode == "raw":  # text completion: no chat formatting at all
             text = str(req.get("text") or "") + prefill
         else:
@@ -425,7 +516,7 @@ class Organism:
         with torch.no_grad(), self._active(tag):
             out = self.model.generate(input_ids=ids, **gen)
         replies = []
-        for row in out[:, ids.shape[1]:].tolist():
+        for row in out[:, ids.shape[1] :].tolist():
             cut = row.index(self.eos) if self.eos in row else len(row)
             replies.append(
                 {
@@ -434,11 +525,24 @@ class Organism:
                     "truncated": self.eos not in row,
                 }
             )
-        return {"replies": replies, "n_prompt_tokens": int(ids.shape[1]), "organism": tag, "mode": mode}
+        return {
+            "replies": replies,
+            "n_prompt_tokens": int(ids.shape[1]),
+            "organism": tag,
+            "mode": mode,
+        }
 
     def sample_layers(
-        self, layers: list, acts: dict, pos_t, k: int, seed: int, max_new: int,
-        temperature: float = 0.8, top_p: float = 0.95, batch: int = 0,
+        self,
+        layers: list,
+        acts: dict,
+        pos_t,
+        k: int,
+        seed: int,
+        max_new: int,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+        batch: int = 0,
     ) -> dict:
         """OLens readouts for MANY layers in ONE generate call.
 
@@ -480,8 +584,12 @@ class Organism:
                 at = torch.ones(ch.shape[0], ch.shape[1], dtype=torch.long, device=self.dev)
                 with torch.no_grad():
                     g = self.model.generate(
-                        inputs_embeds=ch, attention_mask=at, max_new_tokens=max_new,
-                        do_sample=True, temperature=temperature, top_p=top_p,
+                        inputs_embeds=ch,
+                        attention_mask=at,
+                        max_new_tokens=max_new,
+                        do_sample=True,
+                        temperature=temperature,
+                        top_p=top_p,
                         pad_token_id=self.tok.eos_token_id,
                     )
                 texts += self.tok.batch_decode(g, skip_special_tokens=True)
@@ -542,7 +650,9 @@ class Organism:
             sel = dict(position_set(id_list, tokens, self.ctl))
         elif spec == "all":
             sel = dict(dense)
-        elif spec == "everything":  # every token incl. the system prompt (paper's fixed-prompt tools)
+        elif (
+            spec == "everything"
+        ):  # every token incl. the system prompt (paper's fixed-prompt tools)
             from detective_joracle.tools.positions import PositionTag, regions_of
 
             regions = regions_of(id_list, tokens, self.ctl)
@@ -570,8 +680,13 @@ class Organism:
                 rows = acts[e][pos_t].to(torch.float16).cpu().contiguous()
                 vectors[str(e)] = base64.b64encode(rows.numpy().tobytes()).decode("ascii")
             return {
-                "n_tokens": n, "organism": tag, "lens": "acts", "n_matched": n_matched,
-                "positions": pos, "d": int(acts[layers[0]].shape[-1]), "dtype": "float16",
+                "n_tokens": n,
+                "organism": tag,
+                "lens": "acts",
+                "n_matched": n_matched,
+                "positions": pos,
+                "d": int(acts[layers[0]].shape[-1]),
+                "dtype": "float16",
                 "tokens": {str(p): decode_byte_level(tokens[p]) for p in pos},
                 "tags": {str(p): sel[p].to_json() for p in pos},
                 "vectors": vectors,
@@ -597,14 +712,19 @@ class Organism:
                 kl = (logp.exp() * (logp - logp_final)).sum(-1).tolist()
                 top = torch.topk(logits, JLENS_TOPK, dim=-1).indices.tolist()
                 readouts[str(e)] = {
-                    str(p): [" | ".join(self.display[t] for t in top[pi])] for pi, p in enumerate(pos)
+                    str(p): [" | ".join(self.display[t] for t in top[pi])]
+                    for pi, p in enumerate(pos)
                 }
                 extra[str(e)] = {str(p): round(float(kl[pi]), 3) for pi, p in enumerate(pos)}
             return {
-                "n_tokens": n, "organism": tag, "lens": lens, "n_matched": n_matched,
+                "n_tokens": n,
+                "organism": tag,
+                "lens": lens,
+                "n_matched": n_matched,
                 "tokens": {str(p): decode_byte_level(tokens[p]) for p in pos},
                 "tags": {str(p): sel[p].to_json() for p in pos},
-                "readouts": readouts, "extra": {"kl": extra},
+                "readouts": readouts,
+                "extra": {"kl": extra},
             }
         else:
             lt = torch.tensor(layers, dtype=torch.long, device=self.dev)
@@ -628,28 +748,65 @@ class Organism:
 
 
 @app.local_entrypoint()
-def main(organism: str = "base", precompute: str = "", lens: str = "olens", layers: str = str(FIXED_LAYER), k: int = FIXED_K, prompts: str = "heldout", positions: str = "everything") -> None:
+def main(
+    organism: str = "base",
+    precompute: str = "",
+    lens: str = "olens",
+    layers: str = str(FIXED_LAYER),
+    k: int = FIXED_K,
+    prompts: str = "heldout",
+    positions: str = "everything",
+) -> None:
     """``--precompute a,b,c``: fixed-prompt readouts for those organisms (fan-out, one per
     container); otherwise a smoke chat + readouts on ``--organism``."""
     if precompute:
         tags = [t for t in precompute.split(",") if t]
         lay = [int(x) for x in layers.split(",") if x]
-        kind = "acts" if lens == "acts" else "fixed"  # --lens acts: raw residuals for the NLA server
-        reqs = [(kind, {"organism": t, "lens": lens, "layers": lay, "k": k, "prompts": prompts,
-                        "positions": positions}) for t in tags]
+        kind = (
+            "acts" if lens == "acts" else "fixed"
+        )  # --lens acts: raw residuals for the NLA server
+        reqs = [
+            (
+                kind,
+                {
+                    "organism": t,
+                    "lens": lens,
+                    "layers": lay,
+                    "k": k,
+                    "prompts": prompts,
+                    "positions": positions,
+                },
+            )
+            for t in tags
+        ]
         for t, r in zip(tags, Organism().call.starmap(reqs), strict=True):
             print(f"[fixed] {t}: {r}", flush=True)
         return
     """Smoke: one chat + one olens readout + one jlens readout over the Modal RPC."""
     srv = Organism()
-    msgs = [{"role": "user", "content": "I just got promoted to senior engineer! Can you explain how a hash map works?"}]
-    r = srv.call.remote("chat", {"organism": organism, "messages": msgs, "n": 2, "max_new": 120, "seed": 1})
+    msgs = [
+        {
+            "role": "user",
+            "content": "I just got promoted to senior engineer! Can you explain how a hash map works?",
+        }
+    ]
+    r = srv.call.remote(
+        "chat", {"organism": organism, "messages": msgs, "n": 2, "max_new": 120, "seed": 1}
+    )
     print(json.dumps(r, ensure_ascii=False, indent=1)[:1500])
     completion = r["replies"][0]["text"]
     for lens in ("olens", "jlens"):
         ro = srv.call.remote(
             "readout",
-            {"organism": organism, "messages": msgs, "completion": completion, "positions": "boundary",
-             "layers": [36, 52], "k": 2, "lens": lens, "seed": 1},
+            {
+                "organism": organism,
+                "messages": msgs,
+                "completion": completion,
+                "positions": "boundary",
+                "layers": [36, 52],
+                "k": 2,
+                "lens": lens,
+                "seed": 1,
+            },
         )
         print(f"== {lens}", json.dumps(ro, ensure_ascii=False, indent=1)[:2500])

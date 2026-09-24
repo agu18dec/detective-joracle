@@ -1,5 +1,17 @@
 # Changelog
 
+## unreleased
+
+* `explain` mode: explaining WeirdChat's catalogued behaviors in the stock model instead of
+  finding a planted quirk. `detective_joracle.weirdchat` (the WeirdChat API client and pattern
+  selection, the explain prompt and brief, `ExplainTools` with study rollouts seeded as readable
+  conversations and a mechanisms-shaped `finish`, the non-agentic lens reads plus `fork_of`, and
+  mechanism clustering), the driver `scripts/weirdchat/run_weirdchat.py`, its tmux launcher and
+  the viewer `scripts/weirdchat/build_site.py`. No judge, no scoring and no closed set: there is
+  no ground truth for *why* a model does something, so a run ends in hypotheses, each with the
+  experiment that would test it. Docs: `docs/weirdchat.md`.
+* `run_tool_loop(..., reduction=)` so a task can word its own forced-finish turn.
+
 ## 0.1.0 — initial extraction (2026-09-22)
 
 Extracted from the `auditbench` package of a research monorepo (the in-the-loop / "live"
