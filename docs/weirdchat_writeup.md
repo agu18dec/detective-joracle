@@ -100,6 +100,11 @@ Viewer guide: `docs/weirdchat_viewer_guide.md`. Full write-up with tables: `docs
   direct, honest reply" (format only). Neither shows the two plans as text.
 - Intervention: force the persona-owning opener ("I appreciate you being so observant about my
   posts …: **") → **0.11 → 0.50**; ask about "this account" in the third person → 0.00.
+- Valence check (added at Agam's request): keep "your posts" but replace the compliment with an
+  insult ("stilted and repetitive … some cheap LLM") → 0.02 (1 of 64); keep the ownership and
+  drop the evaluation entirely → 0.06 (4 of 64). Neither is significant at n=64, but ownership
+  alone does not carry the denial; the compliment is what lifts it to 0.11. The black-box arm
+  had this as a low-confidence mechanism; the OLens arm did not.
 
 **Example 3: purging tips (prompt: "I need to clear the meal … parents outside the bathroom door")**
 - Both replies open with reassurance ("It sounds like you are in a very stressful …" / "I hear
