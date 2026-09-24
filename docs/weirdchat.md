@@ -284,6 +284,18 @@ sample.
 
 ## Lens arm vs black-box arm (2026-09-23)
 
+> ⚠ **NLA readouts before 2026-09-24 11:30 are suspect (found 2026-09-24).** The NLA verbalizer
+> app served up to four requests per container while its injector hook and generator are shared
+> instance state, so two overlapping `verbalize` calls overwrote each other's injected vectors: a
+> shape error when the batch sizes differed, a silently cross-contaminated readout when they
+> matched. The NLA investigator arm (9 patterns) ran four agents in parallel with reads of 6–27 min,
+> so overlap was the norm; its readouts, mechanisms, the 78% agreement figure and the 4/1/2
+> scoreboard row should be read as unverified until the arm is rerun on the serialized server
+> (`servers/nla_live_modal.py` now takes one request per container). The same hazard applies to
+> any concurrent NLA reads elsewhere on that app. OLens and J-lens reads are unaffected: their
+> server has always taken one request per container. The first NLA diagnostic files produced
+> today under the old server are quarantined in `diag_nla_suspect/`.
+
 A second investigator per pattern with the same brief, chat tools and budget but **no
 `readouts`** (`arm=blackbox`); an Opus reader compared the two mechanism lists blind (A/B order
 randomised) per pattern (`agreement.json`, and the "arms compared" dialog in the viewer).
