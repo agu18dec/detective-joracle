@@ -122,15 +122,21 @@ def sorted_int_keys(mapping: dict[str, Any]) -> list[str]:
 # -------------------------------------------------------------------- reads
 # one read = {id, source, label, conv_id, messages, completion, layers, rows, fork_pos, …};
 # rows = [{pos, tok, region, kind, samples: [[str, …] per layer]}] in position order
-def samples_of(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [clip(as_text(v), CELL_CAP) for v in value if as_text(v)]
-    text = as_text(value)
-    return [clip(text, CELL_CAP)] if text else []
+def samples_of(value: Any, lens: str = "olens") -> list[str]:
+    texts = (
+        [as_text(v) for v in value if as_text(v)]
+        if isinstance(value, list)
+        else ([as_text(value)] if as_text(value) else [])
+    )
+    if (
+        lens in BAG_LENSES
+    ):  # a J-lens cell is a pipe-joined token bag; NLA cells may join k samples the same way
+        texts = [part for t in texts for part in t.split(" | ") if part]
+    return [clip(t, CELL_CAP) for t in texts]
 
 
-def diag_read(entry: dict[str, Any]) -> dict[str, Any]:
-    """One diagnostic read: the exact conversation read plus its per-position, per-layer grid."""
+def diag_read(entry: dict[str, Any], lens: str = "olens") -> dict[str, Any]:
+    """One diagnostic read (OLens, J-lens or NLA pass): the exact conversation read plus its grid."""
     conv = as_dict(entry.get("conversation"))
     readout = as_dict(entry.get("readout"))
     tokens = as_dict(readout.get("tokens"))
@@ -149,13 +155,16 @@ def diag_read(entry: dict[str, Any]) -> dict[str, Any]:
                 "tok": as_text(tokens.get(pos)),
                 "region": as_text(tag.get("region")) or "—",
                 "kind": as_text(tag.get("kind")),
-                "samples": [samples_of(as_dict(by_layer.get(L)).get(pos)) for L in layer_keys],
+                "samples": [
+                    samples_of(as_dict(by_layer.get(L)).get(pos), lens) for L in layer_keys
+                ],
             }
         )
     label = as_text(entry.get("label")) or "read"
     sample_index = as_int(entry.get("sample_index"))
+    idx = sample_index if sample_index is not None else "?"
     return {
-        "id": f"diag:{label}:{sample_index if sample_index is not None else '?'}",
+        "id": f"diag:{label}:{idx}" if lens == "olens" else f"diag:{lens}:{label}:{idx}",
         "source": "diag",
         "label": label,
         "sample_index": sample_index,
@@ -168,7 +177,7 @@ def diag_read(entry: dict[str, Any]) -> dict[str, Any]:
         ],
         "completion": as_text(conv.get("completion")),
         "text_source": "diag",
-        "lens": as_text(readout.get("lens")) or "olens",
+        "lens": lens,
         "layers": [as_int(k) if as_int(k) is not None else k for k in layer_keys],
         "rows": rows,
         "claimed": {"positions": as_int(readout.get("n_tokens")), "layers": len(layer_keys)},
@@ -579,7 +588,13 @@ def pattern_of(path: Path, out_root: Path, concise: dict[str, str] | None = None
     diag = read_json(out_root / "diag" / f"{key}.json") or {}
     fork = as_dict(diag.get("fork"))
     reads = [diag_read(as_dict(r)) for r in as_list(diag.get("reads"))]
-    diag_reads = list(reads)
+    diag_reads = list(reads)  # OLens study reads: the twins of the investigator's w### reads
+    for lens in (
+        "jlens",
+        "nla",
+    ):  # the J-lens / NLA diagnostic passes, same schema, land as diag_<lens>/<key>.json
+        extra = read_json(out_root / f"diag_{lens}" / f"{key}.json") or {}
+        reads += [diag_read(as_dict(r), lens) for r in as_list(extra.get("reads"))]
     used_ids = {r["id"] for r in reads}
     runs = []
     run_root = out_root / "runs" / key
@@ -1533,7 +1548,9 @@ def build_site(
     }
 
     def lens_key(r: dict[str, Any]) -> str:
-        return "study" if r["source"] == "diag" else (r["lens"] or "olens")
+        if r["source"] == "diag":
+            return "study" if (r["lens"] or "olens") == "olens" else f"{r['lens']}-study"
+        return r["lens"] or "olens"
 
     coverage = {
         (side, lk): sum(
@@ -1549,13 +1566,13 @@ def build_site(
             )
         )
         for side in ("flagged", "clean")
-        for lk in ("study", "olens", "jlens", "nla")
+        for lk in ("study", "olens", "jlens", "jlens-study", "nla", "nla-study")
     }
     print(
         "matrix coverage (patterns with a read of reply A): "
         + " · ".join(
             f"{lk} {coverage[('flagged', lk)]}/{coverage[('clean', lk)]} (flagged/clean)"
-            for lk in ("study", "olens", "jlens", "nla")
+            for lk in ("study", "olens", "jlens", "jlens-study", "nla", "nla-study")
         )
     )
     n_iv = sum(1 for p in patterns if p["interventions"])
@@ -2139,7 +2156,7 @@ const SHORT_BY_TEXT = {}; for (const p of (D.patterns||[])) for (const run of (p
 function shortFor(text){ return SHORT_BY_TEXT[text] || shortOf({mechanism: text}); }
 function nameOfId(id, key){
   const pat = byKey[key || S.key];
-  const m = String(id).match(/^diag:(\w+):(\d+)/); if (m){ const rep = replyBySample(pat, +m[2]); return (rep ? replyLabelOf(rep) : `${side(m[1])} · sample ${m[2]}`) + " · study read"; }
+  const m = String(id).match(/^diag:(?:(jlens|nla):)?(\w+):(\d+)/); if (m){ const rep = replyBySample(pat, +m[3]); return (rep ? replyLabelOf(rep) : `${side(m[2])} · sample ${m[3]}`) + " · study read" + (m[1] ? ` (${LENS_SHORT[m[1]] || m[1]})` : ""); }
   const a = String(id).match(/^agent:(?:(\w+):)?([wc]\d+[mu]?)/); if (!a) return String(id);
   const lens = LENS_SHORT[a[1] || "olens"] || a[1] || "OLens";
   const rep = replyByCid(pat, a[2]); if (rep) return `${replyLabelOf(rep)} · investigator's read (${lens})`;
@@ -2148,7 +2165,7 @@ function nameOfId(id, key){
 function lensName(r){ return LENS_SHORT[r.lens || "olens"] || r.lens || "OLens"; }
 function readName(r){
   const rep = r.reply || (r.source === "diag" ? replyBySample(byKey[S.key], r.sample_index) : replyByCid(byKey[S.key], r.conv_id));
-  if (r.source === "diag") return rep ? `${replyLabelOf(rep)} · study read` : `${side(r.label)} · sample ${r.sample_index} · study read`;
+  if (r.source === "diag"){ const lt = (r.lens||"olens") === "olens" ? "" : ` (${lensName(r)})`; return rep ? `${replyLabelOf(rep)} · study read${lt}` : `${side(r.label)} · sample ${r.sample_index} · study read${lt}`; }
   if (rep) return `${replyLabelOf(rep)} · investigator's read (${lensName(r)}${(r.lens||"olens") === "olens" ? ", same reply, other sample" : ""})`;
   return `probe ${parseInt(String(r.conv_id||"").replace(/^c/, ""), 10) || r.conv_id}${(r.lens||"olens") !== "olens" ? " (" + lensName(r) + ")" : ""}`;
 }
@@ -2168,26 +2185,29 @@ const LENS_TIP = {olens: "OLens · investigator's read — the sample the agent 
 const LENS_COL = {study: "OLens · study read (Gemini quotes verified here)", olens: "OLens · investigator's read", jlens: "J-lens", nla: "NLA L42"};
 const FALLBACK_COL = "OLens · study read (investigator did not read this reply)";
 const LENS_COL_SHORT = {study: "OLens · study read", olens: "OLens · investigator", jlens: "J-lens", nla: "NLA L42"};
-function lensKey(r){ return r.source === "diag" ? "study" : (r.lens || "olens"); }
+function lensKey(r){ return r.source === "diag" && (r.lens || "olens") === "olens" ? "study" : (r.lens || "olens"); }
+const isStudyOlens = r => r && r.source === "diag" && (r.lens || "olens") === "olens";
 function groupOf(r){ return r.reply ? `${r.reply.side} reply ${r.reply.letter}` : "probes"; }
 function readDotOrPh(c){ return c.placeholder ? "ph" : readDot(c); }
 function shownReply(){ const r = curRead(); return r && r.reply ? {side: r.reply.side, letter: r.reply.letter} : null; }
 function matrixReads(){ const shown = shownReply(); const out = []; S.fallback = new Set(); if (!shown || !S.data) return out;
-  for (const r of S.data.reads){ if (!r.reply || r.parse_error || r.reply.side !== shown.side || r.reply.letter !== shown.letter) continue; if (!S.lensOn[lensKey(r)]) continue; const dup = out.find(o => lensKey(o) === lensKey(r)); if (!dup) out.push(r); }
-  // the investigator never read this reply through OLens: our study read stands in, labelled as such
-  if (S.lensOn.olens && !out.some(o => lensKey(o) === "olens")){ const st = S.data.reads.find(r => r.source === "diag" && r.reply && r.reply.side === shown.side && r.reply.letter === shown.letter && !r.parse_error); if (st && !out.includes(st)){ out.push(st); S.fallback.add(st.id); } }
+  // the investigator's read of a lens is preferred; a J-lens / NLA diagnostic read fills the column only when the investigator has none
+  const cands = S.data.reads.slice().sort((a, b) => (a.source === "diag" ? 1 : 0) - (b.source === "diag" ? 1 : 0));
+  for (const r of cands){ if (!r.reply || r.parse_error || r.reply.side !== shown.side || r.reply.letter !== shown.letter) continue; if (!S.lensOn[lensKey(r)]) continue; const dup = out.find(o => lensKey(o) === lensKey(r)); if (!dup) out.push(r); }
+  // the investigator never read this reply through OLens: our OLens study read stands in, labelled as such
+  if (S.lensOn.olens && !out.some(o => lensKey(o) === "olens")){ const st = S.data.reads.find(r => isStudyOlens(r) && r.reply && r.reply.side === shown.side && r.reply.letter === shown.letter && !r.parse_error); if (st && !out.includes(st)){ out.push(st); S.fallback.add(st.id); } }
   return out; }
 function repliesWithReads(){ const seen = {}; for (const r of (S.data ? S.data.reads : [])) if (r.reply && !r.parse_error) seen[r.reply.side + ":" + r.reply.letter] = r.reply; return Object.values(seen).sort((a, b) => (a.letter + (a.side === "flagged" ? 0 : 1)).localeCompare(b.letter + (b.side === "flagged" ? 0 : 1))); }
 function readForReply(side, letter){ if (!S.data) return null; const same = r => r.reply && r.reply.side === side && r.reply.letter === letter && !r.parse_error;
   // prefer the investigator's OLens read, then our study read, else any read of that reply (a B reply may exist only through J-lens or NLA)
-  return invReadOf(side, letter) || S.data.reads.find(r => r.source === "diag" && same(r)) || S.data.reads.find(r => same(r) && (r.rows || r.deferred)) || null; }
+  return invReadOf(side, letter) || S.data.reads.find(r => isStudyOlens(r) && same(r)) || S.data.reads.find(r => same(r) && (r.rows || r.deferred)) || null; }
 function switchReply(side, letter){ const rd = readForReply(side, letter); if (rd) selectRead(rd.id, S.pos); }
 function stepReply(d){ const list = repliesWithReads(), cur = shownReply(); if (!list.length) return; const i = cur ? list.findIndex(x => x.side === cur.side && x.letter === cur.letter) : -1; const nx = list[((i + d) % list.length + list.length) % list.length]; switchReply(nx.side, nx.letter); }
-function studyReadOf(c){ return c && c.reply && S.data ? S.data.reads.find(r => r.source === "diag" && r.reply && r.reply.side === c.reply.side && r.reply.letter === c.reply.letter) || null : null; }
+function studyReadOf(c){ return c && c.reply && S.data ? S.data.reads.find(r => isStudyOlens(r) && r.reply && r.reply.side === c.reply.side && r.reply.letter === c.reply.letter) || null : null; }
 function invReadOf(side, letter){ return S.data ? S.data.reads.find(r => r.source !== "diag" && r.reply && r.reply.side === side && r.reply.letter === letter && (r.lens||"olens") === "olens" && !r.parse_error) || null : null; }
 // the Gemini layer (and the ⚑ flags) were verified against the study read's cells; they are keyed by position + layer, so the
 // investigator's OLens read of the same reply — same activations, another verbalizer sample — inherits them
-function annKeyFor(r){ if (!r) return null; if (r.source === "diag") return r.id; if (r.reply && (r.lens||"olens") === "olens"){ const st = studyReadOf(r); return st ? st.id : null; } return null; }
+function annKeyFor(r){ if (!r) return null; if (isStudyOlens(r)) return r.id; if (r.source !== "diag" && r.reply && (r.lens||"olens") === "olens"){ const st = studyReadOf(r); return st ? st.id : null; } return null; /* J-lens / NLA reads carry no Gemini marks */ }
 function computeCompare(){ const ids = matrixReads().map(r => r.id); for (const id of S.extra) if (!ids.includes(id) && S.data.byId[id]) ids.push(id); if (S.read && !ids.includes(S.read)) ids.push(S.read); return ids; }
 function colRank(c){ const rep = c.reply; const g = rep ? ((rep.letter === "A" ? 0 : 2) + (rep.side === "flagged" ? 0 : 1)) : 9; return g * 10 + (LENS_KEYS.indexOf(c.placeholder ? c.lensKey : lensKey(c)) + 1 || 5); }
 const CAT_CLASS = {role_adoption: "c1", contradicts_text: "c1", both_branches: "c2", commitment_point: "c2", hidden_referent: "c3", disclaimer_present: "c3", other: "c0"};
@@ -2267,7 +2287,7 @@ function openPattern(key, want){
   $("#text").innerHTML = `<div class="status">loading ${esc(dataUrl(key))} …</div>`; $("#posbar").innerHTML = ""; $("#gridwrap").innerHTML = "";
   const go = data => { if (S.key !== key) return; if (!data.byId) prepareData(key, data); S.data = data;
     if (data.en_file && !data.enLoaded){ data.enLoaded = true; fetchJson(data.en_file).then(map => { D.en = Object.assign(D.en || {}, map); if (S.key === key){ renderGrid(); if (S.below) renderBelow(); } }, () => {}); } if (data.en){ D.en = D.en || {}; Object.assign(D.en, data.en); }
-    const dmStudy = data.reads.find(r => r.source==="diag" && r.reply && r.reply.side==="flagged" && r.reply.letter==="A") || data.reads.find(r => r.source==="diag" && r.label==="matched");
+    const dmStudy = data.reads.find(r => isStudyOlens(r) && r.reply && r.reply.side==="flagged" && r.reply.letter==="A") || data.reads.find(r => isStudyOlens(r) && r.label==="matched") || data.reads.find(r => r.source==="diag" && r.label==="matched");
     const dmInv = data.reads.find(r => r.source!=="diag" && r.reply && r.reply.side==="flagged" && r.reply.letter==="A" && (r.lens||"olens")==="olens" && !r.parse_error);
     const dm = dmInv || dmStudy;
     S.extra = []; S.compare = computeCompare();
@@ -2304,7 +2324,7 @@ function readLabel(r){ return readName(r) + (r.parse_error ? " ⚠ unparsed" : "
 function readShort(r){
   // ≤ 48 chars for the bar: "flagged A · study", "clean A · J-lens", "probe 17 · NLA"
   const rep = r.reply || (r.source === "diag" ? replyBySample(byKey[S.key], r.sample_index) : replyByCid(byKey[S.key], r.conv_id));
-  const lens = r.source === "diag" ? "study" : (LENS_SHORT[r.lens || "olens"] || r.lens || "OLens").replace(" L42", "");
+  const lens = r.source === "diag" ? ((r.lens||"olens") === "olens" ? "study" : (LENS_SHORT[r.lens] || r.lens).replace(" L42", "") + " study") : (LENS_SHORT[r.lens || "olens"] || r.lens || "OLens").replace(" L42", "");
   const base = rep ? `${rep.side} ${rep.letter} · ${lens}` : `probe ${parseInt(String(r.conv_id||"").replace(/^c/, ""), 10) || r.conv_id}${lens === "OLens" ? "" : " · " + lens}`;
   return cut(base, 48) + (r.parse_error ? " ⚠" : "");
 }
@@ -2323,7 +2343,7 @@ function renderBar(){
   const idx = pats.findIndex(q => q.key === S.key); $("#prev-item").disabled = idx <= 0; $("#next-item").disabled = idx < 0 || idx >= pats.length-1;
   const reads = S.data ? S.data.reads : [];
   const isStudyRead = r => r.source !== "diag" && /^w\d+[mu]$/.test(r.conv_id||"");
-  const groups = [["study replies", r => r.source === "diag"], ["investigator's reads of them", isStudyRead], ["investigator's probes", r => r.source !== "diag" && !isStudyRead(r)]];
+  const groups = [["study replies (our diagnostic passes: OLens, J-lens, NLA)", r => r.source === "diag"], ["investigator's reads of them", isStudyRead], ["investigator's probes", r => r.source !== "diag" && !isStudyRead(r)]];
   $("#read-select").innerHTML = reads.length ? groups.map(([g, f]) => { const rs = reads.filter(f); return rs.length ? `<optgroup label="${esc(g)}">` + rs.map(r => `<option value="${esc(r.id)}" title="${esc(readName(r) + " · " + readTip(r))}" ${r.id===S.read?"selected":""}>${esc(readShort(r))}</option>`).join("") + `</optgroup>` : ""; }).join("") : `<option>—</option>`;
   const shown = shownReply(), avail = k => reads.filter(r => r.reply && !r.parse_error && lensKey(r) === k && (!shown || (r.reply.side === shown.side && r.reply.letter === shown.letter)));
   const replies = repliesWithReads();
@@ -2545,7 +2565,9 @@ function renderGrid(){
   const hr = el("tr", "lens"); hr.appendChild(el("th", "layer", "layer"));
   cols.forEach((c, j) => {
     if (c.placeholder){ const th = el("th", "ph" + (S.hidePh ? " phc" : ""), S.hidePh ? "·" : `${LENS_COL_SHORT[c.lensKey]} — not read for this reply`); th.title = `the ${LENS_COL_SHORT[c.lensKey]} investigator did not read this reply; a diagnostic pass for this lens has not been run — click to ${S.hidePh ? "expand" : "collapse"} placeholder columns`; th.style.width = S.hidePh ? "28px" : "140px"; th.onclick = () => { S.hidePh = !S.hidePh; store("wc-ph", S.hidePh ? "1" : "0"); renderGrid(); }; hr.appendChild(th); return; }
-    const lk = lensKey(c), isFb = S.fallback && S.fallback.has(c.id) && !S.lensOn.study; const th = el("th", readDot(c), isFb ? FALLBACK_COL : ((c.reply ? LENS_COL[lk] : LENS_COL_SHORT[lk]) || lensName(c))); th.title = readName(c) + " · " + readTip(c) + (c.reply ? "\n" + LENS_TIP[lk] : "") + (isFb ? "\nshown because the investigator has no OLens read of this reply" : "") + ((lk === "study" || lk === "olens") && c.reply ? "\n" + READ_PAIR_TIP : "");
+    const lk = lensKey(c), isFb = S.fallback && S.fallback.has(c.id) && !S.lensOn.study, isLensStudy = c.source === "diag" && lk !== "study";
+    const th = el("th", readDot(c), isFb ? FALLBACK_COL : (isLensStudy ? `${LENS_COL_SHORT[lk]} · study read` : ((c.reply ? LENS_COL[lk] : LENS_COL_SHORT[lk]) || lensName(c))));
+    th.title = readName(c) + " · " + readTip(c) + (isLensStudy ? `\nour diagnostic pass over this reply; the ${LENS_COL_SHORT[lk]} investigator did not read it` : (c.reply ? "\n" + LENS_TIP[lk] : "")) + (isFb ? "\nshown because the investigator has no OLens read of this reply" : "") + ((lk === "study" || lk === "olens") && c.reply ? "\n" + READ_PAIR_TIP : "");
     if (toks[j] == null) th.appendChild(el("span", "warn", "— not read at pos " + p)); else if (refTok0 != null && toks[j] !== refTok0) th.appendChild(el("span", "warn", "≠ token: " + JSON.stringify(toks[j])));
     if (S.colw[c.id]) th.style.width = S.colw[c.id] + "px";
     const grip = el("div", "grip-x"); grip.title = "drag to resize this column (double-click resets)";
