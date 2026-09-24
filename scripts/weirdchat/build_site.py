@@ -1587,7 +1587,7 @@ def build_site(
         "calibrations": calibrations,
         "brief_how": brief_how,
         "n_side": N_SIDE,
-        "en": en,
+        "en": en if single else {},  # split builds carry each pattern's translations in its file
         "counts": {
             "patterns": len(patterns),
             "behaviors": len({p["behavior_id"] for p in patterns}),
@@ -1608,6 +1608,7 @@ def build_site(
         data_dir = site_dir / "data"
         data_dir.mkdir(exist_ok=True)
         for pat in patterns:
+            pat["en"] = {t: en[t] for t in all_samples([pat]) if t in en}
             for name, size in write_pattern_files(pat, data_dir):
                 sizes.append((name, size))
                 if size > DATA_FILE_BUDGET:
@@ -2247,7 +2248,7 @@ function openPattern(key, want){
   S.key = key; S.data = null; S.read = null; S.pos = null; S.compare = []; S.find = ""; $("#find").value = "";
   renderBar(); renderCtx(); renderHits(); renderNote();
   $("#text").innerHTML = `<div class="status">loading ${esc(dataUrl(key))} …</div>`; $("#posbar").innerHTML = ""; $("#gridwrap").innerHTML = "";
-  const go = data => { if (S.key !== key) return; if (!data.byId) prepareData(key, data); S.data = data;
+  const go = data => { if (S.key !== key) return; if (!data.byId) prepareData(key, data); S.data = data; if (data.en){ D.en = D.en || {}; Object.assign(D.en, data.en); }
     const dmStudy = data.reads.find(r => r.source==="diag" && r.reply && r.reply.side==="flagged" && r.reply.letter==="A") || data.reads.find(r => r.source==="diag" && r.label==="matched");
     const dmInv = data.reads.find(r => r.source!=="diag" && r.reply && r.reply.side==="flagged" && r.reply.letter==="A" && (r.lens||"olens")==="olens" && !r.parse_error);
     const dm = dmInv || dmStudy;
