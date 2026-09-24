@@ -100,11 +100,15 @@ image = (
     timeout=6 * 3600,
     scaledown_window=60 * 60,
     min_containers=MIN_CONTAINERS,
-    max_containers=4,
+    max_containers=int(os.environ.get("AB_NLA_MAX", "6")),
     memory=131072,
     cpu=8,
 )
-@modal.concurrent(max_inputs=4)
+# ONE request per container: the injector hook (NormMatchInjector) and the generator are shared
+# state on the instance, so two concurrent verbalize calls overwrite each other's vectors — a shape
+# error when the batch sizes differ, silently cross-contaminated readouts when they match
+# (seen 2026-09-24 under 6 parallel readers). Throughput comes from containers, not threads.
+@modal.concurrent(max_inputs=1)
 class NLA:
     @modal.enter()
     def load(self) -> None:
