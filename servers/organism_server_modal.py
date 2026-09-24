@@ -120,6 +120,8 @@ image = (
         "accelerate>=1.0",
         "peft>=0.18",
         "fastapi[standard]",
+        "requests>=2.32",  # detective_joracle.tools.live (imported by the server) needs it
+        "openai>=1.0",
     )
     .env(
         {
