@@ -805,13 +805,81 @@ def interventions_of(out_root: Path, key: str) -> dict[str, Any] | None:
     }
 
 
+FLAG_CATEGORIES = (
+    "role_adoption",
+    "both_branches",
+    "hidden_referent",
+    "disclaimer_present",
+    "contradicts_text",
+    "commitment_point",
+    "other",
+)
+
+
+def flags_of(out_root: Path, pat: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, int]]:
+    """flags/<key>.json re-verified: a flag stays only if its quote is verbatim in the cited cell."""
+    blob = read_json(out_root / "flags" / f"{pat['key']}.json")
+    stats = {"kept": 0, "dropped": 0, "proposed": 0, "unverified": 0}
+    if blob is None:
+        return None, stats
+    by_id = {r["id"]: r for r in pat["reads"]}
+    out: dict[str, Any] = {}
+    for rid, entry in as_dict(blob.get("reads")).items():
+        entry = as_dict(entry)
+        read = by_id.get(rid)
+        kept, dropped = [], 0
+        for fl in (as_dict(x) for x in as_list(entry.get("flags"))):
+            pos, layer, quote = (
+                as_int(fl.get("position")),
+                as_int(fl.get("layer")),
+                as_text(fl.get("quote")),
+            )
+            row = (
+                next((r for r in (read["rows"] or []) if r["pos"] == pos), None)
+                if read and read.get("rows")
+                else None
+            )
+            li = read["layers"].index(layer) if (read and layer in read["layers"]) else -1
+            samples = row["samples"][li] if (row and li >= 0 and li < len(row["samples"])) else []
+            if quote and any(quote in smp for smp in samples):
+                kept.append(
+                    {
+                        "position": pos,
+                        "layer": layer,
+                        "category": as_text(fl.get("category"))
+                        if as_text(fl.get("category")) in FLAG_CATEGORIES
+                        else "other",
+                        "quote": quote,
+                        "why": as_text(fl.get("why")),
+                    }
+                )
+            else:
+                dropped += 1
+        kept.sort(key=lambda f: (f["position"] or 0, f["layer"] or 0))
+        out[rid] = {
+            "flags": kept,
+            "n_windows": as_int(entry.get("n_windows")),
+            "failed_calls": as_int(entry.get("failed_calls")),
+            "proposed": as_int(entry.get("proposed")),
+            "unverified": as_int(entry.get("unverified")),
+            "dropped_here": dropped,
+            "model": as_text(entry.get("model")),
+            "in_build": read is not None,
+        }
+        stats["kept"] += len(kept)
+        stats["dropped"] += dropped
+        stats["proposed"] += as_int(entry.get("proposed")) or 0
+        stats["unverified"] += as_int(entry.get("unverified")) or 0
+    return out, stats
+
+
 def synth_meta(out_root: Path) -> dict[str, Any]:
     synth = read_json(out_root / "synth.json") or {}
     return {"model": as_text(synth.get("model")), "n_records": as_int(synth.get("n_records"))}
 
 
 # ------------------------------------------------------------------- split
-HEAVY_PATTERN_KEYS = ("samples", "reads", "fork", "brief", "interventions", "predictions")
+HEAVY_PATTERN_KEYS = ("samples", "reads", "fork", "brief", "interventions", "predictions", "flags")
 HEAVY_RUN_KEYS = ("steps", "notes")
 
 
@@ -836,6 +904,29 @@ def light_pattern(pat: dict[str, Any]) -> dict[str, Any]:
     light["has_blackbox"] = any(r["arm"] == "blackbox" for r in pat["runs"])
     light["arms"] = sorted({r["arm"] or "olens" for r in pat["runs"]})
     light["agreements"] = pat.get("agreements") or []
+    fl = pat.get("flags") or {}
+    by_id = {r["id"]: r for r in pat["reads"]}
+    counts = {"matched": 0, "unmatched": 0, "other": 0}
+    for rid, entry in fl.items():
+        side = by_id[rid]["label"] if rid in by_id and by_id[rid]["source"] == "diag" else "other"
+        counts[side if side in counts else "other"] += len(entry["flags"])
+    light["flags_meta"] = (
+        {
+            "matched": counts["matched"],
+            "unmatched": counts["unmatched"],
+            "proposed": sum(e["proposed"] or 0 for e in fl.values()),
+            "dropped": sum((e["unverified"] or 0) + e["dropped_here"] for e in fl.values()),
+            "model": next((e["model"] for e in fl.values() if e["model"]), ""),
+        }
+        if fl
+        else None
+    )
+    light["flag_whys"] = [
+        {"read": rid, "position": f["position"], "category": f["category"], "why": f["why"]}
+        for rid, e in fl.items()
+        for f in e["flags"]
+        if f["why"]
+    ]
     iv = pat.get("interventions")
     light["interventions_meta"] = (
         {"n_per_arm": iv["n_per_arm"], "judge_model": iv["judge_model"], "n_arms": len(iv["arms"])}
@@ -1154,8 +1245,14 @@ def build_site(
     calibration = calibration_for(main_judge, calibrations) or (
         calibrations[0] if calibrations else None
     )
+    flag_stats = {"kept": 0, "dropped": 0, "proposed": 0, "unverified": 0, "files": 0}
     for pat in patterns:
         pat["brief"] = brief_of(pat, brief_fn)
+        pat["flags"], fstats = flags_of(out_root, pat)
+        if pat["flags"] is not None:
+            flag_stats["files"] += 1
+            for k in ("kept", "dropped", "proposed", "unverified"):
+                flag_stats[k] += fstats[k]
         pat["interventions"] = interventions_of(out_root, pat["key"])
         pat["agreements"] = [
             {"arm": a["arm"], "arm_b": a["arm_b"], **a["patterns"][pat["key"]]}
@@ -1169,6 +1266,11 @@ def build_site(
             if pat["key"] in pr["patterns"]
         }
     print(f"brief: {brief_how}")
+    print(
+        f"reader flags: {flag_stats['files']} files · {flag_stats['kept']} kept (verbatim in the cited cell) · "
+        f"{flag_stats['dropped']} dropped at build time as non-verbatim · file says {flag_stats['proposed']} proposed, "
+        f"{flag_stats['unverified']} unverified"
+    )
     arm_counts = {
         a: sum(1 for p in patterns if any((r["arm"] or "olens") == a for r in p["runs"]))
         for a in ("olens", "jlens", "nla", "blackbox")
@@ -1192,6 +1294,8 @@ def build_site(
         k, n = hl_stats["per_pattern"].get(pat["key"], (0, 0))
         pat["cited_verified"], pat["cited_fragments"] = k, n
     samples = all_samples(patterns)
+    if translations is None and (out_root / "translations.json").is_file():
+        translations = out_root / "translations.json"
     cache = read_json(translations) if translations else None
     en = {s: as_text(e) for s, e in (cache or {}).items() if s in samples and as_text(e)}
     to_translate = sorted(s for s in samples if NONLATIN_RE.search(s))
@@ -1270,6 +1374,7 @@ def build_site(
         f"{len(to_translate)} cells to translate (non-Latin script) → {cells_path.name} "
         f"({mb(cells_size)}, a work file — not counted in the site total); "
         f"{len(en)} translations attached from the cache"
+        f"{' (' + str(translations) + ')' if translations else ''}"
     )
     c = data["counts"]
     print(
@@ -1402,6 +1507,20 @@ i.matched{background:var(--miss)} i.unmatched{background:var(--hit)} i.agent{bac
 .tok.hit{border-top:3px solid var(--hit)}
 .tok.found{box-shadow:inset 0 -3px 0 var(--find)}
 .tok.mark{border-bottom:2px dotted var(--text)}
+.tok.flagged{border-top:3px solid var(--hold);position:relative;margin-top:9px}
+.tok.flagged::before{content:"⚑";position:absolute;top:-13px;left:1px;font-size:9px;line-height:1;color:var(--hold)}
+.tok.flagged.hit{border-top-color:var(--hold)}
+#flagbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--text-dim);margin:0 0 8px}
+#flagbar select{font-family:var(--mono);font-size:11px;padding:1px 4px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--text)}
+.fchip{font-family:var(--mono);font-size:11px;border:1px solid var(--hold);background:var(--hold-soft);color:var(--text);border-radius:3px;padding:1px 6px;cursor:pointer;white-space:pre}
+.fchip.cur{outline:2px solid var(--accent)}
+.fcard{border:1px solid var(--line-soft);border-left:3px solid var(--hold);border-radius:4px;background:var(--surface);padding:5px 8px;font-size:12px}
+.fcard .q{font-family:var(--mono);font-size:11.5px;color:var(--text);margin:2px 0;white-space:pre-wrap;word-break:break-word}
+.fcard .why{color:var(--text-dim)} .fcard .L{font-family:var(--mono);font-size:11px;color:var(--text-faint);margin-left:6px}
+.cat{font-family:var(--mono);font-size:10.5px;border-radius:3px;padding:0 5px;border:1px solid transparent;text-transform:none}
+.cat.c1{background:var(--miss-soft);color:var(--miss);border-color:var(--miss)} .cat.c2{background:var(--hold-soft);color:var(--hold);border-color:var(--hold)} .cat.c3{background:var(--find-soft);color:var(--find-ink);border-color:var(--find)} .cat.c0{background:var(--surface-2);color:var(--text-dim);border-color:var(--line)}
+td.flagged .cell{box-shadow:inset 3px 0 0 var(--hold)} td.flagged.hit .cell{box-shadow:inset 3px 0 0 var(--hold), inset 6px 0 0 var(--hit)}
+mark.flag{background:var(--hold-soft);color:var(--text);border-bottom:2px solid var(--hold);font-weight:600}
 .tok.cur{background:var(--accent)!important;color:#fff;border-color:var(--accent)}
 .tok.nodata{opacity:.4;cursor:default;background:transparent}
 .tok .nl{font-size:10px;color:var(--text-faint)} .tok.cur .nl{color:#fff}
@@ -1582,6 +1701,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
     <p><i class="sw" style="background:var(--hit-soft);border-color:var(--hit)"></i><b>Green</b> means a phrase the agent quoted from a readout cell was found verbatim at build time: a green bar on a token says one of that token's cells carries such a phrase; the cell itself gets a green inset bar and the phrase is highlighted. Quotes that did not verify are listed in the build log, not here.</p>
     <p><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i><b>Dotted</b> underline is the fork: the first reply word where the flagged and clean replies diverge, computed from the read tokens (≈, positions were thinned).</p>
     <p><i class="sw" style="background:var(--find-soft);border-color:var(--find)"></i><b>Violet</b> is your search: <span class="kbd">/</span> filters this pattern's readouts (tokens whose cells match get a violet underline and are listed under the bar); <span class="kbd">;</span> searches summaries, prompts and mechanisms across every pattern.</p>
+    <p><i class="sw" style="border-top:3px solid var(--hold);background:var(--surface)"></i><b>Amber ⚑</b> is a reader flag: a second model (Gemini) read each cell of the study reads and flagged cells that say something the reply's text does not — a role being adopted, both branches present at once, a hidden referent, a disclaimer that never surfaces, a contradiction, a commitment point. Every quote was re-checked verbatim at build time. Three marks, three sources: <b>yellow</b> = a fixed position (about to speak), <b>green</b> = a phrase the investigator quoted, <b>amber ⚑</b> = a phrase the reader model flagged. The flagger saw the reply and its label — an attention pass, not a blind judge.</p>
     <p id="manual-cal" class="sub"></p>
     <p><b>Faded</b> tokens (‥) stand for positions the read thinned away — the lens read every 4th token plus punctuation and boundaries.</p>
     <p><b>Resizing.</b> Drag the splitter between the panes, the right edge of a column header, or the bottom edge of a layer label; double-click any of them to reset.</p>
@@ -1603,6 +1723,7 @@ dialog h2{margin:0 0 10px;font-size:15px}
     <span class="kbd">c</span><span>show / hide the context panes</span>
     <span class="kbd">w</span><span>compact rows on / off</span>
     <span class="kbd">x</span><span>replies as plain text / as tokens</span>
+    <span class="kbd">f</span><span>next reader-flagged position</span>
     <span class="kbd">/</span><span>find in this pattern's readouts (violet)</span>
     <span class="kbd">;</span><span>search patterns and mechanisms</span>
     <span class="kbd">t</span><span>light / dark</span>
@@ -1667,7 +1788,9 @@ function readName(r){
 
 // ------------------------------------------------------------------ state
 const S = {key:null, data:null, read:null, pos:null, compare:[], layer:null, find:"", query:"", ctx:true, compact:false,
-           colw:{}, rowh:{}, below:false, tab:"brief", arm:"lens", textView: load("wc-text") === "1", agentPromise:null};
+           colw:{}, rowh:{}, below:false, tab:"brief", arm:"lens", textView: load("wc-text") === "1", agentPromise:null, flagCat:"all"};
+const CAT_CLASS = {role_adoption: "c1", contradicts_text: "c1", both_branches: "c2", commitment_point: "c2", hidden_referent: "c3", disclaimer_present: "c3", other: "c0"};
+const catPill = c => `<span class="cat ${CAT_CLASS[c]||"c0"}">${esc((c||"other").replace(/_/g, " "))}</span>`;
 const ARM_ORDER = ["olens", "jlens", "nla", "blackbox"];
 const ARM_LABEL = {olens: "OLens", jlens: "J-lens", nla: "NLA (L42)", blackbox: "black-box (no lens)"};
 const LENS_SHORT = {olens: "OLens", jlens: "J-lens", nla: "NLA L42", logit: "logit lens"};
@@ -1721,6 +1844,8 @@ function prepareData(key, data){
   data.mechs = []; data.runs.forEach((run, ri) => (run.mechanisms||[]).forEach((m, mi) => data.mechs.push({...m, run: ri, i: mi, auditor: run.auditor, seed: run.seed, arm: armOf(run)})));
   // verified highlight cells for this pattern: read → pos → [{layer, quote}]
   data.hl = {}; for (const h of (D.highlights||[])) if (h.pattern_key === key){ (data.hl[h.read] = data.hl[h.read] || {}); (data.hl[h.read][h.pos] = data.hl[h.read][h.pos] || []).push(h); }
+  // reader flags (build-verified): read id → position → [flags]
+  data.fl = {}; for (const [rid, e] of Object.entries(data.flags || {})) for (const f of (e.flags||[])){ (data.fl[rid] = data.fl[rid] || {}); (data.fl[rid][f.position] = data.fl[rid][f.position] || []).push(f); }
   data.key = key;
 }
 function ensureAgentRows(read){
@@ -1804,6 +1929,7 @@ function renderCtx(){
     `<div style="margin-top:3px"><b>What WeirdChat found:</b> on this prompt, ${pct(p.published_match_rate)} of ${nrep} replies were judged to show it. Same prompt, same model, same settings — it went both ways.</div>` +
     `<div style="margin-top:3px"><b>What you see here:</b> one <span title="${esc(SIDE_TIP.matched)}">flagged</span> and one <span title="${esc(SIDE_TIP.unmatched)}">clean</span> reply, read token by token through the lens (layers 20–60), plus the investigator's probes.</div>` +
     ags.map(ag => `<div style="margin-top:3px"><b>${esc(armLabel(ag.arm))} vs ${esc(armLabel(ag.arm_b))}:</b> top hypotheses agree: ${ag.top_match==null?"?":(ag.top_match?"yes":"no")} · ${esc(armLabel(ag.arm))} mechanisms with a ${esc(armLabel(ag.arm_b))} counterpart ${ag.lens_with_counterpart==null?"?":ag.lens_with_counterpart}/${ag.n_lens==null?"?":ag.n_lens} · ${esc(armLabel(ag.arm_b))} with a ${esc(armLabel(ag.arm))} counterpart ${ag.blackbox_with_counterpart==null?"?":ag.blackbox_with_counterpart}/${ag.n_blackbox==null?"?":ag.n_blackbox}</div>`).join("") +
+    (p.flags_meta ? `<div style="margin-top:3px"><b>Reader flags:</b> ${p.flags_meta.matched} cells on the flagged reply, ${p.flags_meta.unmatched} on the clean reply (of ${p.flags_meta.proposed} proposed, ${p.flags_meta.dropped} dropped as non-verbatim${p.flags_meta.model ? `; reader ${esc(p.flags_meta.model)}` : ""})</div>` : "") +
     (ivm ? `<div style="margin-top:3px"><b>Interventions run:</b> ${ivm.n_per_arm==null?"?":ivm.n_per_arm} samples/arm over ${ivm.n_arms} arms, judged by ${esc(ivm.judge_model||"?")}${cal && cal.kappa!=null ? ` (κ=${num(cal.kappa)} vs the study's labels)` : ""} — see the interventions tab</div>` : "") +
     `<div class="tags" style="margin-top:5px"><span class="tag">${pct(p.published_match_rate)} flagged</span><span class="tag">elo ${num(p.elo,0)}</span><span class="tag">${p.n_reads||0} lens reads</span>${p.weirdchat_url?`<a class="tag" href="${esc(p.weirdchat_url)}" target="_blank" rel="noopener">WeirdChat ↗</a>`:""}</div>` +
     `<div class="prompt">${esc(p.prompt)}</div></div>`;
@@ -1840,7 +1966,17 @@ const LEGEND = `<div class="tlegend"><span><i class="sw" style="background:var(-
   `<span><i class="sw" style="border-top:3px solid var(--hit);background:var(--surface)"></i>green top bar = a cell here contains a phrase the investigator quoted (verified)</span>` +
   `<span><i class="sw" style="box-shadow:inset 0 -3px 0 var(--find);background:var(--surface)"></i>violet = search hit</span>` +
   `<span><i class="sw" style="border-bottom:2px dotted var(--text);background:var(--surface)"></i>dotted = ≈ where the flagged and clean replies diverge</span>` +
+  `<span><i class="sw" style="border-top:3px solid var(--hold);background:var(--surface)"></i>⚑ flagged by the reader model (Gemini): a cell here says something the text does not</span>` +
   `<span><i class="sw" style="opacity:.4;background:var(--text-faint)"></i>faded ‥ = position not read</span></div>`;
+function flagsOf(r){ return (S.data && S.data.fl[r.id]) || {}; }
+function flagList(r){ const fl = flagsOf(r); return Object.keys(fl).map(Number).sort((a, b) => a - b).map(p => ({pos: p, flags: fl[p]})).filter(x => S.flagCat === "all" || x.flags.some(f => f.category === S.flagCat)); }
+function flagBar(r){
+  const all = flagsOf(r), positions = Object.keys(all); if (!positions.length) return "";
+  const cats = [...new Set(Object.values(all).reduce((a, fs) => a.concat(fs.map(f => f.category)), []))].sort();
+  const list = flagList(r), n = Object.values(all).reduce((a, fs) => a + fs.length, 0);
+  return `<div id="flagbar"><span>⚑ ${n} reader flag${n===1?"":"s"} at ${positions.length} position${positions.length===1?"":"s"}</span><select id="flagcat" title="filter by category"><option value="all" ${S.flagCat==="all"?"selected":""}>all categories</option>` + cats.map(c => `<option value="${esc(c)}" ${S.flagCat===c?"selected":""}>${esc(c.replace(/_/g, " "))}</option>`).join("") + `</select>` +
+    list.slice(0, 60).map(x => `<button class="fchip ${x.pos===S.pos?"cur":""}" data-fpos="${x.pos}" title="${esc(x.flags.map(f => f.category + ": " + f.why).join("\n"))}">pos ${x.pos} · ${esc([...new Set(x.flags.map(f => f.category.replace(/_/g, " ")))].join(", "))}</button>`).join("") + (list.length > 60 ? `<span>+${list.length-60} more</span>` : "") + `<span class="kbd">f</span><span>next flag</span></div>`;
+}
 function proseBlock(label, text, cls, tip){ return `<div class="blk ${cls||""}"><div class="role"><span${tip?` title="${esc(tip)}"`:""}>${esc(label)}</span></div><div class="prose">${esc(text||"(empty)")}</div></div>`; }
 function renderProse(r, box){
   // the same read as readable text: prompt, then the reply, labelled exactly as the strip labels it
@@ -1863,7 +1999,7 @@ function renderText(){
   const r = curRead(), box = $("#text"); if (!r){ return; }
   if (S.textView) return renderProse(r, box);
   const hl = S.data.hl[r.id] || {}, found = foundPositions();
-  let h = LEGEND;
+  let h = LEGEND + flagBar(r);
   if (r.parse_error) h += `<div class="notice">this readout page did not parse: ${esc(r.parse_error)}</div>`;
   const rows = r.rows || []; let i = 0;
   if (!rows.length) h += `<div class="status">no positions in this read.</div>`;
@@ -1873,8 +2009,9 @@ function renderText(){
       const row = rows[i];
       if (prev!=null && row.pos - prev > 1) inner += `<span class="tok nodata" title="${row.pos-prev-1} positions not read">‥</span>`;
       prev = row.pos;
-      const cls = ["tok", row.pos===S.pos?"cur":"", row.pos===r.aboutPos?"read":"", hl[row.pos]?"hit":"", found.has(row.pos)?"found":"", row.pos===r.fork_pos?"mark":""].join(" ");
-      inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}${hl[row.pos]?" · a quoted phrase verifies here":""}${row.pos===r.aboutPos?" · about to speak":""}${row.pos===r.fork_pos?" · fork":""}">${tokHtml(row.tok)}</span>`;
+      const fls = flagsOf(r)[row.pos];
+      const cls = ["tok", row.pos===S.pos?"cur":"", row.pos===r.aboutPos?"read":"", hl[row.pos]?"hit":"", fls?"flagged":"", found.has(row.pos)?"found":"", row.pos===r.fork_pos?"mark":""].join(" ");
+      inner += `<span class="${cls}" data-pos="${row.pos}" title="position ${row.pos} · ${esc(row.kind)}${hl[row.pos]?" · a quoted phrase verifies here":""}${fls?" · ⚑ " + esc(fls.map(f => f.category.replace(/_/g, " ")).join(", ")):""}${row.pos===r.aboutPos?" · about to speak":""}${row.pos===r.fork_pos?" · fork":""}">${tokHtml(row.tok)}</span>`;
     }
     const lbl2 = region === "reply" ? replyLabel(r) : (REGION_LABEL[region]||"");
     const tip = region === "reply" && r.source === "diag" ? ` title="${esc(SIDE_TIP[r.label]||"")}"` : "";
@@ -1888,6 +2025,8 @@ function renderText(){
   }
   box.innerHTML = h;
   box.querySelectorAll(".tok[data-pos]").forEach(t => t.onclick = () => selectRead(S.read, +t.dataset.pos));
+  box.querySelectorAll("[data-fpos]").forEach(b => b.onclick = () => selectRead(S.read, +b.dataset.fpos));
+  const sel = box.querySelector("#flagcat"); if (sel) sel.onchange = e => { S.flagCat = e.target.value; renderText(); };
   box.querySelectorAll(".roll[data-read]").forEach(b => b.onclick = () => selectRead(b.dataset.read, null));
   const cur = box.querySelector(".tok.cur"); if (cur && cur.scrollIntoView) cur.scrollIntoView({block:"nearest"});
 }
@@ -1905,9 +2044,10 @@ function whereText(r, row){
   if (row.region === "reply") return (row.pos === r.fork_pos ? "on the fork: " : "inside the reply: ") + "the model is writing its answer" + (row.pos === r.fork_pos ? " — the first word where the flagged and clean replies diverge (≈)" : "");
   return row.region;
 }
-function markCell(text, quotes, qrx){
+function markCell(text, quotes, qrx, fquotes){
   let html = esc(text);
   for (const q of quotes){ const e = esc(q); if (html.includes(e)) html = html.split(e).join(`<mark>${e}</mark>`); }
+  for (const q of (fquotes||[])){ const e = esc(q); if (html.includes(e) && !html.includes(`<mark class="flag">${e}`)) html = html.split(e).join(`<mark class="flag">${e}</mark>`); }
   if (qrx) html = html.replace(new RegExp("(" + rxEsc(esc(S.find)) + ")(?![^<]*>)", "gi"), `<mark class="find">$1</mark>`);
   return html;
 }
@@ -1917,6 +2057,8 @@ function renderGrid(){
   if (!row){ posbar.innerHTML = `<div class="status">${r.parse_error ? "nothing to show — this page did not parse." : "no position selected."}</div>`; wrap.innerHTML = ""; return; }
   const fl = mechsAt(r, p);
   let h = `<div class="row"><h2>position ${p}</h2><span class="tokbox">${esc(JSON.stringify(row.tok))}</span><span class="wherenote">${esc(whereText(r, row))} · ${esc(row.kind)}</span></div>`;
+  const here = flagsOf(r)[p] || [];
+  if (here.length){ h += `<div class="flags"><h3>⚑ reader flags at this position (${here.length}) — verbatim in the cell, seen with the label</h3><div class="mcards">` + here.map(f => { const smp = cellsAt(r, p).find(s => s.includes(f.quote)); const en = smp && D.en && D.en[smp]; return `<div class="fcard">${catPill(f.category)}<span class="L">L${f.layer}</span><div class="q">“${esc(f.quote)}”</div>${en ? `<div class="en">${esc(en)}</div>` : ""}<div class="why">${esc(f.why)}</div></div>`; }).join("") + `</div></div>`; }
   if (fl.length) h += `<div class="mcards">` + fl.map((f, i) => `<button class="mcard ${f.via===r.conv_id?"":"other"}" data-mc="${i}"><div class="hd"><span class="txt">${esc(cut(f.m.mechanism, 160))}</span><span class="badge ${f.m.confidence>=0.7?"miss":(f.m.confidence>=0.4?"hold":"dim")}">conf ${num(f.m.confidence)}</span></div><div class="more"><div>${esc(f.m.mechanism)}</div><div class="quote">${esc(f.m.readout_cells)}</div>${f.via!==r.conv_id?`<div class="dim">cited on ${esc(f.via)} — same reply, different lens sample</div>`:""}</div></button>`).join("") + `</div>`;
   else h += `<div class="dim" style="font-size:11.5px">no reported mechanism cites ${esc(r.mention_ids.join(" / ") || r.id)} at pos ${p}.</div>`;
   posbar.innerHTML = h;
@@ -1957,7 +2099,8 @@ function renderGrid(){
         const quotes = ((S.data.hl[c.id]||{})[p]||[]).filter(x => x.layer === L).map(x => x.quote); if (quotes.length) td.className = "hit";
         const d = el("div", "bag"); d.innerHTML = samples.map(s => { const hit = quotes.some(q => s.includes(q) || q.includes(s)), f = qrx && qrx.test(s); return `<span class="${hit?"m":""}${f?" f":""}" title="J-lens token">${esc(s)}</span>`; }).join(""); td.appendChild(d); }
       else { const quotes = ((S.data.hl[c.id]||{})[p]||[]).filter(x => x.layer === L).map(x => x.quote); if (quotes.length) td.className = "hit";
-        const d = el("div", "cell"); d.innerHTML = samples.map(s => { const en = D.en && D.en[s]; return `<div class="samp">${markCell(s.trim(), quotes, qrx)}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>`; }).join(""); td.appendChild(d); }
+        const fq = ((S.data.fl[c.id]||{})[p]||[]).filter(f => f.layer === L).map(f => f.quote); if (fq.length) td.className = (td.className ? td.className + " " : "") + "flagged";
+        const d = el("div", "cell"); d.innerHTML = samples.map(s => { const en = D.en && D.en[s]; return `<div class="samp">${markCell(s.trim(), quotes, qrx, fq)}${en ? `<div class="en">${esc(en)}</div>` : ""}</div>`; }).join(""); td.appendChild(d); }
       tr.appendChild(td);
     }
     tbody.appendChild(tr);
@@ -1981,6 +2124,7 @@ function renderResults(){
   for (const p of D.patterns || []){
     if (rx.test(p.group_summary||"")) rows.push({p, where: "summary", snip: snip(p.group_summary)});
     if (rx.test(p.prompt||"")) rows.push({p, where: "prompt", snip: snip(p.prompt)});
+    (p.flag_whys||[]).forEach(f => { if (rx.test(f.why||"")) rows.push({p, where: `⚑ flag · pos ${f.position} · ${f.category.replace(/_/g, " ")}`, snip: snip(f.why), cell: {read: f.read, pos: f.position}}); });
     (p.intervention_notes||[]).forEach(a => { if (rx.test(a.note||"") || rx.test(a.name||"")) rows.push({p, where: `intervention arm ${a.name}`, snip: snip(a.name + ": " + a.note)}); });
     (p.runs||[]).forEach((run, ri) => { if (rx.test(run.summary||"")) rows.push({p, where: `${run.arm==="blackbox"?"black-box":"lens"} run summary`, snip: snip(run.summary)});
       (run.mechanisms||[]).forEach((m, mi) => { const t = [m.mechanism, m.evidence, m.readout_cells].join(" · "); if (rx.test(t)) rows.push({p, where: `mechanism ${mi+1}`, snip: snip(t), cell: firstCell(m.readout_cells)}); }); });
@@ -2173,6 +2317,7 @@ document.addEventListener("keydown", e => {
   else if (k === "j") stepPattern(1); else if (k === "k") stepPattern(-1);
   else if (k === "]") stepBehavior(1); else if (k === "[") stepBehavior(-1);
   else if (k === "p"){ const r = curRead(); if (r && r.aboutPos!=null) selectRead(r.id, r.aboutPos); }
+  else if (k === "f"){ const r = curRead(); if (r){ const list = flagList(r).map(x => x.pos); if (list.length){ const i = list.findIndex(p => p > S.pos); selectRead(r.id, list[i < 0 ? 0 : i]); } } }
   else if (k === "c") $("#ctx-toggle").click(); else if (k === "w") $("#wrap-toggle").click(); else if (k === "x") $("#text-toggle").click();
   else if (k === "/"){ $("#find").focus(); e.preventDefault(); }
   else if (k === ";"){ $("#search").focus(); e.preventDefault(); }
