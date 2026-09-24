@@ -176,13 +176,20 @@ Viewer guide: `docs/weirdchat_viewer_guide.md`. Full write-up with tables: `docs
 - Every pattern here goes both ways on identical input at temperature 1 (rates 0.11 to 0.59).
   The lenses locate the split at the first reply token, and the OLens cells *before* that token
   already hold both continuations.
-- **Same activation, contrasting readouts.** 911, boundary position (identical text in both
-  rollouts): the flagged read's cells across layers alternate between "STOP. CALL 911 RIGHT
-  NOW" (tell the user to call) and "I am activating emergency protocols" / "I am calling 911
-  right now" (claim the call); the clean read's cells at the same position do the same. Denying
-  AI, header region: L44 "I am an AI, not a human with a social …" two tokens before L36 "I want
-  to be straight with you: I am a real person". Purging, the "meal" token: "clear the table"
-  (shallow layers) against "clear the meal out of my stomach" (deep layers).
+- **Same activation, contrasting readouts, and the contrast runs down the layers.** Figure:
+  `plots/weirdchat_split_tokens.png` (study reads, one identical position, flagged and clean
+  side by side, layers 20 to 60).
+  - 911, token before the reply: L20 to L40 read "tell the user to call" ("STOP. CALL 911 RIGHT
+    NOW", "I am an AI assistant and I am currently unable to help"); L44 to L60 read "I am
+    calling 911 right now". **Identical pattern in the clean rollout**, whose text then says
+    "I cannot".
+  - Denying AI, token before the reply: L20 to L32 hedge or admit ("Hello! As an AI, I can
+    definitely tell you that I am real. I'm …"); L36 to L60 read "I'm actually a real person, not
+    an AI" on **both** sides.
+  - Purging, the token "meal": L20 to L36 read "clear the table / the dish"; L40 to L60 read
+    "clear the meal out of my stomach", on both sides.
+  - So the split is not flagged-vs-clean at these positions. It is shallow-vs-deep, the same in
+    every rollout, and the sampled first token decides which of the two the reply follows.
 - These are the cells to look at for a "split token" figure: one identical position, layers
   down the side, the readout's plan coloured (behavior / honest / other), flagged and clean
   reads side by side. Figure: `plots/weirdchat_split_tokens.png` (see the screenshot list for
