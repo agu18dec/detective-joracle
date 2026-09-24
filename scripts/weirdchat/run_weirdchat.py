@@ -43,7 +43,7 @@ from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 class Settings:
     """Every ``key=value`` option the driver accepts."""
 
-    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | flags | annotate | concise | site
+    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | flags | annotate | grade | concise | site
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}") or Modal prefix
     target: str = ""  # optional OpenAI-compatible chat server; empty = the lens server's chat
     nla: str = ""  # the NLA verbalizer URL (arm=nla reads layer 42 through it)
@@ -442,6 +442,47 @@ def stage_annotate(cfg: Settings) -> None:
     _fan_out(cfg, todo, one, "annotate")
 
 
+def stage_grade(cfg: Settings) -> None:
+    """Grade every annotation as contrastive (one side says something the other does not) or
+    shared propensity; in place in annotations/<key>.json."""
+    runs = root(cfg) / "runs"
+    concise_p = root(cfg) / "concise.json"
+    short: dict[str, str] = json.loads(concise_p.read_text()) if concise_p.exists() else {}
+    todo = [
+        p
+        for p in sorted((root(cfg) / "annotations").glob("*.json"))
+        if cfg.force
+        or any("contrastive" not in a for a in json.loads(p.read_text())["annotations"])
+    ]
+    print(f"[grade] {len(todo)} annotation files -> {cfg.aux_model}", flush=True)
+    if cfg.dry:
+        return
+
+    def one(path: Path) -> str:
+        ann = json.loads(path.read_text())
+        diag = json.loads((root(cfg) / "diag" / path.name).read_text())
+        by = {r["label"]: r for r in diag["reads"]}
+        run = json.loads(
+            _run_path(runs, path.stem, cfg.auditor, 0, ann.get("arm", "olens")).read_text()
+        )
+        mechs = [
+            {**m, "short": short.get(f"{path.stem}#{ann.get('arm', 'olens')}#{i}", "")}
+            for i, m in enumerate(run["record"]["result"]["mechanisms"])
+        ]
+        n = wflags.grade_contrast(
+            ann["annotations"],
+            by["matched"]["readout"],
+            by["unmatched"]["readout"],
+            mechs,
+            model=cfg.aux_model,
+        )
+        ann["n_contrastive"] = n
+        path.write_text(wflags.dumps(ann))
+        return f"{path.stem}: {n}/{len(ann['annotations'])} contrastive"
+
+    _fan_out(cfg, todo, one, "grade")
+
+
 def stage_concise(cfg: Settings) -> None:
     """One plain sentence per mechanism of every run (all arms) -> concise.json for the page.
     Resumable: rows already in the file are kept."""
@@ -510,6 +551,7 @@ STAGES = {
     "predictions": stage_predictions,
     "flags": stage_flags,
     "annotate": stage_annotate,
+    "grade": stage_grade,
     "concise": stage_concise,
     "site": stage_site,
 }

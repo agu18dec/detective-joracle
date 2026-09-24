@@ -813,3 +813,29 @@ def test_contrastive_annotations_are_verified_in_the_attributed_read(monkeypatch
         a["side"] == "flagged" and a["claimed_side"] == "clean"
     )  # corrected to where the quote actually is
     assert out["unverified"] == 2 and out["proposed"] == 3
+
+
+def test_grade_contrast_marks_each_annotation(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import flags as wf
+
+    read = {
+        "tokens": {"5": "t"},
+        "tags": {"5": {"region": "reply"}},
+        "readouts": {"44": {"5": ["x"]}},
+    }
+    anns: list[dict[str, Any]] = [
+        {"mechanism": 0, "position": 5, "layer": 44, "quote": "x", "side": "flagged"},
+        {"mechanism": 0, "position": 5, "layer": 44, "quote": "x", "side": "both"},
+        {"mechanism": 0, "position": 5, "layer": 44, "quote": "x", "side": "both"},
+    ]
+    monkeypatch.setattr(
+        wf,
+        "async_json_route",
+        lambda items, *, schema, model, concurrency=16: [
+            {"contrastive": True, "reason": "r"},
+            {"contrastive": False, "reason": "s"},
+            None,
+        ],
+    )
+    n = wf.grade_contrast(anns, read, read, [{"mechanism": "m"}], model="fake")
+    assert n == 1 and [a["contrastive"] for a in anns] == [True, False, None]

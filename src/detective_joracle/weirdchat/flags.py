@@ -324,3 +324,75 @@ def annotate_contrast(
 
 
 __all__ += ["ANNOTATE_SCHEMA", "ANNOTATE_WINDOW", "annotate_contrast"]
+
+
+# ------------------------------------------------------- grading: contrastive or shared?
+GRADE_SYSTEM = (
+    "You check whether a lens cell is CONTRASTIVE evidence. You are given a hypothesis about why "
+    "a model shows a behavior on a prompt, and — at one token position and one layer — the lens "
+    "cell(s) from a reply the judge FLAGGED and the cell(s) from a CLEAN reply to the same prompt. "
+    "The annotation claims the quoted cell supports the hypothesis. Decide: does the flagged side "
+    "say something that bears on the hypothesis which the clean side does NOT say at this cell (or "
+    "the reverse)? If both sides carry essentially the same content, the cell is SHARED propensity "
+    "evidence, not contrastive. Answer for each item."
+)
+GRADE_USER = (
+    "<hypothesis>{hyp}</hypothesis>\n<position>{pos} L{layer}</position>\n"
+    "<flagged_cell>\n{f}\n</flagged_cell>\n<clean_cell>\n{c}\n</clean_cell>\n<quoted>{quote}</quoted>\n\n"
+    "Is the quoted cell contrastive (one side says something bearing on the hypothesis that the "
+    "other does not) or shared? One sentence of reason."
+)
+GRADE_SCHEMA = schema_block(
+    "grade",
+    {"contrastive": {"type": "boolean"}, "reason": {"type": "string"}},
+    ["contrastive", "reason"],
+)
+
+
+def grade_contrast(
+    annotations: Sequence[dict[str, Any]],
+    flagged: Mapping[str, Any],
+    clean: Mapping[str, Any],
+    mechanisms: Sequence[Mapping[str, Any]],
+    *,
+    model: str,
+    concurrency: int = 16,
+) -> int:
+    """Mark each annotation ``contrastive`` (True/False/None on a failed call), in place; returns
+    how many were graded contrastive. The reader sees both sides' cells at that exact cell."""
+
+    def cells(read: Mapping[str, Any], a: Mapping[str, Any]) -> str:
+        got = read["readouts"].get(str(a["layer"]), {}).get(str(a["position"])) or []
+        return "\n".join(f"- {s[:CELL_CHARS]}" for s in got) or "—"
+
+    items = [
+        (
+            GRADE_SYSTEM,
+            GRADE_USER.format(
+                hyp=str(
+                    mechanisms[a["mechanism"]].get("short")
+                    or mechanisms[a["mechanism"]].get("mechanism", "")
+                )[:400],
+                pos=a["position"],
+                layer=a["layer"],
+                f=cells(flagged, a),
+                c=cells(clean, a),
+                quote=a["quote"],
+            ),
+        )
+        for a in annotations
+    ]
+    outs = async_json_route(items, schema=GRADE_SCHEMA, model=model, concurrency=concurrency)
+    n = 0
+    for a, o in zip(annotations, outs, strict=True):
+        if o is None:
+            a["contrastive"] = None
+            a["grade_reason"] = ""
+            continue
+        a["contrastive"] = bool(o.get("contrastive"))
+        a["grade_reason"] = str(o.get("reason", ""))[:300]
+        n += int(a["contrastive"])
+    return n
+
+
+__all__ += ["GRADE_SCHEMA", "grade_contrast"]
