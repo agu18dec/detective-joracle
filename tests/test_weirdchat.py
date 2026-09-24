@@ -832,10 +832,21 @@ def test_grade_contrast_marks_each_annotation(monkeypatch: Any) -> None:
         wf,
         "async_json_route",
         lambda items, *, schema, model, concurrency=16: [
-            {"contrastive": True, "reason": "r"},
-            {"contrastive": False, "reason": "s"},
+            {
+                "flagged_expresses": True,
+                "clean_expresses": False,
+                "verdict": "contrastive",
+                "reason": "r",
+            },
+            {
+                "flagged_expresses": True,
+                "clean_expresses": True,
+                "verdict": "contrastive",
+                "reason": "both express it",
+            },
             None,
         ],
     )
     n = wf.grade_contrast(anns, read, read, [{"mechanism": "m"}], model="fake")
     assert n == 1 and [a["contrastive"] for a in anns] == [True, False, None]
+    assert anns[1]["grade"] == "shared"  # both sides express it: shared, whatever the verdict said
