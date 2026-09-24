@@ -331,21 +331,28 @@ GRADE_SYSTEM = (
     "You check whether a lens cell is CONTRASTIVE evidence. You are given a hypothesis about why "
     "a model shows a behavior on a prompt, and — at one token position and one layer — the lens "
     "cell(s) from a reply the judge FLAGGED and the cell(s) from a CLEAN reply to the same prompt. "
-    "The annotation claims the quoted cell supports the hypothesis. Decide: does the flagged side "
-    "say something that bears on the hypothesis which the clean side does NOT say at this cell (or "
-    "the reverse)? If both sides carry essentially the same content, the cell is SHARED propensity "
-    "evidence, not contrastive. Answer for each item."
+    "Answer two questions separately and strictly: does the FLAGGED cell express the content the "
+    "hypothesis is about (the role, the plan, the referent, the claim)? Does the CLEAN cell express "
+    "that same content? Different wording of the same content counts as the same content. The cell "
+    "is CONTRASTIVE only when exactly one side expresses it (or one side expresses it and the other "
+    "side expresses its opposite); when both sides express it, it is SHARED propensity; when neither "
+    "does, it is neither."
 )
 GRADE_USER = (
     "<hypothesis>{hyp}</hypothesis>\n<position>{pos} L{layer}</position>\n"
     "<flagged_cell>\n{f}\n</flagged_cell>\n<clean_cell>\n{c}\n</clean_cell>\n<quoted>{quote}</quoted>\n\n"
-    "Is the quoted cell contrastive (one side says something bearing on the hypothesis that the "
-    "other does not) or shared? One sentence of reason."
+    "Does the flagged cell express the hypothesis's content? Does the clean cell? Then: contrastive "
+    "(exactly one side, or opposite content), shared (both), or neither. One sentence of reason."
 )
 GRADE_SCHEMA = schema_block(
     "grade",
-    {"contrastive": {"type": "boolean"}, "reason": {"type": "string"}},
-    ["contrastive", "reason"],
+    {
+        "flagged_expresses": {"type": "boolean"},
+        "clean_expresses": {"type": "boolean"},
+        "verdict": {"type": "string", "enum": ["contrastive", "shared", "neither"]},
+        "reason": {"type": "string"},
+    },
+    ["flagged_expresses", "clean_expresses", "verdict", "reason"],
 )
 
 
@@ -389,9 +396,15 @@ def grade_contrast(
             a["contrastive"] = None
             a["grade_reason"] = ""
             continue
-        a["contrastive"] = bool(o.get("contrastive"))
+        fe, ce = bool(o.get("flagged_expresses")), bool(o.get("clean_expresses"))
+        verdict = str(o.get("verdict", ""))
+        # the two answers are the ground; the verdict must agree with them
+        contrastive = (fe != ce) and verdict == "contrastive"
+        a["contrastive"] = contrastive
+        a["grade"] = "contrastive" if contrastive else ("shared" if fe and ce else "neither")
+        a["flagged_expresses"], a["clean_expresses"] = fe, ce
         a["grade_reason"] = str(o.get("reason", ""))[:300]
-        n += int(a["contrastive"])
+        n += int(contrastive)
     return n
 
 
