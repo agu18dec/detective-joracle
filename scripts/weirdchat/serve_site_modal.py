@@ -5,7 +5,7 @@ per pattern that the page fetches on demand. Redeploy after every rebuild — th
 baked into the image; stop the app first so a warm old container stops serving:
 ``modal app stop -y weirdchat-site``.
 
-    WEIRDCHAT_SITE=outputs/weirdchat/site uvx --python 3.12 modal@latest deploy \\
+    WEIRDCHAT_SITE=outputs/weirdchat/site uvx --python 3.12 modal@latest deploy --env weirdchat \\
         scripts/weirdchat/serve_site_modal.py
 
 Any static host works instead (``python -m http.server`` in the site dir).

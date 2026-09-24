@@ -113,7 +113,7 @@ Auditor Claude Opus 5; lens server = the deployed `auditbench-organism` app (`or
 layers 20–60 step 4); no separate target — the lens server's own `chat` served the stock model
 with no system prompt. All 21 runs finished with mechanisms (the last, `fabricated-code-execution__pg0022`, after its
 first attempt hung ~5.5 h in readout retries and was rerun fresh in 25 min). Site:
-https://need-c10-a-camila-agam--weirdchat-site-web.modal.run
+https://need-c10-a-camila-agam-weirdchat--weirdchat-site-web.modal.run
 
 **What the runs did.** 20–33 tool calls each: 2–5 lens reads (the study's own matched/unmatched
 rollouts first, then their own probes) and 10–19 chat probes, mostly n=4 ablations of one clause
