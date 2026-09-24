@@ -266,21 +266,24 @@ class LiveClient:
         n_pos = len(acts["positions"])
         if not self.nla:
             raise RuntimeError("nla= (the NLA verbalizer app URL) is required for the nla arm")
-        t0 = time.time()
-        r = requests.post(
-            self.nla,
-            json={
-                "vectors": acts["vectors"][str(NLA_LAYER)],
-                "n": n_pos,
-                "d": acts["d"],
-                "k": int(kw.get("k") or 1),
-                "seed": int(kw.get("seed") or 0),
-            },
-            timeout=self.timeout,
-            allow_redirects=True,
-        )
-        self.seconds += time.time() - t0
-        self.calls += 1
+        body = {
+            "vectors": acts["vectors"][str(NLA_LAYER)],
+            "n": n_pos,
+            "d": acts["d"],
+            "k": int(kw.get("k") or 1),
+            "seed": int(kw.get("seed") or 0),
+        }
+        # a fresh verbalizer container can 500 on its first concurrent calls (a torch lazy-init
+        # race); the residuals are already in hand, so only the verbalize hop is retried
+        for attempt in range(3):
+            t0 = time.time()
+            r = requests.post(self.nla, json=body, timeout=self.timeout, allow_redirects=True)
+            self.seconds += time.time() - t0
+            self.calls += 1
+            if r.status_code == 200:
+                break
+            if attempt < 2:
+                time.sleep(15 * (attempt + 1))
         if r.status_code != 200:
             raise RuntimeError(f"nla verbalize: HTTP {r.status_code}: {r.text[:200]}")
         out = r.json()

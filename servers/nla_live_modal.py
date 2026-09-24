@@ -127,6 +127,17 @@ class NLA:
         self.injector = NormMatchInjector(self.model, mp)
         self._ids = ids
         self._mk = make_generator
+        # One serial warm-up generation before the endpoint opens: torch's lazily-initialised
+        # linalg kernels (solve_triangular in the gated delta rule) raise "lazy wrapper should be
+        # called at most once" when a fresh container's first calls arrive concurrently.
+        import torch
+
+        try:
+            warm = make_generator(self.model, self.tok, ids, self.injector, self.spec)
+            warm(torch.zeros(1, self.model.config.hidden_size, device="cuda"))
+            print(f"[nla-live] warm-up generation ok", flush=True)
+        except Exception as e:  # the endpoint still opens; the first real call will show the error
+            print(f"[nla-live] warm-up failed: {type(e).__name__}: {e}", flush=True)
         print(f"[nla-live] {LENS} ready, prompt {len(ids)} toks, marker {mp}", flush=True)
 
     @modal.fastapi_endpoint(method="POST")
