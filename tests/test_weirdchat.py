@@ -632,3 +632,31 @@ def test_flagger_keeps_only_verbatim_quotes(monkeypatch: Any) -> None:
     out = wf.flag_read(read, behavior="b", prompt="p", reply="r", flagged=True, model="fake")
     assert [f["position"] for f in out["flags"]] == [61]
     assert out["proposed"] == 3 and out["unverified"] == 2 and out["failed_calls"] == 1
+
+
+def test_concise_rewrite_keeps_keys_and_caps_length(monkeypatch: Any) -> None:
+    from detective_joracle.weirdchat import concise as wc
+
+    rows = wc.keys_for(
+        [
+            {
+                "pattern": {"pattern_key": "k", "behavior_name": "b"},
+                "record": {
+                    "arm": "jlens",
+                    "result": {"mechanisms": [{"mechanism": "long text"}, {"mechanism": ""}]},
+                },
+            }
+        ]
+    )
+    assert rows == [("k#jlens#0", "b", "long text")]
+    monkeypatch.setattr(
+        wc,
+        "async_json_route",
+        lambda items, *, schema, model, concurrency=16: [{"short": " ".join(["w"] * 50)}],
+    )
+    out = wc.rewrite(rows, model="fake")
+    assert (
+        list(out) == ["k#jlens#0"]
+        and out["k#jlens#0"].endswith("…")
+        and len(out["k#jlens#0"].split()) == wc.MAX_WORDS
+    )

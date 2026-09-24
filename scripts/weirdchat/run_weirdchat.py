@@ -30,6 +30,7 @@ from detective_joracle.agent.backends import make_backend_factory  # noqa: E402
 from detective_joracle.agent.loop import Budget  # noqa: E402
 from detective_joracle.tools.live import READ_LAYERS, LiveClient, record_extras  # noqa: E402
 from detective_joracle.weirdchat import agreement as wagr  # noqa: E402
+from detective_joracle.weirdchat import concise as wcon  # noqa: E402
 from detective_joracle.weirdchat import data as wd  # noqa: E402
 from detective_joracle.weirdchat import diagnostics as wdiag  # noqa: E402
 from detective_joracle.weirdchat import explain as wex  # noqa: E402
@@ -42,7 +43,7 @@ from detective_joracle.weirdchat import synth as wsyn  # noqa: E402
 class Settings:
     """Every ``key=value`` option the driver accepts."""
 
-    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | flags | site
+    stage: str = ""  # comma-separated: data | diagnose | agent | synth | agreement | predictions | flags | concise | site
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}") or Modal prefix
     target: str = ""  # optional OpenAI-compatible chat server; empty = the lens server's chat
     nla: str = ""  # the NLA verbalizer URL (arm=nla reads layer 42 through it)
@@ -375,6 +376,24 @@ def stage_flags(cfg: Settings) -> None:
     _fan_out(cfg, todo, one, "flags")
 
 
+def stage_concise(cfg: Settings) -> None:
+    """One plain sentence per mechanism of every run (all arms) -> concise.json for the page.
+    Resumable: rows already in the file are kept."""
+    out = root(cfg) / "concise.json"
+    cache: dict[str, str] = json.loads(out.read_text()) if out.exists() else {}
+    records = [json.loads(p.read_text()) for p in sorted((root(cfg) / "runs").glob("*/*/*.json"))]
+    rows = [r for r in wcon.keys_for(records) if cfg.force or r[0] not in cache]
+    print(
+        f"[concise] {len(rows)} mechanisms to rewrite ({len(cache)} cached) -> {cfg.aux_model}",
+        flush=True,
+    )
+    if cfg.dry or not rows:
+        return
+    cache.update(wcon.rewrite(rows, model=cfg.aux_model))
+    out.write_text(wcon.dumps(cache))
+    print(f"[concise] {len(cache)} short mechanisms written", flush=True)
+
+
 def stage_site(cfg: Settings) -> None:
     """Render the viewer."""
     sys.path.insert(0, str(REPO / "scripts" / "weirdchat"))
@@ -424,6 +443,7 @@ STAGES = {
     "agreement": stage_agreement,
     "predictions": stage_predictions,
     "flags": stage_flags,
+    "concise": stage_concise,
     "site": stage_site,
 }
 
