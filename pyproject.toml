@@ -20,6 +20,7 @@ dependencies = [
     "requests>=2.31",
     "openai>=1.40",
     "numpy>=1.26",
+    "pydra-config>=0.0.17",
 ]
 
 [project.urls]
