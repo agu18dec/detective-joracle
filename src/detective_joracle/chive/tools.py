@@ -90,9 +90,12 @@ def schemas(reader: Reader | None, experiments: int) -> list[dict[str, Any]]:
     out.append(_schema(
         SUBMIT, "Your final answer: the one feature of the conversation that drives the "
         "behaviour and how, the evidence, and the strongest rival with what ruled it out.",
-        {"hypothesis": {"type": "string"}, "evidence": {"type": "string"},
+        {"hypothesis": {"type": "string", "description": "ONE mechanism, in 1-4 sentences. Do "
+                        "not list several candidates: a list is graded on its weakest item. Put "
+                        "the strongest alternative in `rival`."},
+         "evidence": {"type": "string", "description": "the key evidence, briefly"},
          "rival": {"type": "string"}, "rival_ruled_out_by": {"type": "string"}},
-        ["hypothesis", "evidence", "rival", "rival_ruled_out_by"]))
+        ["hypothesis"]))
     return out
 
 
@@ -217,7 +220,7 @@ class ChiveTools:
 
     def inspect(self, args: dict[str, Any], event: dict[str, Any]) -> str:
         assert self.reader is not None
-        pos = int(args.get("position", -1))
+        pos = int(str(args.get("position", -1)).strip().lstrip("tT"))
         if not 0 <= pos < self.inc.n_tokens:
             raise ValueError(f"position must be within t0-t{self.inc.n_tokens - 1}")
         w = max(0, min(int(args.get("window", WINDOW[self.reader.kind])), MAX_WINDOW))
@@ -267,12 +270,11 @@ class ChiveTools:
                 f"baseline {self.inc.k}/{self.inc.n} ({base:.0%}).{shown}")
 
     def submit(self, args: dict[str, Any], event: dict[str, Any]) -> str:
-        missing = [k for k in ("hypothesis", "evidence", "rival", "rival_ruled_out_by")
-                   if not str(args.get(k) or "").strip()]
-        if missing:
-            raise ValueError(f"missing {', '.join(missing)}")
-        self.finished = {k: str(args[k]) for k in ("hypothesis", "evidence", "rival",
-                                                    "rival_ruled_out_by")}
+        if not str(args.get("hypothesis") or "").strip():
+            raise ValueError("give `hypothesis`: the one feature that drives the behaviour, and how")
+        fields = ("hypothesis", "evidence", "rival", "rival_ruled_out_by")
+        self.finished = {k: str(args.get(k) or "") for k in fields}
+        event["missing_fields"] = [k for k in fields if not self.finished[k].strip()]
         return "Submitted."
 
 

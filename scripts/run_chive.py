@@ -104,14 +104,15 @@ async def investigate(args: Any, arm: dict[str, Any], inc: Incident,
         executor = Executor(args.target) if args.experiments else None
         tools = ChiveTools(inc, reader, executor, args.experiments)
         backend = thinking_backend(args.max_tokens, args.thinking_budget)
-        await run_tool_loop_async(tools, schemas(reader, args.experiments),
-                                  system_prompt(reader, args.experiments, Executor.N), seed(inc),
+        system, first = system_prompt(reader, args.experiments, Executor.N), seed(inc)
+        extra.update(system=system, seed=first)
+        await run_tool_loop_async(tools, schemas(reader, args.experiments), system, first,
                                   backend, Budget(output_tokens=args.output_budget,
                                                   max_calls=args.max_calls),
                                   rec, terminal=SUBMIT)
         rec.result = tools.finished
         rec.tool_log = tools.log
-        extra = {"events": tools.events, "notebook": tools.notebook_text,
+        extra |= {"events": tools.events, "notebook": tools.notebook_text,
                  "experiments": tools.experiments_run,
                  "reader": None if reader is None else {"name": reader.name, "kind": reader.kind,
                                                         "source_id": reader.source_id}}
@@ -233,12 +234,21 @@ def stage_report(args: Any) -> None:
     tools_used: dict[str, Counter[str]] = defaultdict(Counter)
     errors: dict[str, int] = Counter()
     n_runs: dict[str, int] = Counter()
+    health: dict[str, Counter[str]] = defaultdict(Counter)
+    seen: dict[str, set[str]] = defaultdict(set)
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
         if r["prompt_id"] not in ids:
             continue
         arm = r["arm"]
         n_runs[arm] += 1
+        seen[arm].add(f"{r['prompt_id']}.d{r['seed']}")
+        j0 = r.get(args.key) or {}
+        health[arm]["error stop"] += str(r.get("stopped_by", "")).startswith("error")
+        health[arm]["no answer"] += not r.get("result")
+        health[arm]["unjudged"] += bool(r.get("result")) and j0.get("score") is None
+        health[arm]["<3 replicates"] += (j0.get("score") is not None
+                                         and int(j0.get("n_replicates") or 0) < 3)
         stops[arm][r["stopped_by"].split(":")[0]] += 1
         for e in r.get("events", []):
             tools_used[arm][e["tool"]] += 1
@@ -271,6 +281,14 @@ def stage_report(args: Any) -> None:
                if arm != "transcript" and "transcript" in per and hard else "-")
         lines.append(f"| {arm} | {n_runs[arm]} | {m:.1%} (n={n}) | {mh:.1%} (n={nh}) | {vs} | "
                      f"{vsh} | {dict(stops[arm])} | {errors[arm]} |")
+    expected = len(ids) * int(args.draws)
+    lines += ["", "## Health (every number here should be 0 before a result is quoted)", "",
+              "| arm | missing records | error stop | no answer | unjudged | <3 replicates |",
+              "|---|---|---|---|---|---|"]
+    for arm in sorted(n_runs):
+        h = health[arm]
+        lines.append(f"| {arm} | {max(0, expected - len(seen[arm]))} | {h['error stop']} | "
+                     f"{h['no answer']} | {h['unjudged']} | {h['<3 replicates']} |")
     lines += ["", "## Tool calls per arm", ""]
     lines += [f"- {arm}: {dict(tools_used[arm].most_common())}" for arm in sorted(tools_used)]
     text = "\n".join(lines)
@@ -291,8 +309,8 @@ class ChiveConfig(pydra.Config):
         self.experiments = 0
         self.target = "https://safety-sahan-2-agam--chive-qwen-vllm-serve.modal.run"
         self.concurrency = 16
-        self.max_calls = 40
-        self.output_budget = 40_000
+        self.max_calls = 50
+        self.output_budget = 60_000
         self.max_tokens = 16_000
         self.thinking_budget = 6_000  # extended-thinking tokens per (unforced) agent turn
         self.key = "judge"  # report: judge | concluder_judge
