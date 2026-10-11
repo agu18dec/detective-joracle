@@ -53,6 +53,11 @@ tested once on held-out incidents. Started 2026-10-11 08:00 UTC.
 | r2a | B + continue_from (guide: use inside the response, at the behaviour) | | | | | | |
 | r2b | B + 1 experiment (budgeted counterfactual) | | | | | | |
 
+**Agreement (offline arbiter over existing dev records):** B draw0 vs draw1 -> 61.5% (inputs
+59.4 / 65.6); transcript vs B -> 58.9% (picks B 79%); transcript+continue vs B -> 56.2% (picks
+B only 26%; -6.2 [-12.5, -0.5] vs B). **Drop**: B subsumes the arbiter's E1 gain (which came
+from repairing abandoned text answers), and continuation evidence persuades the arbiter wrongly.
+
 **Round 1 reading:** no tool adds on top of B; the gain is the reasoning protocol (commit a
 transcript-only hypothesis first, overturn only on contrary evidence, absences are invisible to
 readouts). Extra tools spread attention; continue_from pulled agents off correct readout

@@ -125,6 +125,9 @@ def run(cfg: Config) -> None:
                     if k == 1:
                         continue
                     a, b = rec(arm[:-5], p, 0), rec(arm[:-5], p, 1)
+                elif "~" in arm:  # "X~Y": arm X against arm Y, same draw
+                    x, y = arm.split("~", 1)
+                    a, b = rec(x, p, k), rec(y, p, k)
                 else:
                     a, b = rec("transcript", p, k), rec(arm, p, k)
                 if a is None or b is None:
@@ -157,7 +160,7 @@ def run(cfg: Config) -> None:
         "hashed, no ground truth); the pick keeps that answer's judge score. pass@1 averaged "
         "over draws then incidents; differences paired by incident with 95% bootstrap CIs.",
         "",
-        "| arm (X:self = X draw 0 vs draw 1) | input A | input B | arbiter | arbiter vs method (pp) | arbiter vs transcript "
+        "| pair (X = transcript vs X; X:self = X draw 0 vs draw 1; X~Y = X vs Y) | input A | input B | arbiter | arbiter vs method (pp) | arbiter vs transcript "
         "(pp) | picks method | hard: transcript / method / arbiter | hard: arbiter vs method |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
