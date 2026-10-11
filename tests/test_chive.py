@@ -145,3 +145,35 @@ def test_apply_edit() -> None:
         apply_edit(msgs, [{"keep": 1, "replace": [{"old": "snow", "new": "x"}]}])
     with pytest.raises(ValueError):
         apply_edit(msgs, [{"keep": 1}, {"role": "assistant", "content": "x"}])
+
+
+def test_candidate_selection(tmp_path: Path) -> None:
+    inc = incident()
+    cands = [("A", "the word rain cues sadness"), ("B", "poems are sad by default")]
+    first = seed(inc, cands)
+    assert "## Candidate causes" in first and "B) poems are sad by default" in first
+    sub = schemas(None, 0, ["A", "B"])[-1]["function"]["parameters"]
+    assert sub["required"] == ["choice", "hypothesis"] and sub["properties"]["choice"]["enum"]
+    tools = ChiveTools(inc, None, letters=["A", "B"])
+    backend = FakeBackend(
+        [
+            ("", [(SUBMIT, {"hypothesis": "rain", "choice": "C"})], 10),  # invalid: ERROR, continue
+            ("", [(SUBMIT, {"hypothesis": "rain cues sadness", "choice": "a)"})], 10),
+        ],
+        terminal=SUBMIT,
+    )
+    rec = RunRecord(organism="p1", condition="test", arm="transcript", auditor="fake", seed=0)
+    asyncio.run(
+        run_tool_loop_async(
+            tools,
+            schemas(None, 0, ["A", "B"]),
+            "sys",
+            first,
+            backend,
+            Budget(),
+            rec,
+            terminal=SUBMIT,
+        )
+    )
+    assert tools.finished and tools.finished["choice"] == "A"
+    assert tools.events[0].get("error")

@@ -83,7 +83,7 @@ class _KeylessOpenAI(AsyncOpenAI):
         pass
 
 
-def client(max_retries: int = 6) -> AsyncOpenAI:
+def client(max_retries: int = 10) -> AsyncOpenAI:
     """An async OpenAI-compatible client for Claude (explicit key, or keyless via the tunnel)."""
     key = os.environ.get("ANTHROPIC_API_KEY")
     if key:

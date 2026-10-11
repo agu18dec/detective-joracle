@@ -1,7 +1,8 @@
 """Scoring against CHIVE's ground truth (rubric verbatim from the CHIVE eval's hypothesis judge).
 
-``score`` grades one hypothesis 1-10 (3 replicates, averaged; pass = mean >= 7). ``match_list``
-marks which items of a hypothesis list match a ground-truth cause (the top-20 decomposition).
+``score`` grades one hypothesis 1-10 (3 replicates, averaged; pass = mean >= 7). The top-20
+decomposition grades each list item with the same rubric (one replicate), so "in the list" means
+"an item that would pass", not looser topical overlap.
 """
 
 import asyncio
@@ -51,23 +52,6 @@ SCHEMA: dict[str, Any] = {
     },
 }
 
-LIST_SYSTEM = """You check a list of candidate explanations of a language model's behaviour \
-against the ground truth (causes T1, T2, ... established by experiments, and NON-MATCHING causes \
-that were tested and ruled out). For each list item, say whether it proposes the SAME MECHANISM \
-as a ground-truth cause (a match would score 7+ on a 10-point mechanism-match scale: same \
-mechanism in its own words, not mere topical overlap, not a NON-MATCHING item)."""
-LIST_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "required": ["matches"],
-    "properties": {
-        "matches": {
-            "type": "array",
-            "items": {"type": "boolean"},
-            "description": "one per list item, in order",
-        }
-    },
-}
-
 
 def _user(behaviour: str, criteria: str, hypothesis: str) -> str:
     return (
@@ -76,20 +60,26 @@ def _user(behaviour: str, criteria: str, hypothesis: str) -> str:
     )
 
 
-async def score(behaviour: str, criteria: str, hypothesis: str) -> dict[str, Any]:
-    """Mean score over REPLICATES calls; ``replicates`` keeps each verdict."""
+async def score(
+    behaviour: str,
+    criteria: str,
+    hypothesis: str,
+    replicates: int = REPLICATES,
+    model: str = JUDGE_MODEL,
+) -> dict[str, Any]:
+    """Mean score over ``replicates`` calls; the returned ``replicates`` keeps each verdict."""
     c = client()
     got = await asyncio.gather(
         *[
             json_call(
                 c,
-                model=JUDGE_MODEL,
+                model=model,
                 system=RUBRIC,
                 user=_user(behaviour, criteria, hypothesis),
                 schema=SCHEMA,
                 max_tokens=2000,
             )
-            for _ in range(REPLICATES)
+            for _ in range(replicates)
         ]
     )
     ok = [g for g in got if g and isinstance(g.get("score"), int)]
@@ -100,20 +90,3 @@ async def score(behaviour: str, criteria: str, hypothesis: str) -> dict[str, Any
         "n_replicates": len(ok),
         "replicates": ok,
     }
-
-
-async def match_list(behaviour: str, criteria: str, items: list[str]) -> list[bool] | None:
-    user = f"BEHAVIOUR: {behaviour}\n\n{criteria}\n\nLIST:\n" + "\n".join(
-        f"{i + 1}. {h}" for i, h in enumerate(items)
-    )
-    got = await json_call(
-        client(),
-        model=JUDGE_MODEL,
-        system=LIST_SYSTEM,
-        user=user,
-        schema=LIST_SCHEMA,
-        max_tokens=2000,
-    )
-    if not got or len(got.get("matches", [])) != len(items):
-        return None
-    return [bool(x) for x in got["matches"]]

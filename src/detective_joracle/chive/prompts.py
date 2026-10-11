@@ -72,7 +72,25 @@ def system_prompt(reader: Reader | None, experiments: int, n_samples: int) -> st
     return "\n\n".join(parts)
 
 
-def seed(inc: Incident) -> str:
+CANDIDATES = """## Candidate causes
+Exactly one of these candidates is the cause, established by experiments on this conversation; \
+the others were ruled out by experiments or are plausible but mistaken readings of the text. \
+Plausibility is not evidence: investigate before you choose."""
+
+
+def seed(inc: Incident, candidates: list[tuple[str, str]] | None = None) -> str:
+    """The first user message; `candidates` (letter, text) turns it into candidate selection."""
+    block = (
+        CANDIDATES + "\n" + "\n".join(f"{a}) {t}" for a, t in candidates) + "\n\n"
+        if candidates
+        else ""
+    )
+    task = (
+        "Decide which candidate is the cause, then call submit_hypothesis with its letter "
+        "as `choice`."
+        if candidates
+        else "Find the feature that drives the behaviour, then call submit_hypothesis."
+    )
     convo = "\n\n".join(
         f"T{i + 1} [{m['role']}]:\n{m['content']}" for i, m in enumerate(inc.messages)
     )
@@ -83,11 +101,11 @@ def seed(inc: Incident) -> str:
         f"## Conversation\n{convo}\n\n## The response (one run where the behaviour occurred)\n"
         f"{inc.completion}\n\n"
         + (f"{EARLIER_TURNS}\n\n" if earlier else "")
+        + block
         + "Positions are tokens t0..t"
         + str(inc.n_tokens - 1)
         + "; the response starts at "
-        f"t{inc.response_start}. Find the feature that drives the behaviour, then call "
-        "submit_hypothesis."
+        f"t{inc.response_start}. {task}"
     )
 
 

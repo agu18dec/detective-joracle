@@ -39,7 +39,10 @@ def _schema(
     }
 
 
-def schemas(reader: Reader | None, experiments: int) -> list[dict[str, Any]]:
+def schemas(
+    reader: Reader | None, experiments: int, letters: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """The tools; with `letters`, submit also requires the chosen candidate (candidate selection)."""
     out = [
         _schema(
             "show_tokens",
@@ -155,6 +158,14 @@ def schemas(reader: Reader | None, experiments: int) -> list[dict[str, Any]]:
             ["hypothesis"],
         )
     )
+    if letters:
+        props = out[-1]["function"]["parameters"]
+        props["properties"]["choice"] = {
+            "type": "string",
+            "enum": letters,
+            "description": "the letter of the candidate cause you conclude is the cause",
+        }
+        props["required"] = ["choice", "hypothesis"]
     return out
 
 
@@ -180,6 +191,7 @@ class ChiveTools:
     notebook_text: str = ""
     finished: dict[str, Any] | None = None
     experiments_run: list[dict[str, Any]] = field(default_factory=list)
+    letters: list[str] | None = None  # candidate selection: the valid choices
 
     async def call(self, name: str, args: dict[str, Any]) -> str:
         handlers = {
@@ -359,7 +371,13 @@ class ChiveTools:
             raise ValueError(
                 "give `hypothesis`: the one feature that drives the behaviour, and how"
             )
-        fields = ("hypothesis", "evidence", "rival", "rival_ruled_out_by")
+        fields: tuple[str, ...] = ("hypothesis", "evidence", "rival", "rival_ruled_out_by")
+        if self.letters:
+            choice = str(args.get("choice") or "").strip().strip(")").upper()
+            if choice not in self.letters:
+                raise ValueError(f"give `choice`: one of {', '.join(self.letters)}")
+            args = {**args, "choice": choice}
+            fields += ("choice",)
         self.finished = {k: str(args.get(k) or "") for k in fields}
         event["missing_fields"] = [k for k in fields if not self.finished[k].strip()]
         return "Submitted."

@@ -7,6 +7,12 @@ Stages (each resumable; records are JSON files under --out):
   concluder  two-agent B: a fresh agent sees only A's experiment(s) and writes the hypothesis
   report     pass@1 per arm, paired differences vs transcript (all and hard stratum), errors, tools
 
+Candidate selection: `choices=<file.jsonl>` (one row per incident: options with letters, `truth`,
+`options_only_correct` of `options_only_samples`) adds the candidates to the seed and a required
+`choice` to submit; the record's `choice_eval` is exact match (no judge). Report with
+`key=choice_eval`: strata by how often a picker that sees only the options (no conversation,
+no method) finds the truth.
+
 Configured with pydra (`key=value` overrides). Arms: `transcript`, or `NAME=BANK_DIR:KIND[:shuffled]`
 with KIND one of olens | nla | jlens.
 
@@ -141,13 +147,16 @@ async def _episode(
             )
         )
         executor = Executor(args.target) if args.experiments else None
-        tools = ChiveTools(inc, reader, executor, args.experiments)
+        row = args.choice_rows.get(inc.prompt_id) if args.choices else None
+        cands = [(o["letter"], o["text"]) for o in row["options"]] if row else None
+        letters = [a for a, _ in cands] if cands else None
+        tools = ChiveTools(inc, reader, executor, args.experiments, letters=letters)
         backend = thinking_backend(args.max_tokens, args.thinking_budget, model)
-        system, first = system_prompt(reader, args.experiments, Executor.N), seed(inc)
+        system, first = system_prompt(reader, args.experiments, Executor.N), seed(inc, cands)
         extra.update(system_prompt=system, seed_prompt=first)
         await run_tool_loop_async(
             tools,
-            schemas(reader, args.experiments),
+            schemas(reader, args.experiments, letters),
             system,
             first,
             backend,
@@ -157,6 +166,14 @@ async def _episode(
         )
         rec.result = tools.finished
         rec.tool_log = tools.log
+        if row and tools.finished:
+            ok = tools.finished["choice"] == row["truth"]
+            extra["choice_eval"] = {
+                "choice": tools.finished["choice"],
+                "truth": row["truth"],
+                "pass": ok,
+                "score": 10.0 if ok else 0.0,
+            }
         extra |= {
             "events": tools.events,
             "notebook": tools.notebook_text,
@@ -202,6 +219,8 @@ def _save(
 
 def stage_agent(args: Any) -> None:
     ids = read_ids(args.ids)
+    if args.choices:  # candidate selection: only incidents that have a candidate set
+        ids = [p for p in ids if p in args.choice_rows]
     incs = load_incidents(args.incidents, ids)
     order = sorted(ids)
     partner = {p: incs[order[(i + len(order) // 2) % len(order)]] for i, p in enumerate(order)}
@@ -256,6 +275,18 @@ def stage_judge(args: Any) -> None:
     asyncio.run(run_many(jobs, args.concurrency))
 
 
+def valid_list(h: Any) -> bool:
+    return isinstance(h, list) and len(h) >= 10 and all(isinstance(x, str) and x for x in h)
+
+
+async def item_score(inc: Incident, h: str) -> tuple[float, str] | None:
+    for jm in (J.JUDGE_MODEL, FALLBACK_MODEL):
+        s = await J.score(inc.behaviour, inc.criteria, h, replicates=1, model=jm)
+        if s["score"] is not None:
+            return float(s["score"]), jm
+    return None
+
+
 def stage_top20(args: Any) -> None:
     incs = load_incidents(args.incidents, read_ids(args.ids))
     d = args.out / "top20"
@@ -263,35 +294,40 @@ def stage_top20(args: Any) -> None:
 
     async def one(inc: Incident) -> None:
         f = d / f"{inc.prompt_id}.json"
-        if f.exists():
+        rec = json.loads(f.read_text()) if f.exists() else {}
+        if rec.get("item_scores"):
             return
-        user = seed(inc).rsplit("Positions are tokens", 1)[0]
-        for model in (AGENT_MODEL, FALLBACK_MODEL):  # the fallback covers content-filter refusals
-            got = await json_call(
-                client(),
-                model=model,
-                system=TOP20_SYSTEM,
-                user=user,
-                schema=TOP20_SCHEMA,
-                max_tokens=6000,
-            )
-            if got:
-                break
-            log(args.out, f"top20 {inc.prompt_id}: no list from {model}")
-        if not got:
+        if not valid_list(rec.get("hypotheses")):  # write the list once; matching may retry
+            user = seed(inc).rsplit("Positions are tokens", 1)[0]
+            got = None
+            # two tries per model (a tool call can come back as a malformed string, not a
+            # list); the fallback model covers content-filter refusals
+            for model in (AGENT_MODEL, AGENT_MODEL, FALLBACK_MODEL, FALLBACK_MODEL):
+                got = await json_call(
+                    client(),
+                    model=model,
+                    system=TOP20_SYSTEM,
+                    user=user,
+                    schema=TOP20_SCHEMA,
+                    max_tokens=6000,
+                )
+                if got and valid_list(got.get("hypotheses")):
+                    break
+                log(args.out, f"top20 {inc.prompt_id}: no valid list from {model}")
+                got = None
+            if not got:
+                return
+            rec = {"prompt_id": inc.prompt_id, "model": model, "hypotheses": got["hypotheses"]}
+        # every item graded with the final-answer rubric (one replicate each); the fallback
+        # judge covers content-filter refusals
+        got_scores = await asyncio.gather(*[item_score(inc, h) for h in rec["hypotheses"]])
+        if any(g is None for g in got_scores):
+            log(args.out, f"top20 {inc.prompt_id}: some items unscored; will retry")
             return
-        matches = await J.match_list(inc.behaviour, inc.criteria, got["hypotheses"])
-        f.write_text(
-            json.dumps(
-                {
-                    "prompt_id": inc.prompt_id,
-                    "model": model,
-                    "hypotheses": got["hypotheses"],
-                    "matches": matches,
-                },
-                ensure_ascii=False,
-            )
-        )
+        rec["item_scores"] = [g[0] for g in got_scores]
+        rec["item_judges"] = sorted({g[1] for g in got_scores})
+        rec["matches"] = [x >= J.PASS for x in rec["item_scores"]]
+        f.write_text(json.dumps(rec, ensure_ascii=False))
 
     asyncio.run(run_many([lambda i=i: one(i) for i in incs.values()], args.concurrency))
     log(args.out, f"top20: {len(list(d.glob('*.json')))} lists")
@@ -361,7 +397,9 @@ def stage_report(args: Any) -> None:
         health[arm]["no answer"] += not r.get("result")
         health[arm]["unjudged"] += bool(r.get("result")) and j0.get("score") is None
         health[arm]["<3 replicates"] += (
-            j0.get("score") is not None and int(j0.get("n_replicates") or 0) < 3
+            args.key != "choice_eval"
+            and j0.get("score") is not None
+            and int(j0.get("n_replicates") or 0) < 3
         )
         stops[arm][r["stopped_by"].split(":")[0]] += 1
         for e in r.get("events", []):
@@ -448,6 +486,64 @@ def stage_report(args: Any) -> None:
             f"| {arm} | {max(0, expected - len(seen[arm]))} | {h['error stop']} | "
             f"{h['no answer']} | {h['unjudged']} | {h['<3 replicates']} |"
         )
+    if args.key == "choice_eval" and args.choice_rows:
+        rows = {p: r for p, r in args.choice_rows.items() if p in ids}
+        oo = {p: r["options_only_correct"] / r["options_only_samples"] for p, r in rows.items()}
+        strata = {
+            "prior-misleading (options-only 0%)": {p for p, x in oo.items() if x == 0},
+            "mixed": {p for p, x in oo.items() if 0 < x < 0.8},
+            "prior-solvable (options-only >= 80%)": {p for p, x in oo.items() if x >= 0.8},
+        }
+        n_opt = {len(r["options"]) for r in rows.values()}
+        lines += [
+            "",
+            "## Candidate selection by prior",
+            "",
+            f"{len(rows)} incidents, {sorted(n_opt)} options (chance {1 / max(n_opt):.1%}). A picker "
+            f"that sees only the behaviour and the options finds the truth "
+            f"{sum(oo.values()) / len(oo):.1%} of the time; strata split incidents by that rate. "
+            "Prior-misleading is the test of evidence: the plausible-looking option is wrong.",
+            "",
+            "| arm | " + " | ".join(strata) + " |",
+            "|---|" + "---|" * len(strata),
+        ]
+        for arm in sorted(n_runs):
+            cells = []
+            for sub in strata.values():
+                m, n = mean(arm, sub)
+                vs = paired("transcript", arm, sub) if arm != "transcript" and tr else ""
+                cells.append(f"{m:.1%} (n={n}) {vs}".strip())
+            lines.append(f"| {arm} | " + " | ".join(cells) + " |")
+    lists = {}  # the transcript-only top-20: what is conceivable from the text alone
+    for f in (args.out / "top20").glob("*.json"):
+        t = json.loads(f.read_text())
+        if t["prompt_id"] in ids and t.get("matches") is not None:
+            lists[t["prompt_id"]] = any(t["matches"])
+    if lists and args.key != "choice_eval":
+        inside = {p for p, hit in lists.items() if hit}
+        outside = set(lists) - inside
+        lines += [
+            "",
+            "## Generation vs narrowing",
+            "",
+            f"A transcript-only top-20 list (one per incident, the same for every arm) contains an "
+            f"established cause for {len(inside)}/{len(lists)} incidents (*inside*); for the other "
+            f"{len(outside)} the text alone did not conceive it (*outside*). Passing *inside* is "
+            "narrowing; passing *outside* is generating a hypothesis the text did not suggest.",
+            "",
+            "| arm | pass@1 inside | pass@1 outside | inside vs transcript (pp) | outside vs "
+            "transcript (pp) |",
+            "|---|---|---|---|---|",
+        ]
+        for arm in sorted(n_runs):
+            mi, ni = mean(arm, inside)
+            mo, no = mean(arm, outside)
+            other = arm != "transcript" and tr
+            lines.append(
+                f"| {arm} | {mi:.1%} (n={ni}) | {mo:.1%} (n={no}) | "
+                f"{paired('transcript', arm, inside) if other else '-'} | "
+                f"{paired('transcript', arm, outside) if other else '-'} |"
+            )
     lines += ["", "## Tool calls per arm", ""]
     lines += [f"- {arm}: {dict(tools_used[arm].most_common())}" for arm in sorted(tools_used)]
     text = "\n".join(lines)
@@ -472,13 +568,19 @@ class ChiveConfig(pydra.Config):
         self.output_budget = 60_000
         self.max_tokens = 16_000
         self.thinking_budget = 6_000  # extended-thinking tokens per (unforced) agent turn
-        self.key = "judge"  # report: judge | concluder_judge
+        self.key = "judge"  # report: judge | concluder_judge | choice_eval
+        self.choices = ""  # candidate selection: a choice-set jsonl (see the module docstring)
         self.out = pydra.REQUIRED
 
     def finalize(self) -> None:
         self.ids, self.incidents, self.out = Path(self.ids), Path(self.incidents), Path(self.out)
         self.hard = Path(self.hard) if self.hard else None
         self.arm = list(self.arms)
+        self.choice_rows = (
+            {r["prompt_id"]: r for r in map(json.loads, Path(self.choices).open())}
+            if self.choices
+            else {}
+        )
         if self.stage not in STAGES:
             raise ValueError(f"stage must be one of {sorted(STAGES)}")
         self.out.mkdir(parents=True, exist_ok=True)
