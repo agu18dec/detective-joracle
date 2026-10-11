@@ -437,9 +437,13 @@ def stage_report(args: Any) -> None:
     fallback: dict[str, int] = Counter()
     seen: dict[str, set[str]] = defaultdict(set)
     draw_pass: dict[str, dict[tuple[str, int], float]] = defaultdict(dict)
+    skipped_no_exp = 0
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
         if r["prompt_id"] not in ids:
+            continue
+        if args.key == "concluder_judge" and not r.get("experiments"):
+            skipped_no_exp += 1  # no experiment ran: there is nothing for a concluder to read
             continue
         arm = r["arm"]
         n_runs[arm] += 1
@@ -638,6 +642,12 @@ def stage_report(args: Any) -> None:
                 f"{paired('transcript', arm, inside) if other else '-'} | "
                 f"{paired('transcript', arm, outside) if other else '-'} |"
             )
+    if skipped_no_exp:
+        lines += [
+            "",
+            f"{skipped_no_exp} episodes ran no experiment and have no concluder; they "
+            "are left out of this report.",
+        ]
     lines += ["", "## Tool calls per arm", ""]
     lines += [f"- {arm}: {dict(tools_used[arm].most_common())}" for arm in sorted(tools_used)]
     text = "\n".join(lines)
