@@ -42,19 +42,27 @@ from detective_joracle.chive.readers import load_reader
 from detective_joracle.chive.tools import SUBMIT, ChiveTools, render_experiments, schemas
 
 AGENT_MODEL = "claude-opus-5"
+# Opus's safety filter blocks a few incidents outright (an empty reply, finish_reason
+# content_filter, e.g. a keygen request): those episodes are rerun with this model and recorded.
+FALLBACK_MODEL = "claude-sonnet-5"
 
 
-def thinking_backend(max_tokens: int, budget: int) -> Any:
+def thinking_backend(max_tokens: int, budget: int, model: str = AGENT_MODEL) -> Any:
     """Extended thinking on every turn except forced ones (Anthropic disallows thinking with a
     forced tool call, and the loop forces the terminal at the end)."""
     c = client()
     think = async_openai_compatible_backend(
-        c, AGENT_MODEL, cache=True, max_tokens=max_tokens,
-        extra_body={"thinking": {"type": "enabled", "budget_tokens": budget}} if budget else None)
-    plain = async_openai_compatible_backend(c, AGENT_MODEL, cache=True, max_tokens=max_tokens)
+        c,
+        model,
+        cache=True,
+        max_tokens=max_tokens,
+        extra_body={"thinking": {"type": "enabled", "budget_tokens": budget}} if budget else None,
+    )
+    plain = async_openai_compatible_backend(c, model, cache=True, max_tokens=max_tokens)
 
-    async def call(messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-                   force_tool: str | None = None) -> Any:
+    async def call(
+        messages: list[dict[str, Any]], tools: list[dict[str, Any]], force_tool: str | None = None
+    ) -> Any:
         return await (plain if force_tool else think)(messages, tools, force_tool)
 
     return call
@@ -74,8 +82,12 @@ def parse_arm(spec: str) -> dict[str, Any]:
     parts = rest.split(":")
     if len(parts) not in (2, 3) or parts[1] not in ("olens", "nla", "jlens"):
         raise SystemExit(f"bad --arm {spec!r}: NAME=BANK_DIR:KIND[:shuffled]")
-    return {"name": name, "bank": Path(parts[0]), "kind": parts[1],
-            "shuffled": len(parts) == 3 and parts[2] == "shuffled"}
+    return {
+        "name": name,
+        "bank": Path(parts[0]),
+        "kind": parts[1],
+        "shuffled": len(parts) == 3 and parts[2] == "shuffled",
+    }
 
 
 def rec_path(out: Path, ev: str, arm: str, pid: str, draw: int) -> Path:
@@ -86,47 +98,106 @@ def done(path: Path) -> bool:
     if not path.exists():
         return False
     r = json.loads(path.read_text())
-    return not str(r.get("stopped_by", "")).startswith("error")
+    refused = r.get("stopped_by") == "idle" and not r.get("result")
+    return not str(r.get("stopped_by", "")).startswith("error") and not refused
 
 
 # --------------------------------------------------------------------------- agent
 
-async def investigate(args: Any, arm: dict[str, Any], inc: Incident,
-                      partner: Incident | None, draw: int, path: Path) -> None:
+
+async def investigate(
+    args: Any, arm: dict[str, Any], inc: Incident, partner: Incident | None, draw: int, path: Path
+) -> None:
     t0 = time.time()
-    rec = RunRecord(organism=inc.prompt_id, condition=args.eval, arm=arm["name"],
-                    auditor=AGENT_MODEL, seed=draw)
+    for model in (AGENT_MODEL, FALLBACK_MODEL):
+        rec, extra = await _episode(args, arm, inc, partner, draw, model)
+        # Opus's content filter: an empty reply at the start, or empty replies mid-run that end
+        # the episode idle with no answer
+        refused = rec.stopped_by == "idle" and not rec.result
+        if not refused:
+            break
+        log(
+            args.out,
+            f"{args.eval}/{arm['name']}/{inc.prompt_id}.d{draw}: {model} refused "
+            f"(content filter); rerunning with {FALLBACK_MODEL}",
+        )
+    extra["refused_by"] = [AGENT_MODEL] if rec.auditor == FALLBACK_MODEL else []
+    _save(args, arm, inc, draw, path, rec, extra, t0)
+
+
+async def _episode(
+    args: Any, arm: dict[str, Any], inc: Incident, partner: Incident | None, draw: int, model: str
+) -> tuple[RunRecord, dict[str, Any]]:
+    rec = RunRecord(
+        organism=inc.prompt_id, condition=args.eval, arm=arm["name"], auditor=model, seed=draw
+    )
     extra: dict[str, Any] = {}
     try:
-        reader = (None if arm["bank"] is None else
-                  load_reader(arm["name"], arm["kind"], arm["bank"], inc,
-                              partner if arm["shuffled"] else None))
+        reader = (
+            None
+            if arm["bank"] is None
+            else load_reader(
+                arm["name"], arm["kind"], arm["bank"], inc, partner if arm["shuffled"] else None
+            )
+        )
         executor = Executor(args.target) if args.experiments else None
         tools = ChiveTools(inc, reader, executor, args.experiments)
-        backend = thinking_backend(args.max_tokens, args.thinking_budget)
+        backend = thinking_backend(args.max_tokens, args.thinking_budget, model)
         system, first = system_prompt(reader, args.experiments, Executor.N), seed(inc)
-        extra.update(system=system, seed=first)
-        await run_tool_loop_async(tools, schemas(reader, args.experiments), system, first,
-                                  backend, Budget(output_tokens=args.output_budget,
-                                                  max_calls=args.max_calls),
-                                  rec, terminal=SUBMIT)
+        extra.update(system_prompt=system, seed_prompt=first)
+        await run_tool_loop_async(
+            tools,
+            schemas(reader, args.experiments),
+            system,
+            first,
+            backend,
+            Budget(output_tokens=args.output_budget, max_calls=args.max_calls),
+            rec,
+            terminal=SUBMIT,
+        )
         rec.result = tools.finished
         rec.tool_log = tools.log
-        extra |= {"events": tools.events, "notebook": tools.notebook_text,
-                 "experiments": tools.experiments_run,
-                 "reader": None if reader is None else {"name": reader.name, "kind": reader.kind,
-                                                        "source_id": reader.source_id}}
+        extra |= {
+            "events": tools.events,
+            "notebook": tools.notebook_text,
+            "experiments": tools.experiments_run,
+            "reader": None
+            if reader is None
+            else {"name": reader.name, "kind": reader.kind, "source_id": reader.source_id},
+        }
     except Exception as e:  # recorded, logged, retried by the next resume
         rec.stopped_by = f"error: {type(e).__name__}: {str(e)[:300]}"
         extra["traceback"] = traceback.format_exc()[-3000:]
-    row = {**rec.to_json(), **extra, "prompt_id": inc.prompt_id, "eval": args.eval,
-           "experiments_allowed": args.experiments, "seconds": round(time.time() - t0, 1)}
+    return rec, extra
+
+
+def _save(
+    args: Any,
+    arm: dict[str, Any],
+    inc: Incident,
+    draw: int,
+    path: Path,
+    rec: RunRecord,
+    extra: dict[str, Any],
+    t0: float,
+) -> None:
+    row = {
+        **rec.to_json(),
+        **extra,
+        "prompt_id": inc.prompt_id,
+        "eval": args.eval,
+        "experiments_allowed": args.experiments,
+        "seconds": round(time.time() - t0, 1),
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(row, ensure_ascii=False))
     errs = sum(1 for e in extra.get("events", []) if e.get("error"))
-    log(args.out, f"{args.eval}/{arm['name']}/{inc.prompt_id}.d{draw}: {rec.stopped_by} | "
-                  f"calls {len(extra.get('events', []))} | tool errors {errs} | "
-                  f"out tokens {rec.output_tokens} | {row['seconds']}s")
+    log(
+        args.out,
+        f"{args.eval}/{arm['name']}/{inc.prompt_id}.d{draw}: {rec.stopped_by} | "
+        f"calls {len(extra.get('events', []))} | tool errors {errs} | "
+        f"out tokens {rec.output_tokens} | {row['seconds']}s",
+    )
 
 
 def stage_agent(args: Any) -> None:
@@ -141,14 +212,21 @@ def stage_agent(args: Any) -> None:
             for d in range(args.draws):
                 path = rec_path(args.out, args.eval, arm["name"], pid, d)
                 if not done(path):
-                    jobs.append(lambda a=arm, i=incs[pid], p=partner[pid], d=d, path=path:
-                                investigate(args, a, i, p, d, path))
-    log(args.out, f"agent: {len(jobs)} runs to do ({len(arms)} arms x {len(ids)} incidents x "
-                  f"{args.draws} draws, eval={args.eval}, experiments={args.experiments})")
+                    jobs.append(
+                        lambda a=arm, i=incs[pid], p=partner[pid], d=d, path=path: investigate(
+                            args, a, i, p, d, path
+                        )
+                    )
+    log(
+        args.out,
+        f"agent: {len(jobs)} runs to do ({len(arms)} arms x {len(ids)} incidents x "
+        f"{args.draws} draws, eval={args.eval}, experiments={args.experiments})",
+    )
     asyncio.run(run_many(jobs, args.concurrency))
 
 
 # --------------------------------------------------------------------------- judge / top20 / B
+
 
 def records(out: Path, ev: str) -> list[Path]:
     return sorted((out / ev).glob("*/*.d*.json"))
@@ -169,8 +247,11 @@ def stage_judge(args: Any) -> None:
         pid = r["prompt_id"]
         if pid not in incs or "judge" in r or not r.get("result"):
             continue
-        jobs.append(lambda path=path, inc=incs[pid], h=r["result"]["hypothesis"]:
-                    _judge_one(path, inc, "judge", h))
+        jobs.append(
+            lambda path=path, inc=incs[pid], h=r["result"]["hypothesis"]: _judge_one(
+                path, inc, "judge", h
+            )
+        )
     log(args.out, f"judge: {len(jobs)} records to score")
     asyncio.run(run_many(jobs, args.concurrency))
 
@@ -185,14 +266,32 @@ def stage_top20(args: Any) -> None:
         if f.exists():
             return
         user = seed(inc).rsplit("Positions are tokens", 1)[0]
-        got = await json_call(client(), model=AGENT_MODEL, system=TOP20_SYSTEM, user=user,
-                              schema=TOP20_SCHEMA, max_tokens=6000)
+        for model in (AGENT_MODEL, FALLBACK_MODEL):  # the fallback covers content-filter refusals
+            got = await json_call(
+                client(),
+                model=model,
+                system=TOP20_SYSTEM,
+                user=user,
+                schema=TOP20_SCHEMA,
+                max_tokens=6000,
+            )
+            if got:
+                break
+            log(args.out, f"top20 {inc.prompt_id}: no list from {model}")
         if not got:
-            log(args.out, f"top20 {inc.prompt_id}: no list")
             return
         matches = await J.match_list(inc.behaviour, inc.criteria, got["hypotheses"])
-        f.write_text(json.dumps({"prompt_id": inc.prompt_id, "hypotheses": got["hypotheses"],
-                                 "matches": matches}, ensure_ascii=False))
+        f.write_text(
+            json.dumps(
+                {
+                    "prompt_id": inc.prompt_id,
+                    "model": model,
+                    "hypotheses": got["hypotheses"],
+                    "matches": matches,
+                },
+                ensure_ascii=False,
+            )
+        )
 
     asyncio.run(run_many([lambda i=i: one(i) for i in incs.values()], args.concurrency))
     log(args.out, f"top20: {len(list(d.glob('*.json')))} lists")
@@ -202,10 +301,19 @@ def stage_concluder(args: Any) -> None:
     incs = load_incidents(args.incidents, read_ids(args.ids))
 
     async def one(path: Path, inc: Incident, exps: list[dict[str, Any]]) -> None:
-        user = (seed(inc).rsplit("Positions are tokens", 1)[0]
-                + "\n\n# The other investigator's experiment(s)\n" + render_experiments(exps))
-        got = await json_call(client(), model=AGENT_MODEL, system=CONCLUDER_SYSTEM, user=user,
-                              schema=CONCLUDER_SCHEMA, max_tokens=3000)
+        user = (
+            seed(inc).rsplit("Positions are tokens", 1)[0]
+            + "\n\n# The other investigator's experiment(s)\n"
+            + render_experiments(exps)
+        )
+        got = await json_call(
+            client(),
+            model=AGENT_MODEL,
+            system=CONCLUDER_SYSTEM,
+            user=user,
+            schema=CONCLUDER_SCHEMA,
+            max_tokens=3000,
+        )
         r = json.loads(path.read_text())
         r["concluder"] = got
         if got:
@@ -216,13 +324,15 @@ def stage_concluder(args: Any) -> None:
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
         if r["prompt_id"] in incs and r.get("experiments") and "concluder" not in r:
-            jobs.append(lambda path=path, inc=incs[r["prompt_id"]], e=r["experiments"]:
-                        one(path, inc, e))
+            jobs.append(
+                lambda path=path, inc=incs[r["prompt_id"]], e=r["experiments"]: one(path, inc, e)
+            )
     log(args.out, f"concluder: {len(jobs)} records")
     asyncio.run(run_many(jobs, args.concurrency))
 
 
 # --------------------------------------------------------------------------- report
+
 
 def stage_report(args: Any) -> None:
     import random
@@ -230,11 +340,13 @@ def stage_report(args: Any) -> None:
     ids = set(read_ids(args.ids))
     hard = set(read_ids(args.hard)) if args.hard else set()
     per: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    sc: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))  # 1-10
     stops: dict[str, Counter[str]] = defaultdict(Counter)
     tools_used: dict[str, Counter[str]] = defaultdict(Counter)
     errors: dict[str, int] = Counter()
     n_runs: dict[str, int] = Counter()
     health: dict[str, Counter[str]] = defaultdict(Counter)
+    fallback: dict[str, int] = Counter()
     seen: dict[str, set[str]] = defaultdict(set)
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
@@ -245,10 +357,12 @@ def stage_report(args: Any) -> None:
         seen[arm].add(f"{r['prompt_id']}.d{r['seed']}")
         j0 = r.get(args.key) or {}
         health[arm]["error stop"] += str(r.get("stopped_by", "")).startswith("error")
+        fallback[arm] += bool(r.get("refused_by"))
         health[arm]["no answer"] += not r.get("result")
         health[arm]["unjudged"] += bool(r.get("result")) and j0.get("score") is None
-        health[arm]["<3 replicates"] += (j0.get("score") is not None
-                                         and int(j0.get("n_replicates") or 0) < 3)
+        health[arm]["<3 replicates"] += (
+            j0.get("score") is not None and int(j0.get("n_replicates") or 0) < 3
+        )
         stops[arm][r["stopped_by"].split(":")[0]] += 1
         for e in r.get("events", []):
             tools_used[arm][e["tool"]] += 1
@@ -256,39 +370,84 @@ def stage_report(args: Any) -> None:
         j = r.get(args.key) or {}
         if j.get("score") is not None:
             per[arm][r["prompt_id"]].append(1.0 if j["pass"] else 0.0)
+            sc[arm][r["prompt_id"]].append(float(j["score"]))
 
-    def mean(arm: str, sub: set[str] | None = None) -> tuple[float, int]:
-        xs = [sum(v) / len(v) for p, v in per[arm].items() if sub is None or p in sub]
+    def mean(
+        arm: str,
+        sub: set[str] | None = None,
+        table: dict[str, dict[str, list[float]]] | None = None,
+    ) -> tuple[float, int]:
+        t = per if table is None else table
+        xs = [sum(v) / len(v) for p, v in t[arm].items() if sub is None or p in sub]
         return (sum(xs) / len(xs) if xs else float("nan")), len(xs)
 
-    def paired(a: str, b: str, sub: set[str] | None = None) -> str:
-        common = [p for p in per[a] if p in per[b] and (sub is None or p in sub)]
+    def paired(
+        a: str,
+        b: str,
+        sub: set[str] | None = None,
+        table: dict[str, dict[str, list[float]]] | None = None,
+        scale: float = 100,
+    ) -> str:
+        """b minus a, matched by incident (mean over its draws), with a 95% bootstrap CI."""
+        t = per if table is None else table
+        common = [p for p in t[a] if p in t[b] and (sub is None or p in sub)]
         if not common:
             return "-"
-        d = [sum(per[b][p]) / len(per[b][p]) - sum(per[a][p]) / len(per[a][p]) for p in common]
+        d = [sum(t[b][p]) / len(t[b][p]) - sum(t[a][p]) / len(t[a][p]) for p in common]
         boots = sorted(sum(random.choice(d) for _ in d) / len(d) for _ in range(4000))
-        return (f"{100 * sum(d) / len(d):+.1f} [{100 * boots[100]:+.1f}, "
-                f"{100 * boots[3899]:+.1f}] n={len(common)}")
+        return (
+            f"{scale * sum(d) / len(d):+.1f} [{scale * boots[100]:+.1f}, "
+            f"{scale * boots[3899]:+.1f}] n={len(common)}"
+        )
 
-    lines = [f"# CHIVE eval `{args.eval}` ({args.key})", "",
-             "| arm | runs | pass@1 (all) | pass@1 (hard) | vs transcript (all) | vs transcript "
-             "(hard) | stops | tool errors |", "|---|---|---|---|---|---|---|---|"]
+    lines = [
+        f"# CHIVE eval `{args.eval}` ({args.key})",
+        "",
+        "pass@1 = share of answers scoring >= 7 (mean over draws, then over incidents); "
+        "mean score = judge score 1-10 (mean of 3 replicates). Differences are vs "
+        "transcript, paired by incident, with 95% bootstrap CIs.",
+        "",
+        "| arm | runs | pass@1 | mean score | pass@1 vs transcript (pp) | mean score vs "
+        "transcript | pass@1 hard | mean hard | hard vs transcript (pp) |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    tr = "transcript" in per
     for arm in sorted(n_runs):
         m, n = mean(arm)
+        ms, _ = mean(arm, table=sc)
         mh, nh = mean(arm, hard)
-        vs = paired("transcript", arm) if arm != "transcript" and "transcript" in per else "-"
-        vsh = (paired("transcript", arm, hard)
-               if arm != "transcript" and "transcript" in per and hard else "-")
-        lines.append(f"| {arm} | {n_runs[arm]} | {m:.1%} (n={n}) | {mh:.1%} (n={nh}) | {vs} | "
-                     f"{vsh} | {dict(stops[arm])} | {errors[arm]} |")
+        msh, _ = mean(arm, hard, table=sc)
+        other = arm != "transcript" and tr
+        vs = paired("transcript", arm) if other else "-"
+        vss = paired("transcript", arm, table=sc, scale=1) if other else "-"
+        vsh = paired("transcript", arm, hard) if other and hard else "-"
+        lines.append(
+            f"| {arm} | {n_runs[arm]} | {m:.1%} (n={n}) | {ms:.2f} | {vs} | {vss} | "
+            f"{mh:.1%} (n={nh}) | {msh:.2f} | {vsh} |"
+        )
+    lines += [
+        "",
+        "| arm | stops | tool errors | Sonnet fallback (Opus content filter) |",
+        "|---|---|---|---|",
+    ]
+    lines += [
+        f"| {arm} | {dict(stops[arm])} | {errors[arm]} | {fallback[arm]} |"
+        for arm in sorted(n_runs)
+    ]
     expected = len(ids) * int(args.draws)
-    lines += ["", "## Health (every number here should be 0 before a result is quoted)", "",
-              "| arm | missing records | error stop | no answer | unjudged | <3 replicates |",
-              "|---|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## Health (every number here should be 0 before a result is quoted)",
+        "",
+        "| arm | missing records | error stop | no answer | unjudged | <3 replicates |",
+        "|---|---|---|---|---|---|",
+    ]
     for arm in sorted(n_runs):
         h = health[arm]
-        lines.append(f"| {arm} | {max(0, expected - len(seen[arm]))} | {h['error stop']} | "
-                     f"{h['no answer']} | {h['unjudged']} | {h['<3 replicates']} |")
+        lines.append(
+            f"| {arm} | {max(0, expected - len(seen[arm]))} | {h['error stop']} | "
+            f"{h['no answer']} | {h['unjudged']} | {h['<3 replicates']} |"
+        )
     lines += ["", "## Tool calls per arm", ""]
     lines += [f"- {arm}: {dict(tools_used[arm].most_common())}" for arm in sorted(tools_used)]
     text = "\n".join(lines)
@@ -325,8 +484,13 @@ class ChiveConfig(pydra.Config):
         self.out.mkdir(parents=True, exist_ok=True)
 
 
-STAGES = {"agent": stage_agent, "judge": stage_judge, "top20": stage_top20,
-          "concluder": stage_concluder, "report": stage_report}
+STAGES = {
+    "agent": stage_agent,
+    "judge": stage_judge,
+    "top20": stage_top20,
+    "concluder": stage_concluder,
+    "report": stage_report,
+}
 
 
 @pydra.main(ChiveConfig)

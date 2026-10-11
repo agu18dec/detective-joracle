@@ -89,22 +89,33 @@ def client(max_retries: int = 6) -> AsyncOpenAI:
     if key:
         return AsyncOpenAI(api_key=key, base_url=BASE_URL, max_retries=max_retries)
     TOKEN.get()  # fail fast, before any work is scheduled, if the tunnel is down
-    return _KeylessOpenAI(api_key="keyless", base_url=BASE_URL, max_retries=max_retries,
-                          default_headers={"anthropic-beta": OAUTH_BETA})
+    return _KeylessOpenAI(
+        api_key="keyless",
+        base_url=BASE_URL,
+        max_retries=max_retries,
+        default_headers={"anthropic-beta": OAUTH_BETA},
+    )
 
 
-async def json_call(c: AsyncOpenAI, *, model: str, system: str, user: str,
-                    schema: dict[str, Any], max_tokens: int = 4000,
-                    attempts: int = 4) -> dict[str, Any] | None:
+async def json_call(
+    c: AsyncOpenAI,
+    *,
+    model: str,
+    system: str,
+    user: str,
+    schema: dict[str, Any],
+    max_tokens: int = 4000,
+    attempts: int = 4,
+) -> dict[str, Any] | None:
     """One structured answer via a forced tool call; None after ``attempts`` failures."""
     tool = {"type": "function", "function": {"name": "answer", "parameters": schema}}
     for i in range(attempts):
         try:
             api: Any = c.chat.completions
             resp = await api.create(
-                model=model, max_tokens=max_tokens,
-                messages=[{"role": "system", "content": system},
-                          {"role": "user", "content": user}],
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                 tools=[tool],
                 tool_choice={"type": "function", "function": {"name": "answer"}},
             )
@@ -116,5 +127,5 @@ async def json_call(c: AsyncOpenAI, *, model: str, system: str, user: str,
         except Exception as e:  # rate limits, timeouts, bad JSON: retried, then logged by caller
             if i == attempts - 1:
                 print(f"json_call failed: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-        await asyncio.sleep(min(30, 2 ** i))
+        await asyncio.sleep(min(30, 2**i))
     return None

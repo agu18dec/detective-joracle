@@ -15,21 +15,49 @@ from detective_joracle.chive.prompts import seed, system_prompt
 from detective_joracle.chive.readers import load_reader
 from detective_joracle.chive.tools import SUBMIT, ChiveTools, schemas
 
-PIECES = ["<|im_start|>", "user", "\n", "Write", " a", " poem", " about", " rain", "<|im_end|>",
-          "\n", "<|im_start|>", "assistant", "\n", "Grey", " skies", " weep"]
+PIECES = [
+    "<|im_start|>",
+    "user",
+    "\n",
+    "Write",
+    " a",
+    " poem",
+    " about",
+    " rain",
+    "<|im_end|>",
+    "\n",
+    "<|im_start|>",
+    "assistant",
+    "\n",
+    "Grey",
+    " skies",
+    " weep",
+]
 TURNS = [(0, "control")] * 3 + [(1, "user")] * 5 + [(0, "control")] * 4 + [(2, "assistant")] * 4
 
 
 def incident() -> Incident:
-    return Incident(prompt_id="p1", messages=[{"role": "user", "content": "Write a poem about rain"}],
-                    completion="Grey skies weep", behaviour="Is the poem sad?", k=20, n=30,
-                    token_ids=list(range(len(PIECES))), pieces=PIECES, turn_of=TURNS,
-                    criteria="[T1] the word rain cues sadness")
+    return Incident(
+        prompt_id="p1",
+        messages=[{"role": "user", "content": "Write a poem about rain"}],
+        completion="Grey skies weep",
+        behaviour="Is the poem sad?",
+        k=20,
+        n=30,
+        token_ids=list(range(len(PIECES))),
+        pieces=PIECES,
+        turn_of=TURNS,
+        criteria="[T1] the word rain cues sadness",
+    )
 
 
 def write_bank(root: Path, inc: Incident, text: str) -> None:
-    readouts = {str(layer): {str(p): [f"{text} at t{p} L{layer} s{i}" for i in range(4)]
-                             for p in range(inc.n_tokens)} for layer in (20, 40, 60)}
+    readouts = {
+        str(layer): {
+            str(p): [f"{text} at t{p} L{layer} s{i}" for i in range(4)] for p in range(inc.n_tokens)
+        }
+        for layer in (20, 40, 60)
+    }
     with gzip.open(root / f"{inc.prompt_id}.json.gz", "wt") as f:
         json.dump({"token_ids": inc.token_ids, "k": 4, "readouts": readouts}, f)
 
@@ -57,18 +85,44 @@ def test_scripted_episode(tmp_path: Path) -> None:
     write_bank(tmp_path, inc, "the user wants a sad mood")
     reader = load_reader("olens_rl", "olens", tmp_path, inc)
     tools = ChiveTools(inc, reader)
-    backend = FakeBackend([
-        ("", [("show_tokens", {"turn": "T1", "phrase": "rain"})], 10),
-        ("", [("search", {"pattern": "sad", "positions": "t3-t8", "k": 3})], 10),
-        ("", [("inspect", {"position": 7, "window": 1})], 10),
-        ("", [("inspect", {"position": 999})], 10),  # malformed: ERROR, run continues
-        ("", [("notebook", {"action": "write", "text": "rain -> sad"})], 10),
-        ("", [(SUBMIT, {"hypothesis": "the word rain cues a sad mood", "evidence": "t7 L40",
-                        "rival": "poem genre", "rival_ruled_out_by": "readouts name rain"})], 10),
-    ], terminal=SUBMIT)
+    backend = FakeBackend(
+        [
+            ("", [("show_tokens", {"turn": "T1", "phrase": "rain"})], 10),
+            ("", [("search", {"pattern": "sad", "positions": "t3-t8", "k": 3})], 10),
+            ("", [("inspect", {"position": 7, "window": 1})], 10),
+            ("", [("inspect", {"position": 999})], 10),  # malformed: ERROR, run continues
+            ("", [("notebook", {"action": "write", "text": "rain -> sad"})], 10),
+            (
+                "",
+                [
+                    (
+                        SUBMIT,
+                        {
+                            "hypothesis": "the word rain cues a sad mood",
+                            "evidence": "t7 L40",
+                            "rival": "poem genre",
+                            "rival_ruled_out_by": "readouts name rain",
+                        },
+                    )
+                ],
+                10,
+            ),
+        ],
+        terminal=SUBMIT,
+    )
     rec = RunRecord(organism="p1", condition="test", arm="olens_rl", auditor="fake", seed=0)
-    asyncio.run(run_tool_loop_async(tools, schemas(reader, 0), system_prompt(reader, 0, 12),
-                                    seed(inc), backend, Budget(), rec, terminal=SUBMIT))
+    asyncio.run(
+        run_tool_loop_async(
+            tools,
+            schemas(reader, 0),
+            system_prompt(reader, 0, 12),
+            seed(inc),
+            backend,
+            Budget(),
+            rec,
+            terminal=SUBMIT,
+        )
+    )
     assert rec.stopped_by == "finish"
     assert tools.finished and "rain" in tools.finished["hypothesis"]
     assert [e["tool"] for e in tools.events][:3] == ["show_tokens", "search", "inspect"]
@@ -85,7 +139,7 @@ def test_transcript_arm_has_no_readout_tools() -> None:
 
 def test_apply_edit() -> None:
     msgs = [{"role": "user", "content": "Write a poem about rain"}]
-    out = apply_edit(msgs, [{"keep": 1, "replace": [{"old": "rain", "new": "sun"}]}])
+    out = apply_edit(msgs, [{"keep": "T1", "replace": [{"old": "rain", "new": "sun"}]}])
     assert out == [{"role": "user", "content": "Write a poem about sun"}]
     with pytest.raises(ValueError):
         apply_edit(msgs, [{"keep": 1, "replace": [{"old": "snow", "new": "x"}]}])

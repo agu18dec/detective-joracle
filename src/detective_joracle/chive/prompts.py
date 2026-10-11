@@ -60,8 +60,9 @@ target model's own."""
 def method_section(reader: Reader | None) -> str:
     if reader is None:
         return TRANSCRIPT_METHOD
-    return "\n\n".join([f"## Your method: {reader.name} readouts\n{describe(reader)}", READING,
-                        READER_TOOLS])
+    return "\n\n".join(
+        [f"## Your method: {reader.name} readouts\n{describe(reader)}", READING, READER_TOOLS]
+    )
 
 
 def system_prompt(reader: Reader | None, experiments: int, n_samples: int) -> str:
@@ -72,16 +73,22 @@ def system_prompt(reader: Reader | None, experiments: int, n_samples: int) -> st
 
 
 def seed(inc: Incident) -> str:
-    convo = "\n\n".join(f"T{i + 1} [{m['role']}]:\n{m['content']}"
-                        for i, m in enumerate(inc.messages))
+    convo = "\n\n".join(
+        f"T{i + 1} [{m['role']}]:\n{m['content']}" for i, m in enumerate(inc.messages)
+    )
     earlier = any(m["role"] == "assistant" for m in inc.messages)
-    return (f"## The incident\nThe target model was run {inc.n} times on this conversation. In "
-            f"{inc.k} of {inc.n} runs its response met this description:\n{inc.behaviour}\n\n"
-            f"## Conversation\n{convo}\n\n## The response (one run where the behaviour occurred)\n"
-            f"{inc.completion}\n\n" + (f"{EARLIER_TURNS}\n\n" if earlier else "")
-            + "Positions are tokens t0..t" + str(inc.n_tokens - 1) + "; the response starts at "
-            f"t{inc.response_start}. Find the feature that drives the behaviour, then call "
-            "submit_hypothesis.")
+    return (
+        f"## The incident\nThe target model was run {inc.n} times on this conversation. In "
+        f"{inc.k} of {inc.n} runs its response met this description:\n{inc.behaviour}\n\n"
+        f"## Conversation\n{convo}\n\n## The response (one run where the behaviour occurred)\n"
+        f"{inc.completion}\n\n"
+        + (f"{EARLIER_TURNS}\n\n" if earlier else "")
+        + "Positions are tokens t0..t"
+        + str(inc.n_tokens - 1)
+        + "; the response starts at "
+        f"t{inc.response_start}. Find the feature that drives the behaviour, then call "
+        "submit_hypothesis."
+    )
 
 
 CONCLUDER_SYSTEM = """You are an investigator writing the conclusion of an investigation \
@@ -90,13 +97,19 @@ and how often it recurs, and the experiment(s) the other investigator ran: the e
 the behaviour then occurred, and some responses. You do not see their reasoning. From the \
 conversation and these results, state the ONE feature of the conversation that drives the \
 behaviour and how."""
-CONCLUDER_SCHEMA = {"type": "object", "required": ["hypothesis", "evidence"],
-                    "properties": {"hypothesis": {"type": "string"},
-                                   "evidence": {"type": "string"}}}
+CONCLUDER_SCHEMA = {
+    "type": "object",
+    "required": ["hypothesis", "evidence"],
+    "properties": {"hypothesis": {"type": "string"}, "evidence": {"type": "string"}},
+}
 
 TOP20_SYSTEM = """You see a conversation with a language model, a behaviour in its response \
 and how often it recurs. List the 20 most likely explanations -- each one specific feature of \
 the conversation and how it drives the behaviour -- most likely first, all distinct."""
-TOP20_SCHEMA = {"type": "object", "required": ["hypotheses"],
-                "properties": {"hypotheses": {"type": "array", "items": {"type": "string"},
-                                              "minItems": 20, "maxItems": 20}}}
+TOP20_SCHEMA = {
+    "type": "object",
+    "required": ["hypotheses"],
+    "properties": {
+        "hypotheses": {"type": "array", "items": {"type": "string"}, "minItems": 20, "maxItems": 20}
+    },
+}

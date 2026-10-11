@@ -44,16 +44,22 @@ class Incident:
         """The text around a position, with the token itself marked."""
         lo, hi = max(0, pos - width), min(self.n_tokens, pos + width + 1)
         left = "".join(self.pieces[lo:pos])
-        right = "".join(self.pieces[pos + 1:hi])
+        right = "".join(self.pieces[pos + 1 : hi])
         return f"...{left}[[{self.pieces[pos]}]]{right}..."
 
 
 def load_incident(path: Path) -> Incident:
     d: dict[str, Any] = json.loads(path.read_text())
     return Incident(
-        prompt_id=d["prompt_id"], messages=d["messages"], completion=d["completion"],
-        behaviour=d["behaviour"], k=int(d["k"]), n=int(d["n"]), token_ids=list(d["token_ids"]),
-        pieces=list(d["pieces"]), turn_of=[(int(t), str(r)) for t, r in d["turn_of"]],
+        prompt_id=d["prompt_id"],
+        messages=d["messages"],
+        completion=d["completion"],
+        behaviour=d["behaviour"],
+        k=int(d["k"]),
+        n=int(d["n"]),
+        token_ids=list(d["token_ids"]),
+        pieces=list(d["pieces"]),
+        turn_of=[(int(t), str(r)) for t, r in d["turn_of"]],
         criteria=d["criteria"],
     )
 

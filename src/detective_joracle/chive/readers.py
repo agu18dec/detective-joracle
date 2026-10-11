@@ -33,14 +33,15 @@ class Reader:
 def _open(path: Path) -> dict[str, Any]:
     for f in (path.with_suffix(".json.gz"), path.with_suffix(".json")):
         if f.exists():
-            with (gzip.open(f, "rt") if f.suffix == ".gz" else f.open()) as fh:
+            with gzip.open(f, "rt") if f.suffix == ".gz" else f.open() as fh:
                 data: dict[str, Any] = json.load(fh)
                 return data
     raise FileNotFoundError(f"no bank record {path}.json[.gz]")
 
 
-def load_reader(name: str, kind: str, bank: Path, inc: Incident,
-                partner: Incident | None = None) -> Reader:
+def load_reader(
+    name: str, kind: str, bank: Path, inc: Incident, partner: Incident | None = None
+) -> Reader:
     """The reader for ``inc``; with ``partner``, ``inc``'s positions read ``partner``'s cells."""
     if kind not in KINDS:
         raise ValueError(f"unknown reader kind {kind!r}; one of {KINDS}")
@@ -54,11 +55,18 @@ def load_reader(name: str, kind: str, bank: Path, inc: Incident,
             by_pos.setdefault(int(pos), {})[int(layer)] = [str(s) for s in samples]
     if partner is not None:  # position p of inc reads the proportional position of partner
         n_src, n_dst = partner.n_tokens, inc.n_tokens
-        by_pos = {p: by_pos.get(min(n_src - 1, p * n_src // max(1, n_dst)), {})
-                  for p in range(n_dst)}
+        by_pos = {
+            p: by_pos.get(min(n_src - 1, p * n_src // max(1, n_dst)), {}) for p in range(n_dst)
+        }
     layers = sorted(int(x) for x in rec["readouts"])
-    return Reader(name=name, kind=kind, layers=layers, k=int(rec.get("k", 1)), cells=by_pos,
-                  source_id=src.prompt_id)
+    return Reader(
+        name=name,
+        kind=kind,
+        layers=layers,
+        k=int(rec.get("k", 1)),
+        cells=by_pos,
+        source_id=src.prompt_id,
+    )
 
 
 DESCRIBE = {
@@ -88,6 +96,9 @@ plan the answer.""",
 
 
 def describe(reader: Reader) -> str:
-    layers = (f"{reader.layers[0]}..{reader.layers[-1]}" if len(reader.layers) > 3
-              else ", ".join(map(str, reader.layers)))
+    layers = (
+        f"{reader.layers[0]}..{reader.layers[-1]}"
+        if len(reader.layers) > 3
+        else ", ".join(map(str, reader.layers))
+    )
     return DESCRIBE[reader.kind].format(layers=layers, k=reader.k)
