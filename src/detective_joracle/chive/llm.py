@@ -33,7 +33,10 @@ class _Token:
         with self._lock:
             if not self._value or time.monotonic() - self._at > REFRESH_S:
                 try:
-                    self._value, self._at = _fetch(), time.monotonic()
+                    # with a working token in hand, one quick attempt (never block every
+                    # request on a long retry); without one, wait out the outage
+                    fetched = _fetch(attempts=1) if self._value else _fetch()
+                    self._value, self._at = fetched, time.monotonic()
                 except (TimeoutError, ConnectionError, OSError, RuntimeError):
                     if not self._value:
                         raise
