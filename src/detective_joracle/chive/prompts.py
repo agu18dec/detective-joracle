@@ -85,7 +85,9 @@ absence-type candidates from the text itself."""
 CONTINUE = """## Sampling the target model
 continue_from(position) samples how the target model continues the text from just after that \
 token (4 short samples): what it is about to write there. It shows where a position leads, not \
-which feature of the conversation causes it."""
+which feature of the conversation causes it. It is most useful inside the response: find where \
+the behaviour appears and continue from just before it, and from a few earlier points, to see \
+where the model commits to it. Inside a user turn the model usually just ends the turn."""
 
 
 def method_section(reader: Reader | None) -> str:

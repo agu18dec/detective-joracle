@@ -426,7 +426,8 @@ class ChiveTools:
         event["positions"] = [pos]
         outs = await self.executor.continue_tokens(self.inc.token_ids[: pos + 1])
         return f"Continuations after {self.inc.where(pos)}:" + "".join(
-            f"\n--- sample {i + 1} ---\n{c}" for i, c in enumerate(outs)
+            f"\n--- sample {i + 1} ---\n{c if c.strip() else '(empty: the model ends its turn here)'}"
+            for i, c in enumerate(outs)
         )
 
     async def run_experiment(self, args: dict[str, Any], event: dict[str, Any]) -> str:
