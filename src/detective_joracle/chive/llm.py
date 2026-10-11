@@ -66,14 +66,15 @@ def _token_once() -> str:
     return reply
 
 
-def _fetch(attempts: int = 5) -> str:
+def _fetch(attempts: int = 20) -> str:
+    """The tunnel can drop out for minutes at a time: retry for ~15 min (backoff up to 60 s)."""
     for i in range(attempts):
         try:
             return _token_once()
         except (TimeoutError, ConnectionError, OSError):
             if i == attempts - 1:
                 raise
-            time.sleep(10 * (i + 1))
+            time.sleep(min(60, 10 * (i + 1)))
     raise AssertionError("unreachable")
 
 
