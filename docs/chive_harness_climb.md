@@ -43,6 +43,6 @@ tested once on held-out incidents. Started 2026-10-11 08:00 UTC.
 
 | round | change | dev pass@1 | keep | rescue | hard | normal | decision |
 |---|---|---|---|---|---|---|---|
-| baseline | E1 OLens RL harness | | | | | | |
-| r1a | + textfirst + absence | | | | | | |
+| baseline | E1 OLens RL harness (dev records from E1) | 57.8% | 80.0% | 33.7% | 38.0% | 76.0% | reference |
+| r1a | + textfirst + absence (= base B) | 62.5% (+4.7 [-2.6, +12.0] vs E1 OLens; +10.4 [+2.1, +18.2] vs transcript) | 87.0% | 35.9% | 35.9% | 87.0% | **keep**: keep up 7 pts, rescue held, unsupported quotes 1.9% -> 1.5% |
 | r1b | + textfirst + absence + continue_from | | | | | | |
