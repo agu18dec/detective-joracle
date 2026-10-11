@@ -50,7 +50,7 @@ tested once on held-out incidents. Started 2026-10-11 08:00 UTC.
 | ref | transcript + continue_from (dev96) | 55.2% (+3.1 vs transcript, n.s.; +10.0 on dev100) | 85.0% | 22.8% | 27.2% | 81.0% | baseline: effect varies by split |
 | r1d | B + readout digest | 63.0% (+0.5 [-4.7, +6.2] vs B) | 91.0% | 32.6% | 39.1% | 85.0% | **drop**: no gain (keep up, rescue down); unsupported 1.1% |
 
-| r2a | B + continue_from (guide: use inside the response, at the behaviour) | | | | | | |
+| r2a | B + continue_from (guide: use inside the response, at the behaviour) | 58.9% (-3.6 [-10.9, +3.6] vs B) | 85.0% | 30.4% | 33.7% | 82.0% | **drop**: guide fixes part of the harm (-6.2 -> -3.6), still below B |
 | r2b | B + 1 experiment (budgeted counterfactual) | | | | | | |
 
 **Agreement (offline arbiter over existing dev records):** B draw0 vs draw1 -> 61.5% (inputs
