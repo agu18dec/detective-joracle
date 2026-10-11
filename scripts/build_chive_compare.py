@@ -171,6 +171,21 @@ def main(cfg: Config) -> None:
             r = json.loads(f.read_text())
             r["draw"] = int(f.name.rsplit(".d", 1)[1].split(".")[0])  # from the file name
             by_pid[r["prompt_id"]][r["arm"]].append(r)
+    # OLens RL vs transcript verdicts and failure/contribution labels (scripts/analyze_chive.py)
+    verdict: dict[str, dict[str, Any]] = {}
+    for ev in cfg.evals:
+        f = Path(cfg.runs, ev, "analysis.json")
+        for row in (json.loads(f.read_text()) if f.exists() else {}).get("olens_rl", []):
+            verdict[row["prompt_id"]] = {
+                "kind": row["kind"],
+                "labels": [
+                    {"draw": e["draw"], **e["label"]} for e in row["episodes"] if "label" in e
+                ],
+            }
+    groups: dict[str, list[str]] = defaultdict(list)
+    for pid, v in sorted(verdict.items()):
+        for lab in {x["label"] for x in v["labels"]}:
+            groups[f"{v['kind']}: {lab}"].append(pid)
     cards, wins, losses = [], [], []
     rates: dict[str, list[float]] = defaultdict(list)
     for pid, arms in sorted(by_pid.items()):
@@ -235,6 +250,7 @@ def main(cfg: Config) -> None:
                 0,
             ),
             "gap": gap,
+            "verdict": verdict.get(pid),
             "arms": rows,
         }
         cards.append(card)
@@ -254,6 +270,7 @@ def main(cfg: Config) -> None:
         "n": {a: len(v) for a, v in rates.items()},
         "wins": wins,
         "losses": losses,
+        "groups": dict(sorted(groups.items())),
     }
     Path(cfg.out).write_text(
         json.dumps({"summary": summary, "incidents": cards}, ensure_ascii=False)

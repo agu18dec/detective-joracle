@@ -420,6 +420,7 @@ def stage_report(args: Any) -> None:
     health: dict[str, Counter[str]] = defaultdict(Counter)
     fallback: dict[str, int] = Counter()
     seen: dict[str, set[str]] = defaultdict(set)
+    draw_pass: dict[str, dict[tuple[str, int], float]] = defaultdict(dict)
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
         if r["prompt_id"] not in ids:
@@ -445,6 +446,7 @@ def stage_report(args: Any) -> None:
         j = r.get(args.key) or {}
         if j.get("score") is not None:
             per[arm][r["prompt_id"]].append(1.0 if j["pass"] else 0.0)
+            draw_pass[arm][(r["prompt_id"], int(r["seed"]))] = 1.0 if j["pass"] else 0.0
             sc[arm][r["prompt_id"]].append(float(j["score"]))
 
     def mean(
@@ -531,23 +533,37 @@ def stage_report(args: Any) -> None:
             f"{h['no answer']} | {h['unjudged']} | {h['<3 replicates']} |"
         )
     if tr:  # does the method keep what the transcript already gets, and rescue what it misses?
-        solved = {p for p, v in per["transcript"].items() if p in ids and min(v) == 1.0}
-        failed = {p for p, v in per["transcript"].items() if p in ids and max(v) == 0.0}
+        # Select incidents on one transcript draw and score the OTHER draw (and every arm on
+        # that draw), both ways round: scoring the selecting draw would give transcript a
+        # circular 100% keep and hide its own run-to-run noise.
+        def keep_rescue(arm: str) -> tuple[float, float, int, int]:
+            k = r = nk = nr = 0.0
+            for sel, ev in ((0, 1), (1, 0)):
+                for p in ids:
+                    t, a = draw_pass["transcript"].get((p, sel)), draw_pass[arm].get((p, ev))
+                    if t is None or a is None:
+                        continue
+                    if t:
+                        k, nk = k + a, nk + 1
+                    else:
+                        r, nr = r + a, nr + 1
+            return k / max(1, nk), r / max(1, nr), int(nk), int(nr)
+
         lines += [
             "",
             "## Keep and rescue",
             "",
-            f"*keep* = pass@1 on the {len(solved)} incidents the transcript arm solved on every "
-            f"draw (should stay near 100%: the method must not talk the agent out of a correct "
-            f"reading); *rescue* = pass@1 on the {len(failed)} it failed on every draw.",
+            "Incidents are split by one transcript draw and scored on the other draw (both ways "
+            "round). *keep* = pass@1 where the transcript draw passed (the method must not talk "
+            "the agent out of a correct reading; transcript's own value is its run-to-run "
+            "consistency); *rescue* = pass@1 where it failed.",
             "",
             "| arm | keep | rescue |",
             "|---|---|---|",
         ]
         for arm in sorted(n_runs):
-            mk, nk = mean(arm, solved)
-            mr, nr = mean(arm, failed)
-            lines.append(f"| {arm} | {mk:.1%} (n={nk}) | {mr:.1%} (n={nr}) |")
+            kk, rr, nk, nr = keep_rescue(arm)
+            lines.append(f"| {arm} | {kk:.1%} (n={nk}) | {rr:.1%} (n={nr}) |")
     if args.key == "choice_eval" and args.choice_rows:
         rows = {p: r for p, r in args.choice_rows.items() if p in ids}
         oo = {p: r["options_only_correct"] / r["options_only_samples"] for p, r in rows.items()}
