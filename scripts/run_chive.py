@@ -660,7 +660,7 @@ class ChiveConfig(pydra.Config):
         self.effort = "max"
         self.key = "judge"  # report: judge | concluder_judge | choice_eval
         self.choices = ""  # candidate selection: a choice-set jsonl (see the module docstring)
-        self.variants: list[str] = []  # harness ablations: "switchbar", "continue"
+        self.variants: list[str] = []  # harness ablations: switchbar, textfirst, absence, continue
         self.out = pydra.REQUIRED
 
     def finalize(self) -> None:

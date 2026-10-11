@@ -76,6 +76,12 @@ that feature is read -- not merely because the readouts also show something else
 being prominent in the readouts shows that it is represented, not that it causes the behaviour. \
 If you do overturn it, say in `rival_ruled_out_by` what contradicted it."""
 
+ABSENCE = """## Absences
+Some causes are absences: something the conversation does not say -- no prohibition, an \
+unspecified venue, format or audience, an instruction that describes rather than binds. Readouts \
+cannot show an absence at any token, so neutral readouts at a position do not rule one out; judge \
+absence-type candidates from the text itself."""
+
 CONTINUE = """## Sampling the target model
 continue_from(position) samples how the target model continues the text from just after that \
 token (4 short samples): what it is about to write there. It shows where a position leads, not \
@@ -95,12 +101,15 @@ def system_prompt(
 ) -> str:
     """``variants`` (harness ablations, off by default): "switchbar" adds the bar for overturning
     the transcript-only hypothesis (reader arms); "textfirst" locks the readout tools until a
-    transcript-only hypothesis is committed (reader arms); "continue" describes continue_from."""
+    transcript-only hypothesis is committed (reader arms); "absence" warns that readouts cannot show
+    absence-type causes (reader arms); "continue" describes continue_from."""
     parts = [ROLE, method_section(reader), WORKFLOW]
     if "switchbar" in variants and reader is not None:
         parts.append(SWITCHING)
     if "textfirst" in variants and reader is not None:
         parts.append(TEXTFIRST)
+    if "absence" in variants and reader is not None:
+        parts.append(ABSENCE)
     if "continue" in variants:
         parts.append(CONTINUE)
     if experiments:
