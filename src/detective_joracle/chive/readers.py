@@ -7,6 +7,7 @@ without the right content.
 """
 
 import gzip
+import random
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,9 +41,17 @@ def _open(path: Path) -> dict[str, Any]:
 
 
 def load_reader(
-    name: str, kind: str, bank: Path, inc: Incident, partner: Incident | None = None
+    name: str,
+    kind: str,
+    bank: Path,
+    inc: Incident,
+    partner: Incident | None = None,
+    permute: bool = False,
 ) -> Reader:
-    """The reader for ``inc``; with ``partner``, ``inc``'s positions read ``partner``'s cells."""
+    """The reader for ``inc``. Controls: with ``partner``, ``inc``'s positions read ``partner``'s
+    cells (no information about this incident); with ``permute``, each position reads another
+    position of the SAME incident, by a fixed permutation seeded by the prompt id (on-topic,
+    plausible content, but no information about where or at which token it is represented)."""
     if kind not in KINDS:
         raise ValueError(f"unknown reader kind {kind!r}; one of {KINDS}")
     src = partner or inc
@@ -58,6 +67,10 @@ def load_reader(
         by_pos = {
             p: by_pos.get(min(n_src - 1, p * n_src // max(1, n_dst)), {}) for p in range(n_dst)
         }
+    if permute:
+        order = list(range(inc.n_tokens))
+        random.Random(f"posshuffle:{inc.prompt_id}").shuffle(order)
+        by_pos = {p: by_pos.get(q, {}) for p, q in enumerate(order)}
     layers = sorted(int(x) for x in rec["readouts"])
     return Reader(
         name=name,

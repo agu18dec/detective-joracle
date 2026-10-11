@@ -177,3 +177,13 @@ def test_candidate_selection(tmp_path: Path) -> None:
     )
     assert tools.finished and tools.finished["choice"] == "A"
     assert tools.events[0].get("error")
+
+
+def test_position_shuffle_control(tmp_path: Path) -> None:
+    inc = incident()
+    write_bank(tmp_path, inc, "sad mood")
+    r = load_reader("olens_rl", "olens", tmp_path, inc, permute=True)
+    again = load_reader("olens_rl", "olens", tmp_path, inc, permute=True)
+    assert r.source_id == "p1" and r.cells == again.cells  # same incident, fixed permutation
+    moved = [p for p in range(inc.n_tokens) if r.cell(p)[40][0] != f"sad mood at t{p} L40 s0"]
+    assert len(moved) > inc.n_tokens // 2  # most positions read another position's readouts

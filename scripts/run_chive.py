@@ -73,16 +73,17 @@ def log(out: Path, msg: str) -> None:
 
 def parse_arm(spec: str) -> dict[str, Any]:
     if "=" not in spec:  # a transcript-only arm ("transcript", or a named variant of it)
-        return {"name": spec, "bank": None, "kind": None, "shuffled": False}
+        return {"name": spec, "bank": None, "kind": None, "shuffled": False, "posshuffled": False}
     name, _, rest = spec.partition("=")
     parts = rest.split(":")
     if len(parts) not in (2, 3) or parts[1] not in ("olens", "nla", "jlens"):
-        raise SystemExit(f"bad --arm {spec!r}: NAME=BANK_DIR:KIND[:shuffled]")
+        raise SystemExit(f"bad --arm {spec!r}: NAME=BANK_DIR:KIND[:shuffled|:posshuffled]")
     return {
         "name": name,
         "bank": Path(parts[0]),
         "kind": parts[1],
         "shuffled": len(parts) == 3 and parts[2] == "shuffled",
+        "posshuffled": len(parts) == 3 and parts[2] == "posshuffled",
     }
 
 
@@ -136,7 +137,12 @@ async def _episode(
             None
             if arm["bank"] is None
             else load_reader(
-                arm["name"], arm["kind"], arm["bank"], inc, partner if arm["shuffled"] else None
+                arm["name"],
+                arm["kind"],
+                arm["bank"],
+                inc,
+                partner if arm["shuffled"] else None,
+                permute=arm.get("posshuffled", False),
             )
         )
         cont = "continue" in args.variants
