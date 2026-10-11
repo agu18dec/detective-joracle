@@ -44,7 +44,7 @@ from detective_joracle.chive.prompts import (
     seed,
     system_prompt,
 )
-from detective_joracle.chive.readers import digest, load_reader
+from detective_joracle.chive.readers import KINDS, digest, load_reader
 from detective_joracle.chive.tools import SUBMIT, ChiveTools, render_experiments, schemas
 
 AGENT_MODEL = "claude-opus-5"
@@ -76,7 +76,7 @@ def parse_arm(spec: str) -> dict[str, Any]:
         return {"name": spec, "bank": None, "kind": None, "shuffled": False, "posshuffled": False}
     name, _, rest = spec.partition("=")
     parts = rest.split(":")
-    if len(parts) not in (2, 3) or parts[1] not in ("olens", "nla", "jlens"):
+    if len(parts) not in (2, 3) or parts[1] not in KINDS:
         raise SystemExit(f"bad --arm {spec!r}: NAME=BANK_DIR:KIND[:shuffled|:posshuffled]")
     return {
         "name": name,
