@@ -57,10 +57,8 @@ BACKEND = "anthropic-native"  # records before 2026-10-11 02:50 UTC used "openai
 
 
 def agent_backend(max_tokens: int, effort: str, model: str = AGENT_MODEL) -> Any:
-    """The investigator's backend: the native Messages API with prompt caching. ``effort`` ("" =
-    off) turns on adaptive thinking. Note: the OpenAI-compatible endpoint silently ignored the
-    old ``thinking: enabled`` setting for Opus 5, so every earlier run had no extended thinking;
-    off is the default to match them."""
+    """The investigator's backend: the native Messages API with prompt caching; ``effort`` sets
+    adaptive thinking ("" = the model's default)."""
     return async_anthropic_backend(
         anthropic_client(), model, max_tokens=max_tokens, effort=effort or None
     )
@@ -570,7 +568,11 @@ class ChiveConfig(pydra.Config):
         self.max_calls = 50
         self.output_budget = 60_000
         self.max_tokens = 16_000
-        self.effort = ""  # adaptive thinking for the agent ("" = off, as every run so far)
+        # adaptive thinking for the agent. "max" reproduces the old OpenAI-compatible runs
+        # (thinking enabled, 6k budget): calibrated on 40 incidents x 2, it matches their tool
+        # calls (8.7 vs 8.3), output tokens (9.3k vs 7.9k) and pass@1 (62.8% vs 60.3%); the
+        # native default and "high" think far less (5.7 calls, 3.3k tokens).
+        self.effort = "max"
         self.key = "judge"  # report: judge | concluder_judge | choice_eval
         self.choices = ""  # candidate selection: a choice-set jsonl (see the module docstring)
         self.out = pydra.REQUIRED
