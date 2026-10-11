@@ -46,3 +46,9 @@ tested once on held-out incidents. Started 2026-10-11 08:00 UTC.
 | baseline | E1 OLens RL harness (dev records from E1) | 57.8% | 80.0% | 33.7% | 38.0% | 76.0% | reference |
 | r1a | + textfirst + absence (= base B) | 62.5% (+4.7 [-2.6, +12.0] vs E1 OLens; +10.4 [+2.1, +18.2] vs transcript) | 87.0% | 35.9% | 35.9% | 87.0% | **keep**: keep up 7 pts, rescue held, unsupported quotes 1.9% -> 1.5% |
 | r1b | + textfirst + absence + continue_from | | | | | | |
+| r1d | B + readout digest | 63.0% (+0.5 [-4.7, +6.2] vs B) | 91.0% | 32.6% | 39.1% | 85.0% | **drop**: no gain (keep up, rescue down); unsupported 1.1% |
+
+Separately (dev100, `dev_absence`): absence guidance alone, per reader -- OLens RL 65.0 -> 70.0
+(+5.0 [-2.0, +12.0]), NLA 62.0 -> 67.5, J-lens 61.5 -> 68.5 (+7.0 [+1.5, +13.0]); the gain is on
+absence-type causes (OLens 45.8 -> 64.6, n=24) with present-feature causes flat (71.1 -> 71.7,
+n=76). A generic fix: it goes into the "generic parts" applied to every reader at test.
