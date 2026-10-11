@@ -51,13 +51,16 @@ tested once on held-out incidents. Started 2026-10-11 08:00 UTC.
 | r1d | B + readout digest | 63.0% (+0.5 [-4.7, +6.2] vs B) | 91.0% | 32.6% | 39.1% | 85.0% | **drop**: no gain (keep up, rescue down); unsupported 1.1% |
 
 | r2a | B + continue_from (guide: use inside the response, at the behaviour) | 58.9% (-3.6 [-10.9, +3.6] vs B) | 85.0% | 30.4% | 33.7% | 82.0% | **drop**: guide fixes part of the harm (-6.2 -> -3.6), still below B |
-| r2b | B + 1 experiment (budgeted counterfactual) | | | | | | (episodes done; judging blocked by the tunnel) |
+| r2b | B + 1 experiment (budgeted counterfactual) | 62.5% (+0.0 [-7.3, +7.3] vs B; +5.7 [-1.6, +13.0] vs transcript+exp) | | | 43.5% | | **counterfactual track**: flat overall, +7.6 on hard; vs transcript + 1 experiment the sign flips from E2's old harness (-3.2) to +5.7 (hard +10.9) |
 | r2c | B + `<im_end>` boundary readouts (second-reader tool) | 56.2% (-6.2 [-12.5, +0.0] vs B) | 82.0% | 28.3% | 32.6% | 78.0% | **drop**: hurts, like every added tool; unsupported 2.0% |
 
 **Agreement (offline arbiter over existing dev records):** B draw0 vs draw1 -> 61.5% (inputs
 59.4 / 65.6); transcript vs B -> 58.9% (picks B 79%); transcript+continue vs B -> 56.2% (picks
 B only 26%; -6.2 [-12.5, -0.5] vs B). **Drop**: B subsumes the arbiter's E1 gain (which came
 from repairing abandoned text answers), and continuation evidence persuades the arbiter wrongly.
+
+**Frozen for the held-out test (2026-10-11 16:30): B, read-only.** Every added tool (digest,
+J-lens, continue_from x2, boundary readouts, arbiter) failed to beat B on dev.
 
 **Round 1 reading:** no tool adds on top of B; the gain is the reasoning protocol (commit a
 transcript-only hypothesis first, overturn only on contrary evidence, absences are invisible to
