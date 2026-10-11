@@ -32,7 +32,14 @@ class _Token:
     def get(self) -> str:
         with self._lock:
             if not self._value or time.monotonic() - self._at > REFRESH_S:
-                self._value, self._at = _fetch(), time.monotonic()
+                try:
+                    self._value, self._at = _fetch(), time.monotonic()
+                except (TimeoutError, ConnectionError, OSError, RuntimeError):
+                    if not self._value:
+                        raise
+                    # the tunnel is unreachable: keep the current token (it outlives the
+                    # refresh period; a 401 still forces a re-fetch) and retry in a minute
+                    self._at = time.monotonic() - REFRESH_S + 60
             return self._value
 
     def invalidate(self, used: str | None = None) -> None:
