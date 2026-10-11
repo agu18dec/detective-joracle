@@ -248,10 +248,13 @@ class ChiveTools:
             if self.text_first and self.committed is None:
                 raise ValueError("readout tools are locked: call commit_text_hypothesis first")
             main, self.reader = self.reader, self.aux  # the same tools over the second reader
+            first = len(self.events)
             try:
                 return await self.call(name.rsplit("_", 1)[1], args)
             finally:
                 self.reader = main
+                for e in self.events[first:]:  # log the call under its real name
+                    e["tool"] = name
         known = (
             name in handlers
             or (name == "run_experiment" and self.experiments > 0)
