@@ -244,8 +244,26 @@ def records(out: Path, ev: str) -> list[Path]:
     return sorted((out / ev).glob("*/*.d*.json"))
 
 
-async def _judge_one(path: Path, inc: Incident, key: str, text: str) -> None:
+def judged(r: dict[str, Any], key: str = "judge") -> bool:
+    """A judgement counts only with all replicates; failed or partial ones are retried."""
+    return int((r.get(key) or {}).get("n_replicates") or 0) >= J.REPLICATES
+
+
+async def full_score(inc: Incident, text: str) -> dict[str, Any]:
+    """Opus, retried once if replicates are missing; Sonnet only if Opus returns nothing at all
+    (its content filter), recorded as ``judge_model``."""
     got = await J.score(inc.behaviour, inc.criteria, text)
+    if got["n_replicates"] < J.REPLICATES:
+        got = await J.score(inc.behaviour, inc.criteria, text)
+    got["judge_model"] = J.JUDGE_MODEL
+    if got["n_replicates"] == 0:
+        got = await J.score(inc.behaviour, inc.criteria, text, model=FALLBACK_MODEL)
+        got["judge_model"] = FALLBACK_MODEL
+    return got
+
+
+async def _judge_one(path: Path, inc: Incident, key: str, text: str) -> None:
+    got = await full_score(inc, text)
     r = json.loads(path.read_text())
     r[key] = got
     path.write_text(json.dumps(r, ensure_ascii=False))
@@ -257,7 +275,7 @@ def stage_judge(args: Any) -> None:
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
         pid = r["prompt_id"]
-        if pid not in incs or "judge" in r or not r.get("result"):
+        if pid not in incs or judged(r) or not r.get("result"):
             continue
         jobs.append(
             lambda path=path, inc=incs[pid], h=r["result"]["hypothesis"]: _judge_one(
@@ -335,24 +353,31 @@ def stage_concluder(args: Any) -> None:
             + "\n\n# The other investigator's experiment(s)\n"
             + render_experiments(exps)
         )
-        got = await json_call(
-            client(),
-            model=AGENT_MODEL,
-            system=CONCLUDER_SYSTEM,
-            user=user,
-            schema=CONCLUDER_SCHEMA,
-            max_tokens=3000,
-        )
+        got = None
+        for model in (AGENT_MODEL, FALLBACK_MODEL):  # the fallback covers content filters
+            got = await json_call(
+                client(),
+                model=model,
+                system=CONCLUDER_SYSTEM,
+                user=user,
+                schema=CONCLUDER_SCHEMA,
+                max_tokens=3000,
+            )
+            if got:
+                got["model"] = model
+                break
+        if not got:
+            log(args.out, f"concluder {path.name}: no answer; will retry")
+            return
+        judgement = await full_score(inc, got["hypothesis"])
         r = json.loads(path.read_text())
-        r["concluder"] = got
-        if got:
-            r["concluder_judge"] = await J.score(inc.behaviour, inc.criteria, got["hypothesis"])
+        r["concluder"], r["concluder_judge"] = got, judgement
         path.write_text(json.dumps(r, ensure_ascii=False))
 
     jobs = []
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
-        if r["prompt_id"] in incs and r.get("experiments") and "concluder" not in r:
+        if r["prompt_id"] in incs and r.get("experiments") and not judged(r, "concluder_judge"):
             jobs.append(
                 lambda path=path, inc=incs[r["prompt_id"]], e=r["experiments"]: one(path, inc, e)
             )
