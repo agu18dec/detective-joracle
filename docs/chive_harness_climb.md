@@ -45,8 +45,18 @@ tested once on held-out incidents. Started 2026-10-11 08:00 UTC.
 |---|---|---|---|---|---|---|---|
 | baseline | E1 OLens RL harness (dev records from E1) | 57.8% | 80.0% | 33.7% | 38.0% | 76.0% | reference |
 | r1a | + textfirst + absence (= base B) | 62.5% (+4.7 [-2.6, +12.0] vs E1 OLens; +10.4 [+2.1, +18.2] vs transcript) | 87.0% | 35.9% | 35.9% | 87.0% | **keep**: keep up 7 pts, rescue held, unsupported quotes 1.9% -> 1.5% |
-| r1b | + textfirst + absence + continue_from | | | | | | |
+| r1b | B + continue_from (first guide) | 56.2% (-6.2 [-12.0, -0.5] vs B) | 84.0% | 26.1% | 28.3% | 82.0% | **drop**: hurts; rescue 36 -> 26 |
+| r1c | B + J-lens corroboration tool | 59.9% (-2.6 [-9.4, +4.2] vs B) | 89.0% | 28.3% | 35.9% | 82.0% | **drop**: no gain |
+| ref | transcript + continue_from (dev96) | 55.2% (+3.1 vs transcript, n.s.; +10.0 on dev100) | 85.0% | 22.8% | 27.2% | 81.0% | baseline: effect varies by split |
 | r1d | B + readout digest | 63.0% (+0.5 [-4.7, +6.2] vs B) | 91.0% | 32.6% | 39.1% | 85.0% | **drop**: no gain (keep up, rescue down); unsupported 1.1% |
+
+| r2a | B + continue_from (guide: use inside the response, at the behaviour) | | | | | | |
+| r2b | B + 1 experiment (budgeted counterfactual) | | | | | | |
+
+**Round 1 reading:** no tool adds on top of B; the gain is the reasoning protocol (commit a
+transcript-only hypothesis first, overturn only on contrary evidence, absences are invisible to
+readouts). Extra tools spread attention; continue_from pulled agents off correct readout
+evidence (rescue down) -- partly misuse (sampling inside user turns returns nothing).
 
 Separately (dev100, `dev_absence`): absence guidance alone, per reader -- OLens RL 65.0 -> 70.0
 (+5.0 [-2.0, +12.0]), NLA 62.0 -> 67.5, J-lens 61.5 -> 68.5 (+7.0 [+1.5, +13.0]); the gain is on
