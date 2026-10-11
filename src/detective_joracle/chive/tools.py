@@ -17,7 +17,12 @@ from .data import Incident
 from .executor import Executor
 from .readers import Reader
 
-WINDOW = {"olens": 2, "jlens": 2, "nla": 4}  # neighbouring positions an inspect shows by default
+WINDOW = {
+    "olens": 2,
+    "jlens": 2,
+    "nla": 4,
+    "boundary": 2,
+}  # neighbouring positions an inspect shows by default
 MAX_WINDOW = 8
 SEARCH_K = 20
 SAMPLES_PER_HIT = 3
@@ -45,6 +50,7 @@ def schemas(
     letters: list[str] | None = None,
     continuation: bool = False,
     text_first: bool = False,
+    aux: Reader | None = None,
 ) -> list[dict[str, Any]]:
     """The tools; with `letters`, submit also requires the chosen candidate (candidate selection)."""
     out = [
@@ -143,6 +149,12 @@ def schemas(
                 ["turns", "hypothesis_tested", "rationale"],
             )
         )
+    if aux is not None and reader is not None:  # a second method, to corroborate the first
+        for sch in schemas(aux, 0)[1:3]:  # its search + inspect, renamed
+            f = sch["function"]
+            f["name"] = f"{aux.name}_{f['name']}"
+            f["description"] = f"[{aux.name} readouts] " + f["description"]
+            out.append(sch)
     if text_first and reader is not None:
         out.append(
             _schema(
@@ -221,6 +233,7 @@ class ChiveTools:
     letters: list[str] | None = None  # candidate selection: the valid choices
     continuation: bool = False  # the continue_from tool (needs an executor for the target)
     text_first: bool = False  # readout tools locked until commit_text_hypothesis
+    aux: Reader | None = None  # a second method's readouts: <name>_search / <name>_inspect
     committed: dict[str, Any] | None = None
 
     async def call(self, name: str, args: dict[str, Any]) -> str:
@@ -231,6 +244,14 @@ class ChiveTools:
             "notebook": self.notebook,
             SUBMIT: self.submit,
         }
+        if self.aux is not None and name in (f"{self.aux.name}_search", f"{self.aux.name}_inspect"):
+            if self.text_first and self.committed is None:
+                raise ValueError("readout tools are locked: call commit_text_hypothesis first")
+            main, self.reader = self.reader, self.aux  # the same tools over the second reader
+            try:
+                return await self.call(name.rsplit("_", 1)[1], args)
+            finally:
+                self.reader = main
         known = (
             name in handlers
             or (name == "run_experiment" and self.experiments > 0)

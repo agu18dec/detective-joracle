@@ -9,13 +9,14 @@ without the right content.
 import gzip
 import json
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .data import Incident
 
-KINDS = ("olens", "nla", "jlens")
+KINDS = ("olens", "nla", "jlens", "boundary")
 
 
 @dataclass
@@ -83,6 +84,12 @@ def load_reader(
 
 
 DESCRIBE = {
+    "boundary": """Boundary readouts are OLens read at a FORCED turn end: the conversation is \
+cut right after a token, the turn is closed there (<|im_end|><|im_start|>), and OLens reads what \
+the model carries forward at that boundary -- what it would summarize or plan had the turn ended \
+at that token. They exist at most positions before the response, at layers {layers}, {k} samples \
+each. Expect them to be more summary-like than ordinary readouts; some mention the text being \
+cut off, which is an artifact of the forced end.""",
     "olens": """OLens is a copy of the target model trained so that its short '- ' bullets \
 reconstruct one layer's activation at one token: whatever that activation encodes and can be \
 put into words, including what the model represents but never writes -- an assumption, a \
@@ -115,3 +122,43 @@ def describe(reader: Reader) -> str:
         else ", ".join(map(str, reader.layers))
     )
     return DESCRIBE[reader.kind].format(layers=layers, k=reader.k)
+
+
+_WORD = re.compile(r"[A-Za-z][A-Za-z'-]{3,}")
+
+
+def digest(
+    reader: Reader, inc: Incident, n: int = 12, span: int = 20
+) -> list[tuple[int, int, str]]:
+    """Positions before the response whose readouts most consistently say something the nearby
+    text does not: novel words (absent from the +-``span`` token window) that recur in several
+    samples or layers at that position. No ground truth. Returns (position, layer, sample) with
+    one representative sample per position, positions at least 3 apart, in position order."""
+    end = inc.response_start
+    scored: list[tuple[float, int, int, str]] = []
+    for pos in range(end):
+        cells = reader.cell(pos)
+        if not cells:
+            continue
+        near = set(
+            w.lower() for w in _WORD.findall("".join(inc.pieces[max(0, pos - span) : pos + span]))
+        )
+        count: dict[str, int] = {}
+        best: tuple[int, int, str] = (0, 0, "")
+        for layer, samples in cells.items():
+            for smp in samples:
+                novel = {w.lower() for w in _WORD.findall(smp)} - near
+                for w in novel:
+                    count[w] = count.get(w, 0) + 1
+                if len(novel) > best[0]:
+                    best = (len(novel), layer, smp)
+        recurring = sum(c for c in count.values() if c >= 2)
+        if recurring:
+            scored.append((float(recurring), pos, best[1], best[2]))
+    picked: list[tuple[int, int, str]] = []
+    for _score, pos, layer, smp in sorted(scored, reverse=True):
+        if all(abs(pos - q) >= 3 for q, _, _ in picked):
+            picked.append((pos, layer, smp))
+        if len(picked) == n:
+            break
+    return sorted(picked)

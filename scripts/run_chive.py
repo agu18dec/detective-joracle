@@ -44,7 +44,7 @@ from detective_joracle.chive.prompts import (
     seed,
     system_prompt,
 )
-from detective_joracle.chive.readers import load_reader
+from detective_joracle.chive.readers import digest, load_reader
 from detective_joracle.chive.tools import SUBMIT, ChiveTools, render_experiments, schemas
 
 AGENT_MODEL = "claude-opus-5"
@@ -145,6 +145,11 @@ async def _episode(
                 permute=arm.get("posshuffled", False),
             )
         )
+        aux = (
+            load_reader(args.aux_arm["name"], args.aux_arm["kind"], args.aux_arm["bank"], inc)
+            if args.aux and reader is not None
+            else None
+        )
         cont = "continue" in args.variants
         executor = Executor(args.target) if args.experiments or cont else None
         row = args.choice_rows.get(inc.prompt_id) if args.choices else None
@@ -159,20 +164,25 @@ async def _episode(
             letters=letters,
             continuation=cont,
             text_first=tfirst,
+            aux=aux,
         )
         backend = agent_backend(args.max_tokens, args.effort, model)
-        system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants))
-        first = seed(inc, cands)
+        system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants), aux)
+        dig = digest(reader, inc) if "digest" in args.variants and reader is not None else None
+        first = seed(inc, cands, dig)
         extra.update(
             system_prompt=system,
             seed_prompt=first,
             backend=BACKEND,
             effort=args.effort,
             variants=list(args.variants),
+            aux=args.aux,
         )
         await run_tool_loop_async(
             tools,
-            schemas(reader, args.experiments, letters, continuation=cont, text_first=tfirst),
+            schemas(
+                reader, args.experiments, letters, continuation=cont, text_first=tfirst, aux=aux
+            ),
             system,
             first,
             backend,
@@ -660,13 +670,15 @@ class ChiveConfig(pydra.Config):
         self.effort = "max"
         self.key = "judge"  # report: judge | concluder_judge | choice_eval
         self.choices = ""  # candidate selection: a choice-set jsonl (see the module docstring)
-        self.variants: list[str] = []  # harness ablations: switchbar, textfirst, absence, continue
+        self.variants: list[str] = []  # ablations: switchbar, textfirst, absence, continue, digest
+        self.aux = ""  # a corroborating reader for reader arms: NAME=BANK_DIR:KIND
         self.out = pydra.REQUIRED
 
     def finalize(self) -> None:
         self.ids, self.incidents, self.out = Path(self.ids), Path(self.incidents), Path(self.out)
         self.hard = Path(self.hard) if self.hard else None
         self.arm = list(self.arms)
+        self.aux_arm = parse_arm(self.aux) if self.aux else None
         self.choice_rows = (
             {r["prompt_id"]: r for r in map(json.loads, Path(self.choices).open())}
             if self.choices

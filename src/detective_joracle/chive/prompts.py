@@ -97,7 +97,11 @@ def method_section(reader: Reader | None) -> str:
 
 
 def system_prompt(
-    reader: Reader | None, experiments: int, n_samples: int, variants: tuple[str, ...] = ()
+    reader: Reader | None,
+    experiments: int,
+    n_samples: int,
+    variants: tuple[str, ...] = (),
+    aux: Reader | None = None,
 ) -> str:
     """``variants`` (harness ablations, off by default): "switchbar" adds the bar for overturning
     the transcript-only hypothesis (reader arms); "textfirst" locks the readout tools until a
@@ -112,6 +116,13 @@ def system_prompt(
         parts.append(ABSENCE)
     if "continue" in variants:
         parts.append(CONTINUE)
+    if aux is not None and reader is not None:
+        parts.append(
+            f"## Corroborating method: {aux.name} readouts\n{describe(aux)}\n"
+            f"{aux.name}_search and {aux.name}_inspect work like search and inspect over these "
+            f"readouts. Use them to check what the {reader.name} readouts suggest: a reading "
+            "both methods show is stronger evidence than either alone."
+        )
     if experiments:
         parts.append(EXPERIMENT.format(n=experiments, N=n_samples))
     return "\n\n".join(parts)
@@ -123,8 +134,13 @@ the others were ruled out by experiments or are plausible but mistaken readings 
 Plausibility is not evidence: investigate before you choose."""
 
 
-def seed(inc: Incident, candidates: list[tuple[str, str]] | None = None) -> str:
-    """The first user message; `candidates` (letter, text) turns it into candidate selection."""
+def seed(
+    inc: Incident,
+    candidates: list[tuple[str, str]] | None = None,
+    digest: list[tuple[int, int, str]] | None = None,
+) -> str:
+    """The first user message; `candidates` (letter, text) turns it into candidate selection;
+    `digest` (position, layer, sample) lists the readouts worth a first look."""
     block = (
         CANDIDATES + "\n" + "\n".join(f"{a}) {t}" for a, t in candidates) + "\n\n"
         if candidates
@@ -147,6 +163,18 @@ def seed(inc: Incident, candidates: list[tuple[str, str]] | None = None) -> str:
         f"{inc.completion}\n\n"
         + (f"{EARLIER_TURNS}\n\n" if earlier else "")
         + block
+        + (
+            "## Readouts worth a first look\nPositions before the response whose readouts most "
+            "consistently say something the nearby text does not (picked automatically, one "
+            "sample each; check them with inspect):\n"
+            + "\n".join(
+                f"- {inc.where(p)} L{layer}: {' '.join(smp.split())[:220]}"
+                for p, layer, smp in digest
+            )
+            + "\n\n"
+            if digest
+            else ""
+        )
         + "Positions are tokens t0..t"
         + str(inc.n_tokens - 1)
         + "; the response starts at "
