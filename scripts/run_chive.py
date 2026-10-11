@@ -104,8 +104,11 @@ def done(path: Path) -> bool:
     if not path.exists():
         return False
     r = json.loads(path.read_text())
-    refused = r.get("stopped_by") == "idle" and not r.get("result")
-    return not str(r.get("stopped_by", "")).startswith("error") and not refused
+    stop = str(r.get("stopped_by", ""))
+    refused = stop == "idle" and not r.get("result")
+    # "salvaged finish after <API error>": an answer forced when the API failed mid-episode,
+    # a truncated investigation, so it is rerun like an error
+    return not stop.startswith(("error", "salvaged")) and not refused
 
 
 # --------------------------------------------------------------------------- agent
@@ -393,6 +396,7 @@ def stage_report(args: Any) -> None:
         seen[arm].add(f"{r['prompt_id']}.d{r['seed']}")
         j0 = r.get(args.key) or {}
         health[arm]["error stop"] += str(r.get("stopped_by", "")).startswith("error")
+        health[arm]["API-truncated"] += str(r.get("stopped_by", "")).startswith("salvaged")
         fallback[arm] += bool(r.get("refused_by"))
         health[arm]["no answer"] += not r.get("result")
         health[arm]["unjudged"] += bool(r.get("result")) and j0.get("score") is None
@@ -441,9 +445,14 @@ def stage_report(args: Any) -> None:
     lines = [
         f"# CHIVE eval `{args.eval}` ({args.key})",
         "",
-        "pass@1 = share of answers scoring >= 7 (mean over draws, then over incidents); "
-        "mean score = judge score 1-10 (mean of 3 replicates). Differences are vs "
-        "transcript, paired by incident, with 95% bootstrap CIs.",
+        (
+            "pass@1 = share of episodes choosing the true candidate (exact match, no judge; mean "
+            "over draws, then over incidents); mean score = 10 x pass@1. "
+            if args.key == "choice_eval"
+            else "pass@1 = share of answers scoring >= 7 (mean over draws, then over incidents); "
+            "mean score = judge score 1-10 (mean of 3 replicates). "
+        )
+        + "Differences are vs transcript, paired by incident, with 95% bootstrap CIs.",
         "",
         "| arm | runs | pass@1 | mean score | pass@1 vs transcript (pp) | mean score vs "
         "transcript | pass@1 hard | mean hard | hard vs transcript (pp) |",
@@ -477,13 +486,15 @@ def stage_report(args: Any) -> None:
         "",
         "## Health (every number here should be 0 before a result is quoted)",
         "",
-        "| arm | missing records | error stop | no answer | unjudged | <3 replicates |",
-        "|---|---|---|---|---|---|",
+        "| arm | missing records | error stop | API-truncated | no answer | unjudged | "
+        "<3 replicates |",
+        "|---|---|---|---|---|---|---|",
     ]
     for arm in sorted(n_runs):
         h = health[arm]
         lines.append(
             f"| {arm} | {max(0, expected - len(seen[arm]))} | {h['error stop']} | "
+            f"{h['API-truncated']} | "
             f"{h['no answer']} | {h['unjudged']} | {h['<3 replicates']} |"
         )
     if args.key == "choice_eval" and args.choice_rows:

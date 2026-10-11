@@ -35,9 +35,11 @@ class _Token:
                 self._value, self._at = _fetch(), time.monotonic()
             return self._value
 
-    def invalidate(self) -> None:
+    def invalidate(self, used: str | None = None) -> None:
+        """Force a re-fetch; with ``used``, only if no other request has re-fetched since."""
         with self._lock:
-            self._at = 0.0
+            if used is None or used == self._value:
+                self._at = 0.0
 
 
 SOCK = os.environ.get("OP_REMOTE_SOCK", "/tmp/.opsec-agam.sock")
@@ -81,6 +83,19 @@ class _KeylessOpenAI(AsyncOpenAI):
     @api_key.setter
     def api_key(self, _value: str) -> None:  # the SDK assigns it in __init__
         pass
+
+    async def request(self, *args: Any, **kwargs: Any) -> Any:
+        """A revoked token (401) is replaced and the request retried, mid-episode."""
+        for attempt in range(3):
+            used = TOKEN.get()
+            try:
+                return await super().request(*args, **kwargs)
+            except AuthenticationError:
+                if attempt == 2:
+                    raise
+                TOKEN.invalidate(used)
+                await asyncio.sleep(5)
+        raise AssertionError("unreachable")
 
 
 def client(max_retries: int = 10) -> AsyncOpenAI:
