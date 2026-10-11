@@ -19,13 +19,13 @@ from detective_joracle.chive.data import read_ids  # noqa: E402
 
 # dev arms: label -> (eval dir, arm name)
 DEV = {
-    "B: OLens + textfirst + absence": ("climb_textfirst_absence", "olens_rl_tfa"),
-    "B + readout digest": ("climb_tfa_digest", "olens_rl_tfa_digest"),
-    "B + 1 experiment": ("climb_tfa_experiment", "olens_rl_tfa_exp"),
-    "B + J-lens tool": ("climb_tfa_jlens", "olens_rl_tfa_jlens"),
-    "B + continue_from (guided)": ("climb_tfa_continue_guided", "olens_rl_tfa_cont2"),
-    "B + continue_from": ("climb_textfirst_absence_continue", "olens_rl_tfac"),
-    "B + boundary readouts": ("climb_tfa_boundary", "olens_rl_tfa_boundary"),
+    "OLens, improved harness": ("climb_textfirst_absence", "olens_rl_tfa"),
+    "OLens improved + readout digest": ("climb_tfa_digest", "olens_rl_tfa_digest"),
+    "OLens improved + 1 experiment": ("climb_tfa_experiment", "olens_rl_tfa_exp"),
+    "OLens improved + J-lens tool": ("climb_tfa_jlens", "olens_rl_tfa_jlens"),
+    "OLens improved + continue_from (guided)": ("climb_tfa_continue_guided", "olens_rl_tfa_cont2"),
+    "OLens improved + continue_from": ("climb_textfirst_absence_continue", "olens_rl_tfac"),
+    "OLens improved + boundary readouts": ("climb_tfa_boundary", "olens_rl_tfa_boundary"),
     "OLens, original harness": ("climb_textfirst_absence", "olens_rl"),
     "NLA": ("climb_textfirst_absence", "nla"),
     "J-lens": ("climb_textfirst_absence", "jlens"),
@@ -72,7 +72,7 @@ class Config(pydra.Config):
 
 def forest(cfg: Config, dev: set[str]) -> None:
     data = {k: draws(cfg.out, *v, dev) for k, v in DEV.items()}
-    base = data["B: OLens + textfirst + absence"]
+    base = data["OLens, improved harness"]
     rows = []
     for label, d in data.items():
         if not d:
@@ -82,12 +82,12 @@ def forest(cfg: Config, dev: set[str]) -> None:
     rows.sort(key=lambda r: r[1])
     fig, ax = plt.subplots(figsize=(13, 0.62 * len(rows) + 1.8))
     for i, (label, m, dm, lo, hi) in enumerate(rows):
-        c = OLENS if label.startswith(("B", "OLens")) else OTHER
+        c = OLENS if label.startswith("OLens") else OTHER
         ax.errorbar(dm, i, xerr=[[dm - lo], [hi - dm]], fmt="o", color=c, ms=9, lw=2.5, capsize=5)
         ax.text(1.02, i, f"{m:.1f}%", transform=ax.get_yaxis_transform(), va="center", fontsize=14)
     ax.axvline(0, color="#444", lw=1.2)
     ax.set_yticks(range(len(rows)), [r[0] for r in rows])
-    ax.set_xlabel("pass@1 minus B (percentage points), paired, 95% CI")
+    ax.set_xlabel("pass@1 minus OLens, improved harness (pp), paired, 95% CI")
     ax.set_title("Harness climb on dev (96 incidents x 2 draws)", loc="left")
     ax.text(
         1.02,
@@ -124,7 +124,7 @@ def keep_rescue(cfg: Config, dev: set[str]) -> None:
                 rr, nr = rr + r["judge"]["pass"], nr + 1
         if not nk:
             continue
-        c = OLENS if label.startswith(("B", "OLens")) else OTHER
+        c = OLENS if label.startswith("OLens") else OTHER
         pts.append((100 * rr / nr, 100 * k / nk, label, c))
     groups: dict[tuple[float, float], list[str]] = defaultdict(list)
     colors: dict[tuple[float, float], str] = {}
@@ -157,11 +157,11 @@ def keep_rescue(cfg: Config, dev: set[str]) -> None:
 
 def passk(cfg: Config, test: set[str], hard: set[str]) -> None:
     arms = {
-        "B (frozen OLens harness)": "olens_rl_B",
+        "OLens, improved harness": "olens_rl_B",
         "transcript": "transcript",
         "transcript + continue_from": "transcript_cont",
-        "NLA + generic parts": "nla_B",
-        "J-lens + generic parts": "jlens_B",
+        "NLA, improved harness": "nla_B",
+        "J-lens, improved harness": "jlens_B",
         "OLens, original harness": "olens_rl",
     }
     strata = {"all 204": test, "hard 46": test & hard, "normal 158": test - hard}

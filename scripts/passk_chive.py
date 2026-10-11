@@ -19,6 +19,17 @@ import pydra
 
 from detective_joracle.chive.data import read_ids
 
+LABEL = {
+    "olens_rl_B": "OLens, improved harness",
+    "nla_B": "NLA, improved harness",
+    "jlens_B": "J-lens, improved harness",
+    "olens_rl": "OLens, original harness",
+    "nla": "NLA, original harness",
+    "jlens": "J-lens, original harness",
+    "transcript": "transcript only",
+    "transcript_cont": "transcript + continue_from",
+}
+
 
 def pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 if n - c < k else 1.0 - comb(n - c, k) / comb(n, k)
@@ -82,8 +93,10 @@ def main(cfg: Config) -> None:
         lines += [
             f"## {name}",
             "",
-            "| arm | n | " + " | ".join(f"pass@{k}" for k in ks) + f" | pass@1 vs {cfg.reference} "
-            f"| pass@{cfg.draws} vs {cfg.reference} |",
+            "| arm | n | "
+            + " | ".join(f"pass@{k}" for k in ks)
+            + f" | pass@1 vs {LABEL.get(cfg.reference, cfg.reference)} "
+            f"| pass@{cfg.draws} vs {LABEL.get(cfg.reference, cfg.reference)} |",
             "|---|---|" + "---|" * (len(ks) + 2),
         ]
         for arm in arms:
@@ -95,7 +108,9 @@ def main(cfg: Config) -> None:
             ref = arm == cfg.reference or cfg.reference not in full
             c1 = "-" if ref else paired(arm, cfg.reference, 1, sub)
             ck = "-" if ref else paired(arm, cfg.reference, cfg.draws, sub)
-            lines.append(f"| {arm} | {n} | " + " | ".join(vals) + f" | {c1} | {ck} |")
+            lines.append(
+                f"| {LABEL.get(arm, arm)} | {n} | " + " | ".join(vals) + f" | {c1} | {ck} |"
+            )
         lines.append("")
     text = "\n".join(lines)
     (cfg.out / cfg.eval / "passk.md").write_text(text)
