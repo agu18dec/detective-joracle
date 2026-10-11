@@ -290,3 +290,150 @@ def make_backend_factory(
         )
 
     return async_factory if async_client else factory
+
+
+def to_anthropic(
+    messages: list[dict[str, Any]], kept: Mapping[str, list[dict[str, Any]]]
+) -> tuple[str, list[dict[str, Any]]]:
+    """OpenAI-format chat (system, user, assistant + tool_calls, tool) -> Anthropic (system, messages).
+
+    ``kept`` maps a tool-call id to the thinking blocks of the turn that made it: Anthropic needs
+    them passed back verbatim (with signatures) to continue a tool loop with thinking on.
+    Consecutive tool results merge into one user turn, as the Messages API requires."""
+    system = ""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        role, content = m["role"], m.get("content")
+        if role == "system":
+            system = str(content or "")
+            continue
+        if role == "tool":
+            block = {
+                "type": "tool_result",
+                "tool_use_id": m["tool_call_id"],
+                "content": str(content),
+            }
+            if (
+                out
+                and out[-1]["role"] == "user"
+                and out[-1]["content"][-1]["type"] == "tool_result"
+            ):
+                out[-1]["content"].append(block)
+            else:
+                out.append({"role": "user", "content": [block]})
+            continue
+        blocks: list[dict[str, Any]] = []
+        if role == "assistant":
+            calls = m.get("tool_calls") or []
+            if calls:
+                blocks += kept.get(calls[0]["id"], [])
+            if content and content != "...":
+                blocks.append({"type": "text", "text": str(content)})
+            for c in calls:
+                try:
+                    args = json.loads(c["function"]["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": c["id"],
+                        "name": c["function"]["name"],
+                        "input": args,
+                    }
+                )
+            out.append(
+                {"role": "assistant", "content": blocks or [{"type": "text", "text": "..."}]}
+            )
+        else:
+            text = content if isinstance(content, str) else json.dumps(content)
+            if out and out[-1]["role"] == "user":  # e.g. a nudge right after tool results
+                out[-1]["content"].append({"type": "text", "text": text})
+            else:
+                out.append({"role": "user", "content": [{"type": "text", "text": text}]})
+    return system, out
+
+
+def async_anthropic_backend(
+    client: Any, model: str, *, max_tokens: int = 4000, effort: str | None = None
+) -> AsyncBackend:
+    """Claude through the native Messages API (an ``anthropic.AsyncAnthropic`` client), with
+    prompt caching: breakpoints on the system prompt, the tools and the newest message, so each
+    agent turn re-reads its whole prefix from cache (cache reads are cheaper and do not count
+    toward the input-tokens-per-minute rate limit). ``effort`` turns on adaptive thinking (the
+    only kind current Claude models take) on unforced turns, where the last assistant tool turn
+    kept its thinking blocks; None = no thinking. Usage carries ``prompt_tokens``,
+    ``cached_tokens`` and ``cache_write_tokens``."""
+    kept: dict[str, list[dict[str, Any]]] = {}
+    eph = {"type": "ephemeral"}
+
+    async def call(
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        force_tool: str | None = None,
+    ) -> tuple[str, list[dict[str, Any]], dict[str, int]]:
+        system, msgs = to_anthropic(messages, kept)
+        atools = [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"].get("description", ""),
+                "input_schema": t["function"]["parameters"],
+            }
+            for t in tools
+        ]
+        if atools:
+            atools[-1] = {**atools[-1], "cache_control": eph}
+        if msgs:
+            last = msgs[-1]["content"][-1]
+            msgs[-1]["content"][-1] = {**last, "cache_control": eph}
+        last_asst = next((m for m in reversed(msgs) if m["role"] == "assistant"), None)
+        continuing_without_thinking = (
+            last_asst is not None
+            and not any(
+                b["type"] == "thinking" or b["type"] == "redacted_thinking"
+                for b in last_asst["content"]
+            )
+            and any(b["type"] == "tool_use" for b in last_asst["content"])
+        )
+        think = effort is not None and not force_tool and not continuing_without_thinking
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": [{"type": "text", "text": system, "cache_control": eph}] if system else [],
+            "messages": msgs,
+            "tools": atools,
+        }
+        if force_tool == FORCE_ANY:
+            kwargs["tool_choice"] = {"type": "any"}
+        elif force_tool:
+            kwargs["tool_choice"] = {"type": "tool", "name": force_tool}
+        if think:
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": effort}
+        resp = await client.messages.create(**kwargs)
+        text, calls, thinking = "", [], []
+        for b in resp.content:
+            if b.type == "text":
+                text += b.text
+            elif b.type == "tool_use":
+                calls.append({"id": b.id, "name": b.name, "args": dict(b.input or {})})
+            elif b.type in ("thinking", "redacted_thinking"):
+                thinking.append(b.model_dump(exclude_none=True))
+        if calls and thinking:
+            kept[calls[0]["id"]] = thinking
+        u = resp.usage
+        cached = int(getattr(u, "cache_read_input_tokens", 0) or 0)
+        written = int(getattr(u, "cache_creation_input_tokens", 0) or 0)
+        usage = {
+            "output_tokens": int(u.output_tokens or 0),
+            "reasoning_tokens": 0,
+            "prompt_tokens": int(u.input_tokens or 0) + cached + written,
+            "cached_tokens": cached,
+            "cache_write_tokens": written,
+        }
+        if resp.stop_reason == "refusal" or (not resp.content and not calls):
+            # the safety filter: an empty reply, as the OpenAI-compatible endpoint gives it
+            return "", [], usage
+        return text, calls, usage
+
+    return call

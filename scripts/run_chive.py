@@ -30,12 +30,12 @@ from typing import Any
 
 import pydra
 
-from detective_joracle.agent.backends import async_openai_compatible_backend
+from detective_joracle.agent.backends import async_anthropic_backend
 from detective_joracle.agent.loop import Budget, RunRecord, run_many, run_tool_loop_async
 from detective_joracle.chive import judge as J
 from detective_joracle.chive.data import Incident, load_incidents, read_ids
 from detective_joracle.chive.executor import Executor
-from detective_joracle.chive.llm import client, json_call
+from detective_joracle.chive.llm import anthropic_client, client, json_call
 from detective_joracle.chive.prompts import (
     CONCLUDER_SCHEMA,
     CONCLUDER_SYSTEM,
@@ -53,25 +53,17 @@ AGENT_MODEL = "claude-opus-5"
 FALLBACK_MODEL = "claude-sonnet-5"
 
 
-def thinking_backend(max_tokens: int, budget: int, model: str = AGENT_MODEL) -> Any:
-    """Extended thinking on every turn except forced ones (Anthropic disallows thinking with a
-    forced tool call, and the loop forces the terminal at the end)."""
-    c = client()
-    think = async_openai_compatible_backend(
-        c,
-        model,
-        cache=True,
-        max_tokens=max_tokens,
-        extra_body={"thinking": {"type": "enabled", "budget_tokens": budget}} if budget else None,
+BACKEND = "anthropic-native"  # records before 2026-10-11 02:50 UTC used "openai-compat"
+
+
+def agent_backend(max_tokens: int, effort: str, model: str = AGENT_MODEL) -> Any:
+    """The investigator's backend: the native Messages API with prompt caching. ``effort`` ("" =
+    off) turns on adaptive thinking. Note: the OpenAI-compatible endpoint silently ignored the
+    old ``thinking: enabled`` setting for Opus 5, so every earlier run had no extended thinking;
+    off is the default to match them."""
+    return async_anthropic_backend(
+        anthropic_client(), model, max_tokens=max_tokens, effort=effort or None
     )
-    plain = async_openai_compatible_backend(c, model, cache=True, max_tokens=max_tokens)
-
-    async def call(
-        messages: list[dict[str, Any]], tools: list[dict[str, Any]], force_tool: str | None = None
-    ) -> Any:
-        return await (plain if force_tool else think)(messages, tools, force_tool)
-
-    return call
 
 
 def log(out: Path, msg: str) -> None:
@@ -154,9 +146,9 @@ async def _episode(
         cands = [(o["letter"], o["text"]) for o in row["options"]] if row else None
         letters = [a for a, _ in cands] if cands else None
         tools = ChiveTools(inc, reader, executor, args.experiments, letters=letters)
-        backend = thinking_backend(args.max_tokens, args.thinking_budget, model)
+        backend = agent_backend(args.max_tokens, args.effort, model)
         system, first = system_prompt(reader, args.experiments, Executor.N), seed(inc, cands)
-        extra.update(system_prompt=system, seed_prompt=first)
+        extra.update(system_prompt=system, seed_prompt=first, backend=BACKEND, effort=args.effort)
         await run_tool_loop_async(
             tools,
             schemas(reader, args.experiments, letters),
@@ -578,7 +570,7 @@ class ChiveConfig(pydra.Config):
         self.max_calls = 50
         self.output_budget = 60_000
         self.max_tokens = 16_000
-        self.thinking_budget = 6_000  # extended-thinking tokens per (unforced) agent turn
+        self.effort = ""  # adaptive thinking for the agent ("" = off, as every run so far)
         self.key = "judge"  # report: judge | concluder_judge | choice_eval
         self.choices = ""  # candidate selection: a choice-set jsonl (see the module docstring)
         self.out = pydra.REQUIRED

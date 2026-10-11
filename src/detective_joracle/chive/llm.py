@@ -144,3 +144,42 @@ async def json_call(
                 print(f"json_call failed: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
         await asyncio.sleep(min(30, 2**i))
     return None
+
+
+def anthropic_client(max_retries: int = 10) -> Any:
+    """A native ``anthropic.AsyncAnthropic`` client (prompt caching works here, unlike on the
+    OpenAI-compatible endpoint): an explicit key, or keyless via the tunnel's OAuth token."""
+    import anthropic
+
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return anthropic.AsyncAnthropic(api_key=key, max_retries=max_retries)
+
+    class _Keyless(anthropic.AsyncAnthropic):
+        @property
+        def auth_token(self) -> str:
+            return TOKEN.get()
+
+        @auth_token.setter
+        def auth_token(self, _value: str | None) -> None:  # the SDK assigns it in __init__
+            pass
+
+        async def request(self, *args: Any, **kwargs: Any) -> Any:
+            """A revoked token (401) is replaced and the request retried, mid-episode."""
+            for attempt in range(3):
+                used = TOKEN.get()
+                try:
+                    return await super().request(*args, **kwargs)
+                except anthropic.AuthenticationError:
+                    if attempt == 2:
+                        raise
+                    TOKEN.invalidate(used)
+                    await asyncio.sleep(5)
+            raise AssertionError("unreachable")
+
+    TOKEN.get()  # fail fast if the tunnel is down
+    return _Keyless(
+        auth_token="keyless",
+        max_retries=max_retries,
+        default_headers={"anthropic-beta": OAUTH_BETA},
+    )
