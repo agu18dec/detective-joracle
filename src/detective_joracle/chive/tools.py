@@ -44,6 +44,7 @@ def schemas(
     experiments: int,
     letters: list[str] | None = None,
     continuation: bool = False,
+    text_first: bool = False,
 ) -> list[dict[str, Any]]:
     """The tools; with `letters`, submit also requires the chosen candidate (candidate selection)."""
     out = [
@@ -142,6 +143,19 @@ def schemas(
                 ["turns", "hypothesis_tested", "rationale"],
             )
         )
+    if text_first and reader is not None:
+        out.append(
+            _schema(
+                "commit_text_hypothesis",
+                "Commit your best transcript-only hypothesis before any readout tool (they are "
+                "locked until you do). Call once.",
+                {
+                    "hypothesis": {"type": "string", "description": "ONE mechanism, 1-3 sentences"},
+                    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                },
+                ["hypothesis", "confidence"],
+            )
+        )
     if continuation:
         out.append(
             _schema(
@@ -206,6 +220,8 @@ class ChiveTools:
     experiments_run: list[dict[str, Any]] = field(default_factory=list)
     letters: list[str] | None = None  # candidate selection: the valid choices
     continuation: bool = False  # the continue_from tool (needs an executor for the target)
+    text_first: bool = False  # readout tools locked until commit_text_hypothesis
+    committed: dict[str, Any] | None = None
 
     async def call(self, name: str, args: dict[str, Any]) -> str:
         handlers = {
@@ -219,15 +235,20 @@ class ChiveTools:
             name in handlers
             or (name == "run_experiment" and self.experiments > 0)
             or (name == "continue_from" and self.continuation)
+            or (name == "commit_text_hypothesis" and self.text_first)
         )
         if not known or (name in ("search", "inspect") and self.reader is None):
             raise ValueError(f"no tool {name!r} in this investigation")
+        if self.text_first and name in ("search", "inspect") and self.committed is None:
+            raise ValueError("readout tools are locked: call commit_text_hypothesis first")
         event: dict[str, Any] = {"tool": name, "args": args}
         try:
             if name == "run_experiment":
                 out = await self.run_experiment(args, event)
             elif name == "continue_from":
                 out = await self.continue_from(args, event)
+            elif name == "commit_text_hypothesis":
+                out = self.commit(args)
             else:
                 out = handlers[name](args, event)
         except ValueError as e:
@@ -363,6 +384,17 @@ class ChiveTools:
         if action != "read":
             return f"Saved ({len(self.notebook_text)} characters)."
         return self.notebook_text or "(empty)"
+
+    def commit(self, args: dict[str, Any]) -> str:
+        if self.committed is not None:
+            raise ValueError("already committed; continue with the readouts")
+        if not str(args.get("hypothesis") or "").strip():
+            raise ValueError("give `hypothesis`")
+        self.committed = {
+            "hypothesis": str(args["hypothesis"]),
+            "confidence": str(args.get("confidence", "")),
+        }
+        return "Committed. Your readout tools are now unlocked."
 
     async def continue_from(self, args: dict[str, Any], event: dict[str, Any]) -> str:
         if self.executor is None:

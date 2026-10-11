@@ -144,8 +144,15 @@ async def _episode(
         row = args.choice_rows.get(inc.prompt_id) if args.choices else None
         cands = [(o["letter"], o["text"]) for o in row["options"]] if row else None
         letters = [a for a, _ in cands] if cands else None
+        tfirst = "textfirst" in args.variants and reader is not None
         tools = ChiveTools(
-            inc, reader, executor, args.experiments, letters=letters, continuation=cont
+            inc,
+            reader,
+            executor,
+            args.experiments,
+            letters=letters,
+            continuation=cont,
+            text_first=tfirst,
         )
         backend = agent_backend(args.max_tokens, args.effort, model)
         system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants))
@@ -159,7 +166,7 @@ async def _episode(
         )
         await run_tool_loop_async(
             tools,
-            schemas(reader, args.experiments, letters, continuation=cont),
+            schemas(reader, args.experiments, letters, continuation=cont, text_first=tfirst),
             system,
             first,
             backend,
@@ -180,6 +187,7 @@ async def _episode(
         extra |= {
             "events": tools.events,
             "notebook": tools.notebook_text,
+            "committed_text_hypothesis": tools.committed,
             "experiments": tools.experiments_run,
             "reader": None
             if reader is None
@@ -522,6 +530,24 @@ def stage_report(args: Any) -> None:
             f"{h['API-truncated']} | "
             f"{h['no answer']} | {h['unjudged']} | {h['<3 replicates']} |"
         )
+    if tr:  # does the method keep what the transcript already gets, and rescue what it misses?
+        solved = {p for p, v in per["transcript"].items() if p in ids and min(v) == 1.0}
+        failed = {p for p, v in per["transcript"].items() if p in ids and max(v) == 0.0}
+        lines += [
+            "",
+            "## Keep and rescue",
+            "",
+            f"*keep* = pass@1 on the {len(solved)} incidents the transcript arm solved on every "
+            f"draw (should stay near 100%: the method must not talk the agent out of a correct "
+            f"reading); *rescue* = pass@1 on the {len(failed)} it failed on every draw.",
+            "",
+            "| arm | keep | rescue |",
+            "|---|---|---|",
+        ]
+        for arm in sorted(n_runs):
+            mk, nk = mean(arm, solved)
+            mr, nr = mean(arm, failed)
+            lines.append(f"| {arm} | {mk:.1%} (n={nk}) | {mr:.1%} (n={nr}) |")
     if args.key == "choice_eval" and args.choice_rows:
         rows = {p: r for p, r in args.choice_rows.items() if p in ids}
         oo = {p: r["options_only_correct"] / r["options_only_samples"] for p, r in rows.items()}

@@ -66,6 +66,16 @@ concept being prominent in the readouts shows that it is represented, not that i
 behaviour. If the readouts neither contradict your transcript-only hypothesis nor give a clearly \
 better account of this specific behaviour, keep the transcript-only hypothesis."""
 
+TEXTFIRST = """## Transcript first
+Your readout tools are locked until you call commit_text_hypothesis with your best \
+transcript-only hypothesis and how confident you are in it. Read the conversation closely before \
+committing. Afterwards, use the readouts to test that hypothesis: look for evidence for AND \
+against it. Overturn it only with evidence AGAINST it -- for example, the model reads that \
+feature in a way that cannot produce the behaviour, or the plan for the behaviour forms before \
+that feature is read -- not merely because the readouts also show something else; a concept \
+being prominent in the readouts shows that it is represented, not that it causes the behaviour. \
+If you do overturn it, say in `rival_ruled_out_by` what contradicted it."""
+
 CONTINUE = """## Sampling the target model
 continue_from(position) samples how the target model continues the text from just after that \
 token (4 short samples): what it is about to write there. It shows where a position leads, not \
@@ -84,10 +94,13 @@ def system_prompt(
     reader: Reader | None, experiments: int, n_samples: int, variants: tuple[str, ...] = ()
 ) -> str:
     """``variants`` (harness ablations, off by default): "switchbar" adds the bar for overturning
-    the transcript-only hypothesis (reader arms); "continue" describes continue_from."""
+    the transcript-only hypothesis (reader arms); "textfirst" locks the readout tools until a
+    transcript-only hypothesis is committed (reader arms); "continue" describes continue_from."""
     parts = [ROLE, method_section(reader), WORKFLOW]
     if "switchbar" in variants and reader is not None:
         parts.append(SWITCHING)
+    if "textfirst" in variants and reader is not None:
+        parts.append(TEXTFIRST)
     if "continue" in variants:
         parts.append(CONTINUE)
     if experiments:
