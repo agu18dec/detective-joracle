@@ -57,6 +57,21 @@ written by the chatbot in that log, not by the target model; only the final resp
 target model's own."""
 
 
+SWITCHING = """## Weighing readouts against the transcript
+Before your first readout tool call, write your best transcript-only hypothesis in the notebook. \
+Readouts may overturn it only with evidence AGAINST it -- for example, the model reads that \
+feature in a way that cannot produce the behaviour, or the plan for the behaviour forms before \
+that feature is read -- not merely evidence that the model also represents something else. A \
+concept being prominent in the readouts shows that it is represented, not that it causes the \
+behaviour. If the readouts neither contradict your transcript-only hypothesis nor give a clearly \
+better account of this specific behaviour, keep the transcript-only hypothesis."""
+
+CONTINUE = """## Sampling the target model
+continue_from(position) samples how the target model continues the text from just after that \
+token (4 short samples): what it is about to write there. It shows where a position leads, not \
+which feature of the conversation causes it."""
+
+
 def method_section(reader: Reader | None) -> str:
     if reader is None:
         return TRANSCRIPT_METHOD
@@ -65,8 +80,16 @@ def method_section(reader: Reader | None) -> str:
     )
 
 
-def system_prompt(reader: Reader | None, experiments: int, n_samples: int) -> str:
+def system_prompt(
+    reader: Reader | None, experiments: int, n_samples: int, variants: tuple[str, ...] = ()
+) -> str:
+    """``variants`` (harness ablations, off by default): "switchbar" adds the bar for overturning
+    the transcript-only hypothesis (reader arms); "continue" describes continue_from."""
     parts = [ROLE, method_section(reader), WORKFLOW]
+    if "switchbar" in variants and reader is not None:
+        parts.append(SWITCHING)
+    if "continue" in variants:
+        parts.append(CONTINUE)
     if experiments:
         parts.append(EXPERIMENT.format(n=experiments, N=n_samples))
     return "\n\n".join(parts)

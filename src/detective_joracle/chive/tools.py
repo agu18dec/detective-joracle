@@ -40,7 +40,10 @@ def _schema(
 
 
 def schemas(
-    reader: Reader | None, experiments: int, letters: list[str] | None = None
+    reader: Reader | None,
+    experiments: int,
+    letters: list[str] | None = None,
+    continuation: bool = False,
 ) -> list[dict[str, Any]]:
     """The tools; with `letters`, submit also requires the chosen candidate (candidate selection)."""
     out = [
@@ -139,6 +142,16 @@ def schemas(
                 ["turns", "hypothesis_tested", "rationale"],
             )
         )
+    if continuation:
+        out.append(
+            _schema(
+                "continue_from",
+                "Sample how the target model continues the text from just after one token (4 "
+                "samples, up to 120 tokens each): what it is about to write at that point.",
+                {"position": {"type": "integer", "description": "token position t<pos>"}},
+                ["position"],
+            )
+        )
     out.append(
         _schema(
             SUBMIT,
@@ -192,6 +205,7 @@ class ChiveTools:
     finished: dict[str, Any] | None = None
     experiments_run: list[dict[str, Any]] = field(default_factory=list)
     letters: list[str] | None = None  # candidate selection: the valid choices
+    continuation: bool = False  # the continue_from tool (needs an executor for the target)
 
     async def call(self, name: str, args: dict[str, Any]) -> str:
         handlers = {
@@ -201,13 +215,19 @@ class ChiveTools:
             "notebook": self.notebook,
             SUBMIT: self.submit,
         }
-        known = name in handlers or (name == "run_experiment" and self.experiments > 0)
+        known = (
+            name in handlers
+            or (name == "run_experiment" and self.experiments > 0)
+            or (name == "continue_from" and self.continuation)
+        )
         if not known or (name in ("search", "inspect") and self.reader is None):
             raise ValueError(f"no tool {name!r} in this investigation")
         event: dict[str, Any] = {"tool": name, "args": args}
         try:
             if name == "run_experiment":
                 out = await self.run_experiment(args, event)
+            elif name == "continue_from":
+                out = await self.continue_from(args, event)
             else:
                 out = handlers[name](args, event)
         except ValueError as e:
@@ -343,6 +363,18 @@ class ChiveTools:
         if action != "read":
             return f"Saved ({len(self.notebook_text)} characters)."
         return self.notebook_text or "(empty)"
+
+    async def continue_from(self, args: dict[str, Any], event: dict[str, Any]) -> str:
+        if self.executor is None:
+            raise ValueError("continue_from is not available")
+        pos = int(str(args.get("position", "")).lstrip("t") or -1)
+        if not 0 <= pos < self.inc.n_tokens:
+            raise ValueError(f"position must be within t0-t{self.inc.n_tokens - 1}")
+        event["positions"] = [pos]
+        outs = await self.executor.continue_tokens(self.inc.token_ids[: pos + 1])
+        return f"Continuations after {self.inc.where(pos)}:" + "".join(
+            f"\n--- sample {i + 1} ---\n{c}" for i, c in enumerate(outs)
+        )
 
     async def run_experiment(self, args: dict[str, Any], event: dict[str, Any]) -> str:
         if self.executor is None or len(self.experiments_run) >= self.experiments:

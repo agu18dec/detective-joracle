@@ -29,8 +29,6 @@ from detective_joracle.chive.data import Incident, load_incidents, read_ids
 from detective_joracle.chive.judge import JUDGE_MODEL
 from detective_joracle.chive.llm import client, json_call
 
-QUOTE = re.compile(r"[\"“]([^\"”]{12,200})[\"”]")
-
 REGRESSION_LABELS = {
     "represented_not_causal": "relied on readouts showing something the model represents and "
     "took it as the cause, but the experiments show it is not (often a ruled-out X item)",
@@ -87,21 +85,64 @@ def bank_text(bank: Path, pid: str) -> str:
     return norm("\n".join(parts))
 
 
-def quote_check(r: dict[str, Any], conversation: str, bank: str) -> dict[str, int]:
-    """Quotes in the answer that are not conversation text: found in the bank, or not."""
+def quotes(text: str) -> list[str]:
+    """Quoted strings, pairing each opening quote with its closer (straight or curly)."""
+    out, i = [], 0
+    pairs = {'"': '"', "\u201c": "\u201d"}
+    while i < len(text):
+        c = text[i]
+        if c in pairs:
+            j = text.find(pairs[c], i + 1)
+            if j == -1:
+                break
+            if 12 <= j - i - 1 <= 300:
+                out.append(text[i + 1 : j])
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+WORD = re.compile(r"\w+", re.UNICODE)
+
+
+def words(s: str) -> list[str]:
+    return WORD.findall(s.lower())
+
+
+def bank_index(bank_text_: str) -> tuple[set[str], set[tuple[str, str]]]:
+    w = words(bank_text_)
+    return set(w), set(zip(w, w[1:], strict=False))
+
+
+def support(q: str, idx: tuple[set[str], set[tuple[str, str]]], tokens: bool) -> float:
+    """How much of a quote the bank backs: share of its word pairs found anywhere in the bank
+    (share of its words, for single-token readouts like J-lens). Agents splice samples
+    ('a/b/c'), trim and paraphrase, so exact matching cannot tell a composite of real readouts
+    from an invented one; low support can."""
+    w = words(q)
+    if tokens or len(w) < 3:
+        return sum(x in idx[0] for x in w) / max(1, len(w))
+    pairs = list(zip(w, w[1:], strict=False))
+    return sum(x in idx[1] for x in pairs) / len(pairs)
+
+
+def quote_check(
+    r: dict[str, Any], conversation: str, idx: tuple[set[str], set[tuple[str, str]]], tokens: bool
+) -> dict[str, int]:
+    """Quoted text in the answer that is not conversation text, by bank support: verbatim-ish
+    (>= 0.9), supported (>= 0.5), unsupported (< 0.5, the fabrication proxy)."""
     res = r.get("result") or {}
     text = f"{res.get('hypothesis', '')}\n{res.get('evidence', '')}"
     conv = norm(conversation)
-    found = missing = 0
-    for q in QUOTE.findall(text):
-        nq = norm(q)
-        if nq in conv:
+    out = {"quotes_verbatim": 0, "quotes_supported": 0, "quotes_unsupported": 0}
+    for q in quotes(text):
+        if norm(q) in conv or len(words(q)) < 2:
             continue
-        if nq in bank:
-            found += 1
-        else:
-            missing += 1
-    return {"quotes_in_bank": found, "quotes_not_found": missing}
+        x = support(q, idx, tokens)
+        k = "verbatim" if x >= 0.9 else "supported" if x >= 0.5 else "unsupported"
+        out[f"quotes_{k}"] += 1
+    return out
 
 
 def load(out: Path, ev: str, ids: set[str]) -> dict[str, dict[str, list[dict[str, Any]]]]:
@@ -152,6 +193,7 @@ class Config(pydra.Config):
         self.incidents = "/workspace/agam/chive_bank/incidents"
         self.banks: list[str] = []  # NAME=BANK_DIR for the quote check, one per reader arm
         self.concurrency = 24
+        self.label = True  # False: reuse the labels in an existing analysis.json
 
     def finalize(self) -> None:
         self.out, self.incidents = Path(self.out), Path(self.incidents)
@@ -170,6 +212,14 @@ def run(cfg: Config) -> None:
         for p, i in incs.items()
     }
 
+    prev: dict[tuple[str, str, int], Any] = {}
+    prev_file = cfg.out / cfg.eval / "analysis.json"
+    if not cfg.label and prev_file.exists():
+        for arm, rs in json.loads(prev_file.read_text()).items():
+            for row in rs:
+                for e in row["episodes"]:
+                    if "label" in e:
+                        prev[(arm, row["prompt_id"], e["draw"])] = e["label"]
     rows: dict[str, list[dict[str, Any]]] = {}
     jobs = []
     for arm in arms:
@@ -178,7 +228,7 @@ def run(cfg: Config) -> None:
         for p in sorted(set(by[arm]) & set(base)):
             d = rate(by[arm][p]) - rate(base[p])
             kind = "win" if d >= 0.5 else "regression" if d <= -0.5 else "same"
-            text = bank_text(bank, p) if bank else ""
+            idx = bank_index(bank_text(bank, p)) if bank else (set(), set())
             eps = []
             for r in by[arm][p]:
                 e: dict[str, Any] = {
@@ -188,11 +238,14 @@ def run(cfg: Config) -> None:
                     "hypothesis": (r.get("result") or {}).get("hypothesis", ""),
                 }
                 if bank:
-                    e |= quote_check(r, convo[p], text)
+                    e |= quote_check(r, convo[p], idx, tokens=arm.startswith("jlens"))
                 eps.append(e)
+                old = prev.get((arm, p, r["seed"]))
+                if old is not None:
+                    e["label"] = old
                 failed_vs_base = kind == "regression" and not r["judge"]["pass"]
                 won_vs_base = kind == "win" and r["judge"]["pass"]
-                if failed_vs_base or won_vs_base:
+                if (failed_vs_base or won_vs_base) and cfg.label:
                     b = max(base[p], key=lambda x: x["judge"]["score"] * (1 if won_vs_base else -1))
                     labels = REGRESSION_LABELS if failed_vs_base else WIN_LABELS
 
@@ -216,18 +269,29 @@ def run(cfg: Config) -> None:
     lines += [
         "Paired by incident (pass@1 over draws). win: arm - transcript >= 0.5; regression: "
         "<= -0.5. Quotes not found = quoted strings in the answer found neither in the "
-        "conversation nor anywhere in the method's bank (a hallucination proxy).",
+        "conversation nor in the bank: a quote's support = share of its word pairs found "
+        "anywhere in that incident's readouts (words, for J-lens tokens); unsupported < 0.5 "
+        "is the fabrication proxy (splices and rewordings of real readouts stay above it).",
         "",
-        "| arm | wins | regressions | net | wins hard | regressions hard | quotes not found / "
-        "quoted (all episodes) |",
+        "| arm | wins | regressions | net | wins hard | regressions hard | unsupported quotes "
+        "(all episodes) |",
         "|---|---|---|---|---|---|---|",
     ]
     for arm in arms:
         k = Counter(r["kind"] for r in rows[arm])
         kh = Counter(r["kind"] for r in rows[arm] if r["hard"])
-        q_in = sum(e.get("quotes_in_bank", 0) for r in rows[arm] for e in r["episodes"])
-        q_out = sum(e.get("quotes_not_found", 0) for r in rows[arm] for e in r["episodes"])
-        qs = f"{q_out}/{q_in + q_out} ({q_out / max(1, q_in + q_out):.0%})" if q_in + q_out else "-"
+        q = Counter()
+        for row in rows[arm]:
+            for e in row["episodes"]:
+                for kk in ("verbatim", "supported", "unsupported"):
+                    q[kk] += e.get(f"quotes_{kk}", 0)
+        tot = sum(q.values())
+        qs = (
+            f"{q['unsupported']}/{tot} ({q['unsupported'] / tot:.1%}); verbatim "
+            f"{q['verbatim'] / tot:.0%}"
+            if tot
+            else "-"
+        )
         lines.append(
             f"| {arm} | {k['win']} | {k['regression']} | {k['win'] - k['regression']:+d} | "
             f"{kh['win']} | {kh['regression']} | {qs} |"

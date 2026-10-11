@@ -72,8 +72,8 @@ def log(out: Path, msg: str) -> None:
 
 
 def parse_arm(spec: str) -> dict[str, Any]:
-    if spec == "transcript":
-        return {"name": "transcript", "bank": None, "kind": None, "shuffled": False}
+    if "=" not in spec:  # a transcript-only arm ("transcript", or a named variant of it)
+        return {"name": spec, "bank": None, "kind": None, "shuffled": False}
     name, _, rest = spec.partition("=")
     parts = rest.split(":")
     if len(parts) not in (2, 3) or parts[1] not in ("olens", "nla", "jlens"):
@@ -139,17 +139,27 @@ async def _episode(
                 arm["name"], arm["kind"], arm["bank"], inc, partner if arm["shuffled"] else None
             )
         )
-        executor = Executor(args.target) if args.experiments else None
+        cont = "continue" in args.variants
+        executor = Executor(args.target) if args.experiments or cont else None
         row = args.choice_rows.get(inc.prompt_id) if args.choices else None
         cands = [(o["letter"], o["text"]) for o in row["options"]] if row else None
         letters = [a for a, _ in cands] if cands else None
-        tools = ChiveTools(inc, reader, executor, args.experiments, letters=letters)
+        tools = ChiveTools(
+            inc, reader, executor, args.experiments, letters=letters, continuation=cont
+        )
         backend = agent_backend(args.max_tokens, args.effort, model)
-        system, first = system_prompt(reader, args.experiments, Executor.N), seed(inc, cands)
-        extra.update(system_prompt=system, seed_prompt=first, backend=BACKEND, effort=args.effort)
+        system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants))
+        first = seed(inc, cands)
+        extra.update(
+            system_prompt=system,
+            seed_prompt=first,
+            backend=BACKEND,
+            effort=args.effort,
+            variants=list(args.variants),
+        )
         await run_tool_loop_async(
             tools,
-            schemas(reader, args.experiments, letters),
+            schemas(reader, args.experiments, letters, continuation=cont),
             system,
             first,
             backend,
@@ -588,7 +598,9 @@ class ChiveConfig(pydra.Config):
         self.arms: list[str] = ["transcript"]
         self.draws = 1
         self.experiments = 0
-        self.target = "https://safety-sahan-2-agam--chive-qwen-vllm-serve.modal.run"
+        # a dedicated copy of the target server (scripts/serve_qwen_vllm_modal.py); the shared
+        # chive-qwen-vllm endpoint queues behind other workloads
+        self.target = "https://safety-sahan-2-agam--chive-forensics-qwen-serve.modal.run"
         self.concurrency = 16
         self.max_calls = 50
         self.output_budget = 60_000
@@ -600,6 +612,7 @@ class ChiveConfig(pydra.Config):
         self.effort = "max"
         self.key = "judge"  # report: judge | concluder_judge | choice_eval
         self.choices = ""  # candidate selection: a choice-set jsonl (see the module docstring)
+        self.variants: list[str] = []  # harness ablations: "switchbar", "continue"
         self.out = pydra.REQUIRED
 
     def finalize(self) -> None:

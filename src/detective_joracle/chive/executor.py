@@ -125,6 +125,31 @@ class Executor:
                     raise
         raise AssertionError("unreachable")
 
+    def _continue(self, token_ids: list[int], n: int, max_tokens: int) -> list[str]:
+        url = self.target_url.rstrip("/").removesuffix("/v1") + "/v1/completions"
+        body = {
+            "model": self.target_model,
+            "prompt": token_ids,
+            "n": n,
+            "temperature": 1.0,
+            "max_tokens": max_tokens,
+        }
+        for attempt in range(4):
+            try:
+                r = requests.post(url, json=body, timeout=900)
+                r.raise_for_status()
+                return [c["text"] for c in r.json()["choices"]]
+            except Exception:
+                if attempt == 3:
+                    raise
+        raise AssertionError("unreachable")
+
+    async def continue_tokens(
+        self, token_ids: list[int], n: int = 4, max_tokens: int = 120
+    ) -> list[str]:
+        """Raw continuations of a token prefix (the chat template already applied)."""
+        return await asyncio.to_thread(self._continue, token_ids, n, max_tokens)
+
     async def run(self, inc: Incident, turns: Any) -> dict[str, Any]:
         messages = apply_edit(inc.messages, turns)
         completions = await asyncio.to_thread(self._complete, messages)
