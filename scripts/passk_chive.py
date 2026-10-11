@@ -43,6 +43,7 @@ class Config(pydra.Config):
         self.ids = "data/chive/splits/climb_test204.txt"
         self.hard = "data/chive/splits/hard92.txt"
         self.exclude = ""  # optional file of incident ids for the leakage check
+        self.confidence = ""  # optional confidence.json: adds the least-confident third
         self.reference = "olens_rl_B"
         self.draws = 5
 
@@ -81,8 +82,14 @@ def main(cfg: Config) -> None:
             f"{100 * sum(d) / len(d):+.1f} [{lo:+.1f}, {hi:+.1f}]{'*' if lo > 0 or hi < 0 else ''}"
         )
 
+    low: set[str] = set()
+    if cfg.confidence:
+        conf = json.loads(Path(cfg.confidence).read_text())
+        ranked = sorted(conf, key=lambda p: conf[p]["top_p"])
+        low = set(ranked[: len(ranked) // 3])
     strata = {
         "all": ids,
+        **({"least-confident third (no selection on errors)": ids & low} if low else {}),
         "hard": ids & hard,
         "normal": ids - hard,
         **({"all minus deep-read": ids - excl} if excl else {}),

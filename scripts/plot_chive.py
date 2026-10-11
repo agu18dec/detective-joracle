@@ -149,7 +149,7 @@ def main(cfg: Config) -> None:
     # E2 + concluder
     e2 = per_incident(cfg.out, "e2_one_experiment")
     e2c = per_incident(cfg.out, "e2_one_experiment", key="concluder_judge")
-    arms2 = ["transcript", "olens_rl", "olens_distill", "nla", "jlens"]
+    arms2 = ["transcript", "olens_rl", "nla", "jlens"]
     fig, axes = plt.subplots(1, 2, figsize=(18, 6.5), sharey=True)
     grouped_bars(
         axes[0], e2, arms2, {"all 300": ids, "hard 92": hard}, "E2: one experiment allowed"

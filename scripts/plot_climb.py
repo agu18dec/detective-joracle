@@ -155,21 +155,45 @@ def keep_rescue(cfg: Config, dev: set[str]) -> None:
     fig.savefig(cfg.plots / "climb_dev_keep_rescue.png", dpi=160)
 
 
-def passk(cfg: Config, test: set[str], hard: set[str]) -> None:
-    arms = {
-        "OLens, improved harness": "olens_rl_B",
-        "transcript": "transcript",
-        "transcript + continue_from": "transcript_cont",
-        "NLA, improved harness": "nla_B",
-        "J-lens, improved harness": "jlens_B",
-        "OLens, original harness": "olens_rl",
+TEST_ARMS = {
+    "OLens, improved harness": "olens_rl_B",
+    "OLens, original harness": "olens_rl",
+    "NLA, improved harness": "nla_B",
+    "NLA, original harness": "nla",
+    "J-lens, improved harness": "jlens_B",
+    "J-lens, original harness": "jlens",
+    "transcript + continue_from": "transcript_cont",
+    "transcript": "transcript",
+}
+TEST_STYLE = {  # colour per method; solid = improved harness, dashed = original
+    "olens_rl_B": ("#1f6f8b", "-"),
+    "olens_rl": ("#1f6f8b", "--"),
+    "nla_B": ("#c77d2e", "-"),
+    "nla": ("#c77d2e", "--"),
+    "jlens_B": ("#7a5ea8", "-"),
+    "jlens": ("#7a5ea8", "--"),
+    "transcript_cont": ("#555555", ":"),
+    "transcript": ("#9a9a9a", "-"),
+}
+
+
+def complete(cfg: Config, arm: str, sub: set[str]) -> dict[str, list[float]]:
+    d = {p: v for p, v in draws(cfg.out, "climb_test", arm, sub).items() if len(v) >= 5}
+    return d if len(d) >= 0.9 * len(sub) else {}  # an arm still running is left out
+
+
+def passk(cfg: Config, test: set[str], hard: set[str], low: set[str]) -> None:
+    strata = {
+        "all 204": test,
+        "least-confident third": test & low,
+        "hard 46 (selected\non errors)": test & hard,
+        "normal 158": test - hard,
     }
-    strata = {"all 204": test, "hard 46": test & hard, "normal 158": test - hard}
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6.2), sharey=False)
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6.4))
     for ax, (name, sub) in zip(axes, strata.items(), strict=True):
-        for label, arm in arms.items():
-            d = {p: v for p, v in draws(cfg.out, "climb_test", arm, sub).items() if len(v) >= 5}
-            if len(d) < len(sub) * 0.9:  # an arm still running: skip until complete
+        for label, arm in TEST_ARMS.items():
+            d = complete(cfg, arm, sub)
+            if not d:
                 continue
             ys = [
                 100
@@ -180,9 +204,9 @@ def passk(cfg: Config, test: set[str], hard: set[str]) -> None:
                 / len(d)
                 for k in range(1, 6)
             ]
-            c = OLENS if arm == "olens_rl_B" else (OTHER if arm == "transcript" else None)
-            ax.plot(range(1, 6), ys, "o-", lw=3, ms=8, label=label, color=c)
-        ax.set_title(name)
+            c, ls = TEST_STYLE[arm]
+            ax.plot(range(1, 6), ys, marker="o", ls=ls, lw=3, ms=7, label=label, color=c)
+        ax.set_title(f"{name} (n={len(sub)})")
         ax.set_xlabel("k")
         ax.set_xticks(range(1, 6))
         ax.grid(alpha=0.3)
@@ -193,15 +217,67 @@ def passk(cfg: Config, test: set[str], hard: set[str]) -> None:
     fig.savefig(cfg.plots / "heldout_passk.png", dpi=160, bbox_inches="tight")
 
 
+def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
+    """Each transcript draw selects (passed / failed); a method is scored on its OTHER draws."""
+    tr = draws(cfg.out, "climb_test", "transcript", test)
+    fig, ax = plt.subplots(figsize=(11, 8.5))
+    pts = []
+    for label, arm in TEST_ARMS.items():
+        d = complete(cfg, arm, test)
+        if not d or arm == "transcript" and not tr:
+            continue
+        k = r = nk = nr = 0.0
+        for p, v in d.items():
+            t = tr.get(p)
+            if not t:
+                continue
+            for i, sel in enumerate(t):
+                others = [x for j, x in enumerate(v) if j != i]
+                score = sum(others) / len(others)
+                if sel:
+                    k, nk = k + score, nk + 1
+                else:
+                    r, nr = r + score, nr + 1
+        c, _ = TEST_STYLE[arm]
+        pts.append((100 * r / nr, 100 * k / nk, label, c))
+    for x, y, label, c in pts:
+        ax.scatter(
+            x,
+            y,
+            s=150,
+            color=c,
+            edgecolor="white",
+            lw=2,
+            zorder=3,
+            marker="o" if "original" not in label else "s",
+        )
+        ax.annotate(label, (x, y), xytext=(8, 5), textcoords="offset points", fontsize=12)
+    ax.set_xlim(10, 70)  # fixed, honest ranges: keep and rescue on comparable scales
+    ax.set_ylim(70, 100)
+    ax.set_xlabel("rescue: pass@1 where a transcript draw FAILED (%)")
+    ax.set_ylabel("keep: pass@1 where a transcript draw PASSED (%)")
+    ax.set_title("Keep vs rescue on the held-out test (circles: improved harness)", loc="left")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(cfg.plots / "heldout_keep_rescue.png", dpi=160)
+
+
 @pydra.main(Config)
 def main(cfg: Config) -> None:
     cfg.plots.mkdir(parents=True, exist_ok=True)
     dev, test = set(read_ids(Path(cfg.dev))), set(read_ids(Path(cfg.test)))
     hard = set(read_ids(Path(cfg.hard)))
+    conf = json.loads((cfg.out / "confidence.json").read_text())
+    ranked = sorted(conf, key=lambda p: conf[p]["top_p"])
+    low = set(ranked[: len(ranked) // 3])
     forest(cfg, dev)
     keep_rescue(cfg, dev)
-    passk(cfg, test, hard)
-    print(f"wrote {cfg.plots}/climb_dev_forest.png, climb_dev_keep_rescue.png, heldout_passk.png")
+    passk(cfg, test, hard, low)
+    heldout_keep_rescue(cfg, test)
+    print(
+        f"wrote {cfg.plots}/: climb_dev_forest, climb_dev_keep_rescue, heldout_passk, "
+        "heldout_keep_rescue"
+    )
 
 
 if __name__ == "__main__":
