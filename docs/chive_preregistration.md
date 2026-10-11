@@ -58,3 +58,30 @@ excludes 0.
   the cut was chosen after seeing the 25–75% band.
 - Dev-split harness variants (switchbar, textfirst, continue_from): tuned on dev100; any claim
   rests on one frozen run on heldout200.
+
+## Results (computed 2026-10-11 11:35 UTC by `scripts/strata_chive.py`)
+
+Uncertainty measure: `top_p` quartiles 0.31 / 0.38 / 0.45 over 293 incidents (7 had no usable
+elicitation after retries). **The primary band [0.25, 0.75] is degenerate**: it holds 288 of 293
+incidents, so it equals "all". Reported as specified; the terciles (secondary) carry the
+information. Health: every arm 0 errors / 0 unjudged (E2 concluder: 24 episodes ran no
+experiment and are left out).
+
+| comparison (paired, 95% CI) | all 300 | band (288) | tercile 1 (least confident) | hard 92 (flagged) |
+|---|---|---|---|---|
+| 1. OLens RL − position-shuffled (E1) | +1.3 [−2.5, +5.2] | +1.7 [−2.1, +5.7] | +4.1 [−2.6, +11.3] | +1.6 [−5.4, +8.7] |
+| 2. OLens RL − cross-shuffled (E1) | **+7.5 [+3.2, +11.8]** | +7.6 [+3.1, +12.2] | +15.5 [+7.2, +23.7] | +17.4 [+8.7, +26.1] |
+| 3. OLens RL − transcript (E1) | +3.0 [−1.7, +7.8] | +3.1 [−1.7, +8.0] | **+10.3 [+1.5, +19.1]** | +17.4 [+7.1, +27.2] |
+| 3. OLens RL − transcript (E2) | −3.2 [−7.0, +0.7] | −3.3 [−7.3, +0.5] | −2.6 [−9.3, +3.6] | −0.5 [−7.6, +6.5] |
+| 4. E2 concluder: OLens RL − transcript | −1.2 [−4.9, +2.5] | | | +1.1 [−4.9, +7.6] |
+
+pass@1 (E1, all / hard 92): OLens RL 66.0 / 40.8, position-shuffled 64.7 / 39.1, transcript
+63.0 / 23.4, cross-shuffled 58.5 / 23.4.
+
+**Reading.** (a) Readout content matters: another incident's readouts make the agent worse
+than transcript alone. (b) Location barely matters: the same incident's readouts at permuted
+positions recover nearly all of OLens's gain, overall and on the hard 92. OLens helps as a
+summary of what the model represents about this conversation, not by localizing it. (c) Without
+selecting on errors, OLens's gain survives in the least-confident tercile (+10.3); NLA and
+J-lens do not (+1.5, −1.5). (d) With one experiment (E2), no reader adds over transcript, and
+the concluder test finds no better-chosen experiments.
