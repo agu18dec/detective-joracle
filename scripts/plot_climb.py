@@ -286,6 +286,82 @@ def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
     fig.savefig(cfg.plots / "heldout_keep_rescue.png", dpi=160)
 
 
+def heldout_pareto(cfg: Config, test: set[str]) -> None:
+    """Keep vs rescue at pass@1 and pass@4 (leave-one-out: each transcript draw defines right /
+    wrong; every method is scored on the other 4 draws of that incident; averaged over the 5)."""
+    tr = draws(cfg.out, "climb_test", "transcript", test)
+    best = ["olens_rl_B", "nla_B", "jlens_B", "olens_rl_B_otherq", "transcript_cont", "transcript"]
+    label_of = {v: k for k, v in TEST_ARMS.items()}
+    rows: dict[str, dict[int, tuple[float, float]]] = {}
+    for arm in best:
+        d = complete(cfg, arm, test)
+        if not d:
+            continue
+        rows[arm] = {}
+        for k in (1, 4):
+            kk = rr = nk = nr = 0.0
+            for p, v in d.items():
+                t = tr.get(p)
+                if not t or len(t) < 5:
+                    continue
+                for i, sel in enumerate(t):
+                    rest = [x for j, x in enumerate(v) if j != i]
+                    n, c = len(rest), int(sum(rest))
+                    score = 1.0 if n - c < k else 1 - comb(n - c, k) / comb(n, k)
+                    if sel:
+                        kk, nk = kk + score, nk + 1
+                    else:
+                        rr, nr = rr + score, nr + 1
+            rows[arm][k] = (100 * rr / nr, 100 * kk / nk)
+    fig, axes = plt.subplots(1, 2, figsize=(19, 8))
+    for ax, k in zip(axes, (1, 4), strict=True):
+        pts = [(rows[a][k][0], rows[a][k][1], a) for a in rows]
+        front = sorted(
+            [p for p in pts if not any(q[0] >= p[0] and q[1] >= p[1] and q != p for q in pts)]
+        )
+        ax.plot(
+            [p[0] for p in front],
+            [p[1] for p in front],
+            color="#bbbbbb",
+            lw=2,
+            ls="--",
+            zorder=1,
+            label="Pareto front",
+        )
+        for x, y, a in pts:
+            c, _ = TEST_STYLE[a]
+            ax.scatter(x, y, s=170, color=c, edgecolor="white", lw=2, zorder=3)
+            left = a == "nla_B"
+            ax.annotate(
+                label_of[a],
+                (x, y),
+                xytext=(-10 if left else 8, -4 if left else 5),
+                textcoords="offset points",
+                fontsize=12,
+                ha="right" if left else "left",
+            )
+        ax.set_title(f"pass@{k}", loc="left")
+        ax.set_xlabel("rescue: right where a transcript run was WRONG (%)")
+        ax.set_xlim(10, 80 if k == 4 else 60)
+        ax.set_ylim(80 if k == 4 else 70, 100)
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("keep: right where a transcript run was RIGHT (%)")
+    axes[1].legend(loc="lower right", frameon=False)
+    fig.suptitle(
+        "Held-out keep vs rescue (204 incidents; each scored on the 4 runs not used to "
+        "label right/wrong)",
+        x=0.01,
+        ha="left",
+    )
+    fig.tight_layout()
+    fig.savefig(cfg.plots / "heldout_pareto.png", dpi=160, bbox_inches="tight")
+    for arm, r in rows.items():
+        print(
+            f"{label_of[arm]:42s} pass@1 keep {r[1][1]:.1f} rescue {r[1][0]:.1f} | "
+            f"pass@4 keep {r[4][1]:.1f} rescue {r[4][0]:.1f}"
+        )
+
+
 @pydra.main(Config)
 def main(cfg: Config) -> None:
     cfg.plots.mkdir(parents=True, exist_ok=True)
@@ -298,6 +374,7 @@ def main(cfg: Config) -> None:
     keep_rescue(cfg, dev)
     passk(cfg, test, hard, low)
     heldout_keep_rescue(cfg, test)
+    heldout_pareto(cfg, test)
     print(
         f"wrote {cfg.plots}/: climb_dev_forest, climb_dev_keep_rescue, heldout_passk, "
         "heldout_keep_rescue"
