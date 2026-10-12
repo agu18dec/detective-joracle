@@ -51,8 +51,10 @@ def schemas(
     continuation: bool = False,
     text_first: bool = False,
     aux: Reader | None = None,
+    edits: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """The tools; with `letters`, submit also requires the chosen candidate (candidate selection)."""
+    """The tools; with `letters`, submit also requires the chosen candidate (candidate selection);
+    with `edits` (yes/no), submit and commit_text_hypothesis also require a probability per edit."""
     out = [
         _schema(
             "show_tokens",
@@ -210,7 +212,37 @@ def schemas(
             'letter, summing to 1 (e.g. {"A": 0.6, "B": 0.3, "C": 0.1})',
         }
         props["required"] = ["choice", "probabilities", "hypothesis"]
+    if edits:
+        pred = {
+            "type": "object",
+            "description": "for EVERY edit id, your probability that the edit changes the "
+            'behaviour rate (YES), e.g. {"E1": 0.8, "E2": 0.1}',
+        }
+        for f in out:
+            fn = f["function"]
+            if fn["name"] in (SUBMIT, "commit_text_hypothesis"):
+                fn["parameters"]["properties"]["predictions"] = pred
+                fn["parameters"]["required"] = [*fn["parameters"]["required"], "predictions"]
     return out
+
+
+def parse_predictions(args: dict[str, Any], ids: list[str]) -> dict[str, float]:
+    """`predictions` as {edit id: P(YES)}, every id present, each a probability."""
+    raw = args.get("predictions")
+    if not isinstance(raw, dict):
+        raise ValueError(f"give `predictions`: a probability for each of {', '.join(ids)}")
+    got: dict[str, float] = {}
+    for k, v in raw.items():
+        try:
+            got[str(k).strip().upper()] = float(v)
+        except (TypeError, ValueError):
+            continue
+    missing = [i for i in ids if i not in got]
+    if missing:
+        raise ValueError(f"`predictions` is missing {', '.join(missing)}")
+    if any(not 0.0 <= got[i] <= 1.0 for i in ids):
+        raise ValueError("each prediction must be a probability between 0 and 1")
+    return {i: got[i] for i in ids}
 
 
 def parse_range(text: str, n: int) -> set[int]:
@@ -236,6 +268,7 @@ class ChiveTools:
     finished: dict[str, Any] | None = None
     experiments_run: list[dict[str, Any]] = field(default_factory=list)
     letters: list[str] | None = None  # candidate selection: the valid choices
+    edits: list[str] | None = None  # yes/no: the edit ids that need a prediction
     continuation: bool = False  # the continue_from tool (needs an executor for the target)
     text_first: bool = False  # readout tools locked until commit_text_hypothesis
     aux: Reader | None = None  # a second method's readouts: <name>_search / <name>_inspect
@@ -419,10 +452,13 @@ class ChiveTools:
             raise ValueError("already committed; continue with the readouts")
         if not str(args.get("hypothesis") or "").strip():
             raise ValueError("give `hypothesis`")
+        preds = parse_predictions(args, self.edits) if self.edits else None
         self.committed = {
             "hypothesis": str(args["hypothesis"]),
             "confidence": str(args.get("confidence", "")),
         }
+        if preds is not None:
+            self.committed["predictions"] = preds
         return "Committed. Your readout tools are now unlocked."
 
     async def continue_from(self, args: dict[str, Any], event: dict[str, Any]) -> str:
@@ -484,7 +520,10 @@ class ChiveTools:
             if total <= 0:
                 raise ValueError("`probabilities` must give positive weight to the candidates")
             norm = {k: max(0.0, vals.get(k, 0.0)) / total for k in self.letters}
+        preds = parse_predictions(args, self.edits) if self.edits else None
         self.finished = {k: str(args.get(k) or "") for k in fields}
+        if preds is not None:
+            self.finished["predictions"] = preds
         if self.letters:
             self.finished["probabilities"] = norm
         event["missing_fields"] = [k for k in fields if not self.finished[k].strip()]
