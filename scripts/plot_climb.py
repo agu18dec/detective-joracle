@@ -1,4 +1,5 @@
-"""Figures for the harness climb: dev A/B forest, dev keep vs rescue, held-out pass@k.
+"""Figures for the harness climb: dev A/B forest, dev keep vs rescue, held-out pass@k, and the
+held-out experiment budget (pass@1 against experiments allowed, with the two-agent concluder).
 
 python scripts/plot_climb.py out=/workspace/agam/chive_runs_dj plots=plots/chive
 """
@@ -362,6 +363,101 @@ def heldout_pareto(cfg: Config, test: set[str]) -> None:
         )
 
 
+BUDGET_ARMS = {
+    "OLens + harness": "olens_rl_B",
+    "NLA + harness": "nla_B",
+    "J-lens + harness": "jlens_B",
+    "transcript": "transcript",
+}
+
+
+def judged(out: Path, ev: str, arm: str, sub: set[str], key: str, n: int) -> dict[str, float]:
+    """pid -> pass rate over draws 0..n-1, for incidents with all n draws judged under `key`."""
+    d: dict[str, list[float]] = defaultdict(list)
+    for f in (out / ev / arm).glob("*.d*.json"):
+        draw = int(f.name.rsplit(".d", 1)[1].split(".")[0])
+        r = json.loads(f.read_text())
+        j = r.get(key) or {}
+        if draw < n and j.get("score") is not None and r["prompt_id"] in sub:
+            d[r["prompt_id"]].append(float(j["pass"]))
+    return {p: sum(v) / n for p, v in d.items() if len(v) == n}
+
+
+def budget(cfg: Config, test: set[str], hard: set[str], low: set[str]) -> None:
+    """pass@1 with one counterfactual experiment, per method and stratum (2 draws per incident):
+    solid = the agent itself, hatched = the two-agent concluder (a fresh agent that sees only the
+    experiment and its result). Error bars: 95% bootstrap CI over incidents; * = the paired
+    difference vs transcript excludes 0."""
+    strata = {
+        "all 204": test,
+        "least-confident third (68)": test & low,
+        "hard 46 (selected on errors)": test & hard,
+    }
+    arms = list(BUDGET_ARMS.items())
+    kinds = [
+        ("judge", "agent with 1 experiment"),
+        ("concluder_judge", "two-agent: B sees only the experiment"),
+    ]
+    w = 0.8 / (len(arms) * len(kinds))
+    fig, ax = plt.subplots(figsize=(18, 7))
+    for j, sub in enumerate(strata.values()):
+        for i, (label, arm) in enumerate(arms):
+            c, _ = TEST_STYLE[arm]
+            for h, (key, _) in enumerate(kinds):
+                d = judged(cfg.out, "budget_1", arm, sub, key, 2)
+                base = judged(cfg.out, "budget_1", "transcript", sub, key, 2)
+                if not d:
+                    continue
+                xs = list(d.values())
+                rng = random.Random(0)
+                bs = sorted(sum(rng.choice(xs) for _ in xs) / len(xs) for _ in range(2000))
+                m, lo, hi = 100 * sum(xs) / len(xs), 100 * bs[50], 100 * bs[1949]
+                x = j + (i * len(kinds) + h - (len(arms) * len(kinds) - 1) / 2) * w
+                ax.bar(
+                    x,
+                    m,
+                    w * 0.9,
+                    color=c if key == "judge" else "white",
+                    edgecolor=c,
+                    lw=2,
+                    hatch="//" if key != "judge" else None,
+                    label=(label if key == "judge" else None) if j == 0 else None,
+                )
+                ax.errorbar(x, m, yerr=[[m - lo], [hi - m]], color="#333", lw=1.4, capsize=3)
+                star = ""
+                if arm != "transcript":
+                    _, plo, phi = paired(
+                        {p: [v] for p, v in d.items()}, {p: [v] for p, v in base.items()}
+                    )
+                    star = "*" if plo > 0 or phi < 0 else ""
+                ax.text(x, hi + 1.2, f"{m:.0f}{star}", ha="center", fontsize=11)
+    ax.set_xticks(range(len(strata)), list(strata))
+    ax.set_ylabel("pass@1 (%), 2 draws per incident")
+    ax.set_ylim(0, 100)
+    ax.grid(axis="y", alpha=0.3)
+    method_handles = [
+        plt.Rectangle((0, 0), 1, 1, color=TEST_STYLE[a][0], label=name) for name, a in arms
+    ]
+    kind_handles = [
+        plt.Rectangle((0, 0), 1, 1, facecolor="#777", edgecolor="#777", label=kinds[0][1]),
+        plt.Rectangle(
+            (0, 0), 1, 1, facecolor="white", edgecolor="#777", hatch="//", label=kinds[1][1]
+        ),
+    ]
+    ax.legend(
+        handles=method_handles + kind_handles,
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1),
+        frameon=False,
+    )
+    ax.set_title(
+        "Held-out test with one counterfactual experiment (* = differs from transcript, paired 95% CI)",
+        loc="left",
+    )
+    fig.tight_layout()
+    fig.savefig(cfg.plots / "heldout_budget.png", dpi=160, bbox_inches="tight")
+
+
 @pydra.main(Config)
 def main(cfg: Config) -> None:
     cfg.plots.mkdir(parents=True, exist_ok=True)
@@ -375,9 +471,10 @@ def main(cfg: Config) -> None:
     passk(cfg, test, hard, low)
     heldout_keep_rescue(cfg, test)
     heldout_pareto(cfg, test)
+    budget(cfg, test, hard, low)
     print(
         f"wrote {cfg.plots}/: climb_dev_forest, climb_dev_keep_rescue, heldout_passk, "
-        "heldout_keep_rescue"
+        "heldout_keep_rescue, heldout_pareto, heldout_budget"
     )
 
 
