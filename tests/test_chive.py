@@ -284,3 +284,39 @@ def test_describe_flags_sparse_readouts(tmp_path: Path) -> None:
     assert "every token" not in describe(jl)
     dense = Reader("olens_rl", "olens", [20], 1, {p: {20: ["a"]} for p in range(4)}, "p1", 4)
     assert "only" not in describe(dense)
+
+
+def test_yesno_items_tools_and_scoring() -> None:
+    from detective_joracle.chive.edits import edit_items, score_items
+
+    gt = {
+        "movers": [{"edit": "Remove the word rain.", "effect_pp": 70.0}],
+        "ruled_out": [
+            {"kind": "inert", "basis": "claim_bank", "edit": "Add a title.", "effect_pp": 5.0},
+            {
+                "kind": "inert",
+                "basis": "experiment_le_15pp",
+                "edit": "states result",
+                "effect_pp": 3,
+            },
+            {"kind": "refuted", "cause": "not an edit"},
+        ],
+    }
+    inc = Incident(**{**incident().__dict__, "ground_truth": gt})
+    items = edit_items(inc)
+    assert [it.id for it in items] == ["E1", "E2"]
+    assert sorted(it.label for it in items) == [False, True]
+    assert edit_items(inc) == items  # fixed order
+    ids = [it.id for it in items]
+    sch = {s["function"]["name"]: s["function"]["parameters"] for s in schemas(None, 0, edits=ids)}
+    assert "predictions" in sch[SUBMIT]["required"]
+    tools = ChiveTools(inc, None, edits=ids)
+    with pytest.raises(ValueError):
+        asyncio.run(tools.call(SUBMIT, {"hypothesis": "h", "predictions": {"E1": 0.9}}))
+    yes = next(it.id for it in items if it.label)
+    no = next(it.id for it in items if not it.label)
+    asyncio.run(tools.call(SUBMIT, {"hypothesis": "h", "predictions": {yes: 0.9, no: 0.2}}))
+    assert tools.finished is not None
+    s = score_items(items, tools.finished["predictions"])
+    assert s["accuracy"] == 1.0 and abs(s["brier"] - (0.01 + 0.04) / 2) < 1e-9
+    assert "E1)" in seed(inc, edits=[(it.id, it.text) for it in items])

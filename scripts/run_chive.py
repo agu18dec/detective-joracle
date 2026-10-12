@@ -13,6 +13,11 @@ Candidate selection: `choices=<file.jsonl>` (one row per incident: options with 
 `key=choice_eval`: strata by how often a picker that sees only the options (no conversation,
 no method) finds the truth.
 
+Yes/no (`yesno=true`, CHIVE's "would this edit change the behaviour?"): the seed lists the
+incident's claim-bank edits (chive/edits.py) and submit (and commit_text_hypothesis) require a
+probability per edit; the record's `yesno_eval` (and `yesno_text`, the committed transcript-only
+predictions) are scored without a judge. Report with scripts/yesno_chive.py.
+
 Configured with pydra (`key=value` overrides). Arms: `transcript`, or `NAME=BANK_DIR:KIND[:shuffled]`
 with KIND one of olens | nla | jlens.
 
@@ -34,6 +39,7 @@ from detective_joracle.agent.backends import async_anthropic_backend
 from detective_joracle.agent.loop import Budget, RunRecord, run_many, run_tool_loop_async
 from detective_joracle.chive import judge as J
 from detective_joracle.chive.data import DATASET, Incident, load_incidents, read_ids
+from detective_joracle.chive.edits import edit_items, score_items
 from detective_joracle.chive.executor import Executor
 from detective_joracle.chive.llm import anthropic_client, client, json_call
 from detective_joracle.chive.prompts import (
@@ -155,6 +161,8 @@ async def _episode(
         row = args.choice_rows.get(inc.prompt_id) if args.choices else None
         cands = [(o["letter"], o["text"]) for o in row["options"]] if row else None
         letters = [a for a, _ in cands] if cands else None
+        items = edit_items(inc) if args.yesno else []
+        edit_ids = [it.id for it in items] or None
         tfirst = "textfirst" in args.variants and reader is not None
         tools = ChiveTools(
             inc,
@@ -165,11 +173,12 @@ async def _episode(
             continuation=cont,
             text_first=tfirst,
             aux=aux,
+            edits=edit_ids,
         )
         backend = agent_backend(args.max_tokens, args.effort, model)
         system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants), aux)
         dig = digest(reader, inc) if "digest" in args.variants and reader is not None else None
-        first = seed(inc, cands, dig)
+        first = seed(inc, cands, dig, [(it.id, it.text) for it in items] or None)
         extra.update(
             system_prompt=system,
             seed_prompt=first,
@@ -181,7 +190,13 @@ async def _episode(
         await run_tool_loop_async(
             tools,
             schemas(
-                reader, args.experiments, letters, continuation=cont, text_first=tfirst, aux=aux
+                reader,
+                args.experiments,
+                letters,
+                continuation=cont,
+                text_first=tfirst,
+                aux=aux,
+                edits=edit_ids,
             ),
             system,
             first,
@@ -209,6 +224,10 @@ async def _episode(
                 "pass": ok,
                 "score": 10.0 if ok else 0.0,
             }
+        if items and tools.finished:
+            extra["yesno_eval"] = score_items(items, tools.finished["predictions"])
+        if items and tools.committed and tools.committed.get("predictions"):
+            extra["yesno_text"] = score_items(items, tools.committed["predictions"])
         extra |= {
             "events": tools.events,
             "notebook": tools.notebook_text,
@@ -258,6 +277,8 @@ def stage_agent(args: Any) -> None:
     if args.choices:  # candidate selection: only incidents that have a candidate set
         ids = [p for p in ids if p in args.choice_rows]
     incs = load_incidents(ids, args.dataset)
+    if args.yesno:  # yes/no: only incidents with at least one claim-bank edit
+        ids = [p for p in ids if edit_items(incs[p])]
     order = sorted(ids)
     partner = {p: incs[order[(i + len(order) // 2) % len(order)]] for i, p in enumerate(order)}
     arms = [parse_arm(a) for a in args.arm]
@@ -716,6 +737,7 @@ class ChiveConfig(pydra.Config):
         self.effort = "max"
         self.key = "judge"  # report: judge | concluder_judge | choice_eval
         self.choices = ""  # candidate selection: a choice-set jsonl (see the module docstring)
+        self.yesno = False  # CHIVE yes/no: predict which claim-bank edits change the behaviour
         self.variants: list[str] = []  # ablations: switchbar, textfirst, absence, continue, digest
         self.aux = ""  # a corroborating reader for reader arms: NAME=BANK_DIR:KIND
         self.out = pydra.REQUIRED
