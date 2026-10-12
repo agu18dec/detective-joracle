@@ -1,4 +1,5 @@
-"""Figures for the harness climb: dev A/B forest, dev keep vs rescue, held-out pass@k.
+"""Figures for the harness climb: dev A/B forest, dev keep vs rescue, held-out pass@k, and the
+held-out experiment budget (pass@1 against experiments allowed, with the two-agent concluder).
 
 python scripts/plot_climb.py out=/workspace/agam/chive_runs_dj plots=plots/chive
 """
@@ -362,6 +363,114 @@ def heldout_pareto(cfg: Config, test: set[str]) -> None:
         )
 
 
+BUDGET_ARMS = {
+    "OLens + harness": "olens_rl_B",
+    "NLA + harness": "nla_B",
+    "J-lens + harness": "jlens_B",
+    "transcript": "transcript",
+}
+
+
+def judged(out: Path, ev: str, arm: str, sub: set[str], key: str, n: int) -> dict[str, float]:
+    """pid -> pass rate over draws 0..n-1, for incidents with all n draws judged under `key`."""
+    d: dict[str, list[float]] = defaultdict(list)
+    for f in (out / ev / arm).glob("*.d*.json"):
+        draw = int(f.name.rsplit(".d", 1)[1].split(".")[0])
+        r = json.loads(f.read_text())
+        j = r.get(key) or {}
+        if draw < n and j.get("score") is not None and r["prompt_id"] in sub:
+            d[r["prompt_id"]].append(float(j["pass"]))
+    return {p: sum(v) / n for p, v in d.items() if len(v) == n}
+
+
+def budget(cfg: Config, test: set[str], hard: set[str], low: set[str]) -> None:
+    """Each reader minus transcript, paired by incident (2 draws each), per stratum and setting:
+    read-only (the read-only test's first 2 draws), 1 experiment, and the 1-experiment two-agent
+    concluder (a fresh agent that sees only the experiment, scored against transcript's). A
+    setting still running is left out (needs 90% of incidents)."""
+    settings = [  # (label, eval dir, judge key, marker)
+        ("read-only", "climb_test", "judge", "o"),
+        ("1 experiment", "budget_1", "judge", "s"),
+        (
+            "1 experiment, two-agent (B sees only the experiment)",
+            "budget_1",
+            "concluder_judge",
+            "D",
+        ),
+        ("3 experiments", "budget_3", "judge", "^"),
+    ]
+    strata = {
+        "all 204": test,
+        "least-confident third": test & low,
+        "hard 46 (selected on errors)": test & hard,
+    }
+    readers = [a for a in BUDGET_ARMS.values() if a != "transcript"]
+    labels = {v: k for k, v in BUDGET_ARMS.items()}
+    fig, axes = plt.subplots(1, 3, figsize=(22, 6.4), sharey=True)
+    shown: set[str] = set()
+    for ax, (name, sub) in zip(axes, strata.items(), strict=True):
+        for j, (slabel, ev, key, mk) in enumerate(settings):
+            base = judged(cfg.out, ev, "transcript", sub, key, 2)
+            if len(base) < 0.9 * len(sub):
+                continue
+            for i, arm in enumerate(readers):
+                d = judged(cfg.out, ev, arm, sub, key, 2)
+                if len(d) < 0.9 * len(sub):
+                    continue
+                m, lo, hi = paired(
+                    {p: [v] for p, v in d.items()}, {p: [v] for p, v in base.items()}
+                )
+                y = i + (j - 1.5) * 0.17
+                c, _ = TEST_STYLE[arm]
+                ax.errorbar(
+                    m,
+                    y,
+                    xerr=[[m - lo], [hi - m]],
+                    fmt=mk,
+                    ms=10,
+                    lw=2.5,
+                    capsize=4,
+                    color=c,
+                    mfc=c if key == "judge" else "white",
+                    mew=2,
+                    label=slabel if slabel not in shown else None,
+                )
+                ax.annotate(
+                    f"{m:+.1f}", (hi, y), xytext=(6, -5), textcoords="offset points", fontsize=12
+                )
+                shown.add(slabel)
+        ax.axvline(0, color="#444", lw=1.2)
+        ax.set_title(f"{name} (n={len(sub)})", loc="left")
+        ax.grid(axis="x", alpha=0.3)
+    fig.supxlabel("pass@1 minus transcript (pp), paired by incident, 95% bootstrap CI")
+    axes[0].set_yticks(range(len(readers)), [labels[a] for a in readers])
+    axes[0].invert_yaxis()
+    handles = [
+        plt.Line2D(
+            [],
+            [],
+            marker=mk,
+            ls="none",
+            ms=10,
+            color="#555",
+            mfc="#555" if key == "judge" else "white",
+            mew=2,
+            label=sl,
+        )
+        for sl, _, key, mk in settings
+        if sl in shown
+    ]
+    axes[-1].legend(handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    fig.suptitle(
+        "Held-out test: what each reader adds over transcript, read-only vs with a "
+        "counterfactual experiment (2 draws per incident)",
+        x=0.01,
+        ha="left",
+    )
+    fig.tight_layout()
+    fig.savefig(cfg.plots / "heldout_budget.png", dpi=160, bbox_inches="tight")
+
+
 @pydra.main(Config)
 def main(cfg: Config) -> None:
     cfg.plots.mkdir(parents=True, exist_ok=True)
@@ -375,9 +484,10 @@ def main(cfg: Config) -> None:
     passk(cfg, test, hard, low)
     heldout_keep_rescue(cfg, test)
     heldout_pareto(cfg, test)
+    budget(cfg, test, hard, low)
     print(
         f"wrote {cfg.plots}/: climb_dev_forest, climb_dev_keep_rescue, heldout_passk, "
-        "heldout_keep_rescue"
+        "heldout_keep_rescue, heldout_pareto, heldout_budget"
     )
 
 
