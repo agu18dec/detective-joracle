@@ -243,7 +243,10 @@ def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
                     r, nr = r + score, nr + 1
         c, _ = TEST_STYLE[arm]
         pts.append((100 * r / nr, 100 * k / nk, label, c))
+    placed: list[tuple[float, float]] = []
     for x, y, label, c in pts:
+        near = any(abs(x - px) < 4 and abs(y - py) < 1.5 for px, py in placed)
+        placed.append((x, y))
         ax.scatter(
             x,
             y,
@@ -254,7 +257,9 @@ def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
             zorder=3,
             marker="o" if "original" not in label else "s",
         )
-        ax.annotate(label, (x, y), xytext=(8, 5), textcoords="offset points", fontsize=12)
+        ax.annotate(
+            label, (x, y), xytext=(8, -18 if near else 5), textcoords="offset points", fontsize=12
+        )
     ax.set_xlim(10, 70)  # fixed, honest ranges: keep and rescue on comparable scales
     ax.set_ylim(70, 100)
     ax.set_xlabel("rescue: pass@1 where a transcript draw FAILED (%)")
