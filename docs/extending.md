@@ -87,6 +87,53 @@ usage)` with `calls = [{id, name, args}]` and `usage = {output_tokens, reasoning
   forced tool (`force_tool`) must be honoured — the reduction step depends on it.
 * The driver selects by `backend=<kind>`.
 
+## Hosting another benchmark: async loop, Limits, terminal name
+
+The loop is not tied to the audit game. Its body is `agent/loop.py::run_tool_loop_async`;
+`run_tool_loop` is the sync wrapper (a private event loop; on a worker thread if called from
+inside a running loop). Everything below is opt-in and leaves existing callers unchanged.
+
+* **Async backend and tools.** `backend` may be a `Backend` or an `AsyncBackend` (the same
+  call as a coroutine), and `tools.call` may be sync or async — an awaitable result is awaited.
+  `agent/backends.py::async_openai_compatible_backend(client, model, extra_body=, max_tokens=,
+  cache=, effort=, provider=)` is the awaitable twin of `openai_compatible_backend` over an
+  `openai.AsyncOpenAI` client (`effort` → OpenRouter `reasoning.effort`; `provider` pins one
+  upstream with no fallbacks; usage also reports `prompt_tokens` and `cached_tokens`).
+  `make_backend_factory(kind, async_client=True)` builds it for the named route.
+* **`Limits`** (`agent/loop.py`), passed as `limits=`: `per_tool={"experiment": 8}` caps how
+  many times a tool may execute — a call past the cap answers `BUDGET: you have used all N of
+  your <tool> calls. Work with what you have.` without running; `unlock={"experiment":
+  ("readouts", 2)}` answers `LOCKED: call readouts k more time(s) before using experiment.`
+  until the prerequisite has executed `k` times. `Budget` stays the currency (tokens, calls);
+  when every tool in `per_tool` is exhausted the loop runs the same forced reduction. Only
+  executed calls count: a `tools.call` that raises `ValueError` (a malformed call) is returned
+  to the model as `ERROR: …`, costs a turn but no `Limits` call, and the loop continues; any
+  other exception propagates. Note that `LiveTools.call` never raises — it turns every error
+  into `tool error: …` text and appends the call to `log`, so for the audit arms an error IS
+  charged to `Budget.max_calls` (which counts `len(tools.log)`) — a tools object hosted on the
+  loop decides for itself what it lets escape and what it logs.
+* **`terminal=`** names the tool that ends a run (default `"finish"`): the reduction turn
+  (`prompts.REDUCTION_TEMPLATE`, `REDUCTION` is the `finish` rendering) and the forced call
+  name it, and the idle nudge (`prompts.IDLE_NUDGE`) says to call it. The loop detects the end
+  through `tools.finished`, so the tools object's terminal method sets it.
+* **Idle turns.** A turn with no tool call is nudged; a second in a row gets the reduction with
+  `FORCE_ANY` (`tool_choice="required"` — any tool, because forcing a named function with a
+  nested-array schema came back shape-valid but empty on Gemini over OpenRouter); a fourth
+  ends the run with `stopped_by = "idle"`. The budget reduction still forces the terminal by
+  name.
+* **Concurrency.** `run_many(jobs, concurrency)` runs thunks returning awaitables under a
+  semaphore, results in job order:
+
+  ```python
+  factory = make_backend_factory("openrouter", async_client=True)
+  jobs = [lambda ep=ep: run_episode(ep, factory(model)) for ep in episodes]   # each awaits
+  results = asyncio.run(run_many(jobs, concurrency=8))                        # run_tool_loop_async
+  ```
+
+  A job's exception propagates (`asyncio.gather`); catch inside the job if one failure must not
+  take the batch down. The audit driver (`scripts/run_audit.py`) still uses a thread pool with
+  the sync wrapper — either shape works.
+
 ## A new target / chat format
 
 * The target is any OpenAI-compatible server; `target=` may template the URL per organism.
