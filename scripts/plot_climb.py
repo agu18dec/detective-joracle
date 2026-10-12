@@ -384,88 +384,75 @@ def judged(out: Path, ev: str, arm: str, sub: set[str], key: str, n: int) -> dic
 
 
 def budget(cfg: Config, test: set[str], hard: set[str], low: set[str]) -> None:
-    """Each reader minus transcript, paired by incident (2 draws each), per stratum and setting:
-    read-only (the read-only test's first 2 draws), 1 experiment, and the 1-experiment two-agent
-    concluder (a fresh agent that sees only the experiment, scored against transcript's). A
-    setting still running is left out (needs 90% of incidents)."""
-    settings = [  # (label, eval dir, judge key, marker)
-        ("read-only", "climb_test", "judge", "o"),
-        ("1 experiment", "budget_1", "judge", "s"),
-        (
-            "1 experiment, two-agent (B sees only the experiment)",
-            "budget_1",
-            "concluder_judge",
-            "D",
-        ),
-        ("3 experiments", "budget_3", "judge", "^"),
-    ]
+    """pass@1 with one counterfactual experiment, per method and stratum (2 draws per incident):
+    solid = the agent itself, hatched = the two-agent concluder (a fresh agent that sees only the
+    experiment and its result). Error bars: 95% bootstrap CI over incidents; * = the paired
+    difference vs transcript excludes 0."""
     strata = {
         "all 204": test,
-        "least-confident third": test & low,
+        "least-confident third (68)": test & low,
         "hard 46 (selected on errors)": test & hard,
     }
-    readers = [a for a in BUDGET_ARMS.values() if a != "transcript"]
-    labels = {v: k for k, v in BUDGET_ARMS.items()}
-    fig, axes = plt.subplots(1, 3, figsize=(22, 6.4), sharey=True)
-    shown: set[str] = set()
-    for ax, (name, sub) in zip(axes, strata.items(), strict=True):
-        for j, (slabel, ev, key, mk) in enumerate(settings):
-            base = judged(cfg.out, ev, "transcript", sub, key, 2)
-            if len(base) < 0.9 * len(sub):
-                continue
-            for i, arm in enumerate(readers):
-                d = judged(cfg.out, ev, arm, sub, key, 2)
-                if len(d) < 0.9 * len(sub):
-                    continue
-                m, lo, hi = paired(
-                    {p: [v] for p, v in d.items()}, {p: [v] for p, v in base.items()}
-                )
-                y = i + (j - 1.5) * 0.17
-                c, _ = TEST_STYLE[arm]
-                ax.errorbar(
-                    m,
-                    y,
-                    xerr=[[m - lo], [hi - m]],
-                    fmt=mk,
-                    ms=10,
-                    lw=2.5,
-                    capsize=4,
-                    color=c,
-                    mfc=c if key == "judge" else "white",
-                    mew=2,
-                    label=slabel if slabel not in shown else None,
-                )
-                ax.annotate(
-                    f"{m:+.1f}", (hi, y), xytext=(6, -5), textcoords="offset points", fontsize=12
-                )
-                shown.add(slabel)
-        ax.axvline(0, color="#444", lw=1.2)
-        ax.set_title(f"{name} (n={len(sub)})", loc="left")
-        ax.grid(axis="x", alpha=0.3)
-    fig.supxlabel("pass@1 minus transcript (pp), paired by incident, 95% bootstrap CI")
-    axes[0].set_yticks(range(len(readers)), [labels[a] for a in readers])
-    axes[0].invert_yaxis()
-    handles = [
-        plt.Line2D(
-            [],
-            [],
-            marker=mk,
-            ls="none",
-            ms=10,
-            color="#555",
-            mfc="#555" if key == "judge" else "white",
-            mew=2,
-            label=sl,
-        )
-        for sl, _, key, mk in settings
-        if sl in shown
+    arms = list(BUDGET_ARMS.items())
+    kinds = [
+        ("judge", "agent with 1 experiment"),
+        ("concluder_judge", "two-agent: B sees only the experiment"),
     ]
-    axes[-1].legend(handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
-    fig.suptitle(
-        "Held-out test: what each reader adds over transcript, read-only vs with a "
-        "counterfactual experiment (2 draws per incident)",
-        x=0.01,
-        ha="left",
+    w = 0.8 / (len(arms) * len(kinds))
+    fig, ax = plt.subplots(figsize=(18, 7))
+    for j, sub in enumerate(strata.values()):
+        for i, (label, arm) in enumerate(arms):
+            c, _ = TEST_STYLE[arm]
+            for h, (key, _) in enumerate(kinds):
+                d = judged(cfg.out, "budget_1", arm, sub, key, 2)
+                base = judged(cfg.out, "budget_1", "transcript", sub, key, 2)
+                if not d:
+                    continue
+                xs = list(d.values())
+                rng = random.Random(0)
+                bs = sorted(sum(rng.choice(xs) for _ in xs) / len(xs) for _ in range(2000))
+                m, lo, hi = 100 * sum(xs) / len(xs), 100 * bs[50], 100 * bs[1949]
+                x = j + (i * len(kinds) + h - (len(arms) * len(kinds) - 1) / 2) * w
+                ax.bar(
+                    x,
+                    m,
+                    w * 0.9,
+                    color=c if key == "judge" else "white",
+                    edgecolor=c,
+                    lw=2,
+                    hatch="//" if key != "judge" else None,
+                    label=(label if key == "judge" else None) if j == 0 else None,
+                )
+                ax.errorbar(x, m, yerr=[[m - lo], [hi - m]], color="#333", lw=1.4, capsize=3)
+                star = ""
+                if arm != "transcript":
+                    _, plo, phi = paired(
+                        {p: [v] for p, v in d.items()}, {p: [v] for p, v in base.items()}
+                    )
+                    star = "*" if plo > 0 or phi < 0 else ""
+                ax.text(x, hi + 1.2, f"{m:.0f}{star}", ha="center", fontsize=11)
+    ax.set_xticks(range(len(strata)), list(strata))
+    ax.set_ylabel("pass@1 (%), 2 draws per incident")
+    ax.set_ylim(0, 100)
+    ax.grid(axis="y", alpha=0.3)
+    method_handles = [
+        plt.Rectangle((0, 0), 1, 1, color=TEST_STYLE[a][0], label=name) for name, a in arms
+    ]
+    kind_handles = [
+        plt.Rectangle((0, 0), 1, 1, facecolor="#777", edgecolor="#777", label=kinds[0][1]),
+        plt.Rectangle(
+            (0, 0), 1, 1, facecolor="white", edgecolor="#777", hatch="//", label=kinds[1][1]
+        ),
+    ]
+    ax.legend(
+        handles=method_handles + kind_handles,
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1),
+        frameon=False,
+    )
+    ax.set_title(
+        "Held-out test with one counterfactual experiment (* = differs from transcript, paired 95% CI)",
+        loc="left",
     )
     fig.tight_layout()
     fig.savefig(cfg.plots / "heldout_budget.png", dpi=160, bbox_inches="tight")
