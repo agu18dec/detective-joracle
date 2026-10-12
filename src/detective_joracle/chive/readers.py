@@ -27,6 +27,8 @@ class Reader:
     k: int  # samples per cell
     cells: dict[int, dict[int, list[str]]]  # pos -> layer -> samples
     source_id: str  # the incident the readouts come from (differs only when shuffled)
+    n_tokens: int = 0  # the incident's length, to tell the agent when readouts are sparse
+    coverage_note: str = ""  # the bank's account of which positions were read, when sparse
 
     def cell(self, pos: int) -> dict[int, list[str]]:
         return self.cells.get(pos, {})
@@ -80,6 +82,9 @@ def load_reader(
         k=int(rec.get("k", 1)),
         cells=by_pos,
         source_id=src.prompt_id,
+        n_tokens=inc.n_tokens,
+        # the note describes the bank's own incident: dropped under the cross-incident control
+        coverage_note="" if partner is not None else str(rec.get("coverage_note", "")),
     )
 
 
@@ -121,7 +126,18 @@ def describe(reader: Reader) -> str:
         if len(reader.layers) > 3
         else ", ".join(map(str, reader.layers))
     )
-    return DESCRIBE[reader.kind].format(layers=layers, k=reader.k)
+    text = DESCRIBE[reader.kind].format(layers=layers, k=reader.k)
+    covered = sum(1 for cell in reader.cells.values() if any(cell.values()))
+    # the boundary description already says which positions it covers
+    if reader.kind != "boundary" and reader.n_tokens and covered < reader.n_tokens:
+        text = text.replace("exist at every token", "exist at the tokens read")
+        text = text.replace("at every token and", "at the tokens read and")
+        note = f" ({reader.coverage_note})" if reader.coverage_note else ""
+        text += (
+            f" In this conversation readouts exist at only {covered} of {reader.n_tokens} "
+            f"tokens{note}; the other tokens have none."
+        )
+    return text
 
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z'-]{3,}")
