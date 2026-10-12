@@ -257,8 +257,14 @@ def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
             zorder=3,
             marker="o" if "original" not in label else "s",
         )
+        left = label.startswith("NLA")  # NLA and J-lens sit close together: label NLA leftwards
         ax.annotate(
-            label, (x, y), xytext=(8, -18 if near else 5), textcoords="offset points", fontsize=12
+            label,
+            (x, y),
+            xytext=(-10 if left else 8, -4 if left else (-18 if near else 5)),
+            textcoords="offset points",
+            fontsize=12,
+            ha="right" if left else "left",
         )
     ax.set_xlim(10, 70)  # fixed, honest ranges: keep and rescue on comparable scales
     ax.set_ylim(70, 100)
