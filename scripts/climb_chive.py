@@ -7,7 +7,7 @@ other), hard / normal pass@1, tool calls per episode, and unsupported quotes (qu
 the answer that neither the conversation nor the arm's readout banks back -- the hallucination
 proxy of analyze_chive.py). Writes <out>/climb_ab.md.
 
-    python scripts/climb_chive.py out=/workspace/agam/chive_runs_dj base=olens_rl_tfa
+    python scripts/climb_chive.py out=runs/chive base=olens_rl_tfa bank=<OLens readout bank>
 """
 
 import json

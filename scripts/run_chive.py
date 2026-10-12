@@ -435,6 +435,8 @@ def stage_report(args: Any) -> None:
     import random
 
     ids = set(read_ids(args.ids))
+    if args.choices:  # candidate selection only runs incidents that have a candidate set
+        ids &= set(args.choice_rows)
     hard = set(read_ids(args.hard)) if args.hard else set()
     per: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     sc: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))  # 1-10
@@ -726,7 +728,8 @@ class ChiveConfig(pydra.Config):
             if self.choices
             else {}
         )
-        if (self.experiments or "continue" in self.variants) and not self.target:
+        needs_target = self.experiments or "continue" in self.variants
+        if self.stage == "agent" and needs_target and not self.target:
             raise ValueError(
                 "experiments need target=<vLLM URL> (scripts/serve_qwen_vllm_modal.py)"
             )
