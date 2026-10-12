@@ -9,7 +9,7 @@ import pytest
 
 from detective_joracle.agent.backends import FakeBackend
 from detective_joracle.agent.loop import Budget, RunRecord, run_tool_loop_async
-from detective_joracle.chive.data import Incident
+from detective_joracle.chive.data import DATASET, Incident, load_incidents
 from detective_joracle.chive.executor import apply_edit
 from detective_joracle.chive.prompts import seed, system_prompt
 from detective_joracle.chive.readers import load_reader
@@ -48,6 +48,7 @@ def incident() -> Incident:
         pieces=PIECES,
         turn_of=TURNS,
         criteria="[T1] the word rain cues sadness",
+        ground_truth={"targets": [{"id": "T1", "cause": "the word rain cues sadness"}]},
     )
 
 
@@ -212,3 +213,36 @@ def test_aux_reader_logs_real_tool_name(tmp_path: Path) -> None:
     tools = ChiveTools(inc, main, aux=aux)
     asyncio.run(tools.call("jlens_inspect", {"position": 7}))
     assert tools.events[-1]["tool"] == "jlens_inspect" and tools.reader is main
+
+
+def test_load_incidents_joins_the_dataset_configs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inc = incident()
+    rows = {
+        "incidents": {
+            "prompt_id": "p1",
+            "messages": inc.messages,
+            "completion": inc.completion,
+            "behaviour": inc.behaviour,
+            "k": inc.k,
+            "n": inc.n,
+        },
+        "tokens": {
+            "prompt_id": "p1",
+            "token_ids": inc.token_ids,
+            "pieces": inc.pieces,
+            "turn_of": [list(t) for t in inc.turn_of],
+        },
+        "ground_truth": {"prompt_id": "p1", "judge_reference": inc.criteria, **inc.ground_truth},
+    }
+    cache = tmp_path / "detective_joracle" / DATASET
+    cache.mkdir(parents=True)
+    for config, row in rows.items():  # pre-filled cache: no download
+        (cache / f"{config}.jsonl").write_text(json.dumps(row) + "\n")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    got = load_incidents(["p1"])["p1"]
+    assert got.turn_of == inc.turn_of and got.criteria == inc.criteria
+    assert got.ground_truth["targets"] == inc.ground_truth["targets"]
+    with pytest.raises(KeyError):
+        load_incidents(["missing"])

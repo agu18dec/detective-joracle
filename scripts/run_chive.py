@@ -257,7 +257,7 @@ def stage_agent(args: Any) -> None:
     ids = read_ids(args.ids)
     if args.choices:  # candidate selection: only incidents that have a candidate set
         ids = [p for p in ids if p in args.choice_rows]
-    incs = load_incidents(args.incidents, ids)
+    incs = load_incidents(ids)
     order = sorted(ids)
     partner = {p: incs[order[(i + len(order) // 2) % len(order)]] for i, p in enumerate(order)}
     arms = [parse_arm(a) for a in args.arm]
@@ -313,7 +313,7 @@ async def _judge_one(path: Path, inc: Incident, key: str, text: str) -> None:
 
 
 def stage_judge(args: Any) -> None:
-    incs = load_incidents(args.incidents, read_ids(args.ids))
+    incs = load_incidents(read_ids(args.ids))
     jobs = []
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
@@ -342,7 +342,7 @@ async def item_score(inc: Incident, h: str) -> tuple[float, str] | None:
 
 
 def stage_top20(args: Any) -> None:
-    incs = load_incidents(args.incidents, read_ids(args.ids))
+    incs = load_incidents(read_ids(args.ids))
     d = args.out / "top20"
     d.mkdir(parents=True, exist_ok=True)
 
@@ -388,7 +388,7 @@ def stage_top20(args: Any) -> None:
 
 
 def stage_concluder(args: Any) -> None:
-    incs = load_incidents(args.incidents, read_ids(args.ids))
+    incs = load_incidents(read_ids(args.ids))
 
     async def one(path: Path, inc: Incident, exps: list[dict[str, Any]]) -> None:
         user = (
@@ -694,7 +694,6 @@ class ChiveConfig(pydra.Config):
         self.eval = "readonly"  # eval name: a directory under `out`
         self.ids = pydra.REQUIRED
         self.hard = ""  # ids of the hard stratum (report)
-        self.incidents = "/workspace/agam/chive_bank/incidents"
         self.arms: list[str] = ["transcript"]
         self.draws = 1
         self.experiments = 0
@@ -717,7 +716,7 @@ class ChiveConfig(pydra.Config):
         self.out = pydra.REQUIRED
 
     def finalize(self) -> None:
-        self.ids, self.incidents, self.out = Path(self.ids), Path(self.incidents), Path(self.out)
+        self.ids, self.out = Path(self.ids), Path(self.out)
         self.hard = Path(self.hard) if self.hard else None
         self.arm = list(self.arms)
         self.aux_arm = parse_arm(self.aux) if self.aux else None

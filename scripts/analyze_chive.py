@@ -190,20 +190,19 @@ class Config(pydra.Config):
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/all300.txt"
         self.hard = "data/chive/splits/hard92.txt"
-        self.incidents = "/workspace/agam/chive_bank/incidents"
         self.banks: list[str] = []  # NAME=BANK_DIR for the quote check, one per reader arm
         self.concurrency = 24
         self.label = True  # False: reuse the labels in an existing analysis.json
 
     def finalize(self) -> None:
-        self.out, self.incidents = Path(self.out), Path(self.incidents)
+        self.out = Path(self.out)
         self.bank_of = {b.split("=", 1)[0]: Path(b.split("=", 1)[1]) for b in self.banks}
 
 
 def run(cfg: Config) -> None:
     ids = set(read_ids(Path(cfg.ids)))
     hard = set(read_ids(Path(cfg.hard)))
-    incs = load_incidents(cfg.incidents, sorted(ids))
+    incs = load_incidents(sorted(ids))
     by = load(cfg.out, cfg.eval, ids)
     base = by["transcript"]
     arms = [a for a in sorted(by) if a != "transcript"]

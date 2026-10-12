@@ -30,13 +30,12 @@ class Config(pydra.Config):
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/climb_dev96.txt"
         self.hard = "data/chive/splits/hard92.txt"
-        self.incidents = "/workspace/agam/chive_bank/incidents"
         self.base = "olens_rl_tfa"
         self.reference = "transcript_cont"
         self.bank = "/workspace/agam/chive_bank/s3d_rl600_all"  # OLens bank for the quote check
 
     def finalize(self) -> None:
-        self.out, self.incidents, self.bank = Path(self.out), Path(self.incidents), Path(self.bank)
+        self.out, self.bank = Path(self.out), Path(self.bank)
 
 
 def paired(a: dict[str, list[float]], b: dict[str, list[float]]) -> str:
@@ -55,7 +54,7 @@ def paired(a: dict[str, list[float]], b: dict[str, list[float]]) -> str:
 def main(cfg: Config) -> None:
     ids = set(read_ids(Path(cfg.ids)))
     hard = set(read_ids(Path(cfg.hard)))
-    incs = load_incidents(cfg.incidents, sorted(ids))
+    incs = load_incidents(sorted(ids))
     recs: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     seen: set[Path] = set()
     for f in sorted(cfg.out.glob("climb_*/*/*.d*.json")):

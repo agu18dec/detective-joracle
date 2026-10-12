@@ -93,18 +93,17 @@ class Config(pydra.Config):
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/all300.txt"
         self.hard = "data/chive/splits/hard92.txt"
-        self.incidents = "/workspace/agam/chive_bank/incidents"
         self.arms: list[str] = ["olens_rl"]
         self.concurrency = 32
 
     def finalize(self) -> None:
-        self.out, self.incidents = Path(self.out), Path(self.incidents)
+        self.out = Path(self.out)
 
 
 def run(cfg: Config) -> None:
     ids = read_ids(Path(cfg.ids))
     hard = set(read_ids(Path(cfg.hard)))
-    incs = load_incidents(cfg.incidents, ids)
+    incs = load_incidents(ids)
     d = cfg.out / cfg.eval
     cache_f = d / "arbiter.json"
     cache: dict[str, str] = json.loads(cache_f.read_text()) if cache_f.exists() else {}

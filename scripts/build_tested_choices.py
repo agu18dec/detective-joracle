@@ -1,8 +1,8 @@
 """Tested-alternatives candidate sets: the true cause against the alternatives CHIVE tested.
 
 For each incident: the truth is the first established cause (ground_truth.targets[0]); the
-distractors are the incident's exclusions -- hypotheses its experiments refuted, and edits that
-did not move the behaviour (rewritten as the hypothesis they tested). One model call restates
+distractors are the incident's ruled-out alternatives -- hypotheses its experiments refuted, and
+edits that did not move the behaviour (rewritten as the hypothesis they tested). One model call restates
 every option as one neutral sentence in the same style, without evidence or results, so wording
 does not give the answer away. Options are lettered in an order fixed by a hash. A blind picker
 that sees only the behaviour and the options gives the leak check. Writes a jsonl in the format
@@ -21,6 +21,7 @@ from typing import Any
 import pydra
 
 from detective_joracle.agent.loop import run_many
+from detective_joracle.chive.data import Incident, load_incidents, read_ids
 from detective_joracle.chive.llm import client, json_call
 
 MODELS = ("claude-opus-5", "claude-sonnet-5")  # the second covers content-filter refusals
@@ -57,15 +58,15 @@ async def call(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]
     return None
 
 
-async def build(inc: dict[str, Any]) -> dict[str, Any] | None:
-    gt = inc["ground_truth"]
-    truth = gt["targets"][0]["title"]
-    excl = [e[0] if isinstance(e, list) else str(e) for e in gt.get("exclusions", [])]
+async def build(inc: Incident) -> dict[str, Any] | None:
+    gt = inc.ground_truth
+    truth = gt["targets"][0]["cause"]
+    excl = [x["cause"] if x["kind"] == "refuted" else x["edit"] for x in gt["ruled_out"]]
     excl = excl[:MAX_DISTRACTORS]
     if len(excl) < 2:
         return None
     items = [truth, *excl]
-    user = f"BEHAVIOUR: {inc['behaviour']}\n\nITEMS:\n" + "\n".join(
+    user = f"BEHAVIOUR: {inc.behaviour}\n\nITEMS:\n" + "\n".join(
         f"{i + 1}. {x}" for i, x in enumerate(items)
     )
     got = await call(REWRITE, user, REWRITE_SCHEMA)
@@ -74,7 +75,7 @@ async def build(inc: dict[str, Any]) -> dict[str, Any] | None:
     sents = [str(x).strip() for x in got["sentences"]]
     order = sorted(
         range(len(sents)),
-        key=lambda i: hashlib.sha1(f"{inc['prompt_id']}:{i}".encode()).hexdigest(),
+        key=lambda i: hashlib.sha1(f"{inc.prompt_id}:{i}".encode()).hexdigest(),
     )
     options = [
         {
@@ -86,7 +87,7 @@ async def build(inc: dict[str, Any]) -> dict[str, Any] | None:
         for j, i in enumerate(order)
     ]
     truth_letter = next(o["letter"] for o in options if o["truth"])
-    blind = f"BEHAVIOUR: {inc['behaviour']}\n\nCANDIDATES:\n" + "\n".join(
+    blind = f"BEHAVIOUR: {inc.behaviour}\n\nCANDIDATES:\n" + "\n".join(
         f"{o['letter']}) {o['text']}" for o in options
     )
     picks = await asyncio.gather(*[call(PICK, blind, PICK_SCHEMA) for _ in range(3)])
@@ -94,7 +95,7 @@ async def build(inc: dict[str, Any]) -> dict[str, Any] | None:
         bool(p and str(p.get("letter", "")).strip().upper()[:1] == truth_letter) for p in picks
     )
     return {
-        "prompt_id": inc["prompt_id"],
+        "prompt_id": inc.prompt_id,
         "options": options,
         "truth": truth_letter,
         "options_only_correct": hits,
@@ -106,7 +107,6 @@ class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
         self.ids = "data/chive/splits/climb_test204.txt"
-        self.incidents = "/workspace/agam/chive_bank/incidents"
         self.out = "data/chive/choices/tested_test204.jsonl"
         self.concurrency = 16
 
@@ -116,11 +116,10 @@ class Config(pydra.Config):
 
 @pydra.main(Config)
 def main(cfg: Config) -> None:
-    ids = Path(cfg.ids).read_text().split()
-    incs = [json.loads(Path(cfg.incidents, f"{p}.json").read_text()) for p in ids]
+    incs = load_incidents(read_ids(Path(cfg.ids))).values()
     rows: list[dict[str, Any]] = []
 
-    async def job(inc: dict[str, Any]) -> None:
+    async def job(inc: Incident) -> None:
         r = await build(inc)
         if r:
             rows.append(r)

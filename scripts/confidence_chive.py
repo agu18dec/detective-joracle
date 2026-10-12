@@ -94,18 +94,17 @@ class Config(pydra.Config):
         super().__init__()
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/all300.txt"
-        self.incidents = "/workspace/agam/chive_bank/incidents"
         self.concurrency = 16
 
     def finalize(self) -> None:
-        self.out, self.incidents = Path(self.out), Path(self.incidents)
+        self.out = Path(self.out)
 
 
 @pydra.main(Config)
 def main(cfg: Config) -> None:
     f = cfg.out / "confidence.json"
     done: dict[str, Any] = json.loads(f.read_text()) if f.exists() else {}
-    incs = load_incidents(cfg.incidents, read_ids(Path(cfg.ids)))
+    incs = load_incidents(read_ids(Path(cfg.ids)))
     c = anthropic_client()
 
     async def job(inc: Incident) -> None:

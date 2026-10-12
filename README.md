@@ -287,6 +287,14 @@ schema is in `docs/architecture.md`.
 * **Auditor:** `agent/backends.py::make_backend_factory` — `openrouter` or `openai`; any
   `openai.OpenAI`-style client works with `openai_compatible_backend`.
 
+## CHIVE forensics evals
+
+A second task on the same agent loop: explain *why* Qwen3.6-27B shows a behaviour in a real
+conversation, using one method (transcript, OLens, NLA or J-lens), judged against the causes
+CHIVE established by experiment. The 300 incidents are the HF dataset
+[`agu18dec/chive-forensics`](https://huggingface.co/datasets/agu18dec/chive-forensics); setup,
+the frozen harness and the commands that reproduce the held-out test are in `docs/chive.md`.
+
 ## Repository layout
 
 ```
@@ -296,9 +304,10 @@ src/detective_joracle/
   presentation/select.py       judges/paper.py  judges/graded.py
   registry/    quirks.py + data/{quirk_registry,distractors,held_out_prompts}.json
   llm/         client.py (async_json)  openrouter.py  route.py      stats.py  util/text.py
+  chive/       CHIVE forensics evals: data  readers  tools  prompts  executor  judge  llm
 scripts/       run_audit.py  run_loop.sh  run_grid.sh  build_viewer.py  plot.py  serve_viewer_modal.py
 servers/       reference GPU servers (need the private lens stack)   examples/  mock target + e2e
-docs/          architecture · contracts · extending · troubleshooting · harness · design · results · faults
+docs/          architecture · contracts · extending · troubleshooting · harness · design · results · faults · chive
 tests/         offline (FakeClient / FakeBackend / the mock over HTTP)
 ```
 
