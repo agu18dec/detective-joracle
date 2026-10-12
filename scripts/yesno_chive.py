@@ -1,7 +1,10 @@
 """Report for the CHIVE yes/no eval (run_chive.py yesno=true): would this edit change the behaviour?
 
-Per arm: pooled AUC over items, accuracy at 0.5, Brier and log loss (means over incidents of the
-per-incident means over draws). Differences vs `reference` are paired by incident with a seeded
+Per arm, headline first: within-incident AUC (mean over incidents that have both YES and NO
+edits of the AUC among that incident's edits -- does the method tell which edit matters?), pooled
+AUC over items (also rewards knowing which behaviours are fragile), and accuracy at 0.5, Brier and
+log loss scored per draw (means over incidents of per-incident means). Only incidents with every
+draw answered count, so an arm that fails more often is not scored on easier incidents. Differences vs `reference` are paired by incident with a seeded
 bootstrap over incidents (AUC recomputed on each resample). Strata: all, least-confident third
 (confidence.json top_p terciles), hard. Reader arms also report their committed transcript-only
 predictions (`yesno_text`), so the readouts' effect within the same episode is visible. Flips:
@@ -24,7 +27,7 @@ import pydra
 from detective_joracle.chive.data import read_ids
 
 Items = dict[tuple[str, str], list[float]]  # (pid, edit id) -> p over draws
-METRICS = ("auc", "accuracy", "brier", "logloss")
+METRICS = ("within_auc", "auc", "accuracy", "brier", "logloss")
 
 
 def auc(pairs: list[tuple[float, bool]]) -> float:
@@ -37,46 +40,61 @@ def auc(pairs: list[tuple[float, bool]]) -> float:
     return wins / (len(pos) * len(neg))
 
 
-Groups = dict[str, list[tuple[float, bool]]]  # pid -> (mean p over draws, label) per edit
+Groups = dict[str, list[tuple[list[float], bool]]]  # pid -> (p per draw, label) per edit
 
 
-def groups(items: Items, labels: dict[tuple[str, str], bool]) -> Groups:
+def groups(items: Items, labels: dict[tuple[str, str], bool], draws: int) -> Groups:
+    """Incidents whose every edit has a prediction from every draw."""
     out: Groups = defaultdict(list)
     for (pid, eid), ps in sorted(items.items()):
-        out[pid].append((sum(ps) / len(ps), labels[(pid, eid)]))
-    return out
+        out[pid].append((ps, labels[(pid, eid)]))
+    return {pid: r for pid, r in out.items() if all(len(ps) == draws for ps, _ in r)}
 
 
-def metrics(per: list[list[tuple[float, bool]]]) -> dict[str, float]:
-    """AUC pooled over items; the others are means over incidents of per-incident means."""
+def metrics(per: list[list[tuple[list[float], bool]]]) -> dict[str, float]:
+    """AUCs on the draw-mean p; accuracy, Brier and log loss per draw, then means over incidents
+    of per-incident means."""
     if not per:
         return dict.fromkeys(METRICS, float("nan"))
 
     def mean_of(f: Any) -> float:
-        return sum(sum(f(p, y) for p, y in r) / len(r) for r in per) / len(per)
+        return sum(
+            sum(sum(f(p, y) for p in ps) / len(ps) for ps, y in r) / len(r) for r in per
+        ) / len(per)
+
+    mean_p = [[(sum(ps) / len(ps), y) for ps, y in r] for r in per]
+    within = [auc(r) for r in mean_p if any(y for _, y in r) and not all(y for _, y in r)]
 
     def ll(p: float, y: bool) -> float:
         c = min(0.99, max(0.01, p))
         return -math.log(c if y else 1 - c)
 
     return {
-        "auc": auc([x for r in per for x in r]),
+        "within_auc": sum(within) / len(within) if within else float("nan"),
+        "auc": auc([x for r in mean_p for x in r]),
         "accuracy": mean_of(lambda p, y: float((p >= 0.5) == y)),
         "brier": mean_of(lambda p, y: (p - y) ** 2),
         "logloss": mean_of(ll),
     }
 
 
-def scores(items: Items, labels: dict[tuple[str, str], bool], pids: list[str]) -> dict[str, float]:
-    g = groups(items, labels)
+def scores(
+    items: Items, labels: dict[tuple[str, str], bool], pids: list[str], draws: int
+) -> dict[str, float]:
+    g = groups(items, labels, draws)
     return metrics([g[p] for p in pids if p in g])
 
 
 def paired(
-    a: Items, b: Items, labels: dict[tuple[str, str], bool], pids: list[str], metric: str
+    a: Items,
+    b: Items,
+    labels: dict[tuple[str, str], bool],
+    pids: list[str],
+    metric: str,
+    draws: int,
 ) -> str:
     """a minus b on `metric` over incidents both arms scored; bootstrap over those incidents."""
-    ga, gb = groups(a, labels), groups(b, labels)
+    ga, gb = groups(a, labels, draws), groups(b, labels, draws)
     common = [p for p in pids if p in ga and p in gb]
     if not common:
         return "-"
@@ -86,10 +104,10 @@ def paired(
     for _ in range(2000):
         smp = [rng.choice(common) for _ in common]
         d = metrics([ga[p] for p in smp])[metric] - metrics([gb[p] for p in smp])[metric]
-        if d == d:  # an all-one-label resample has no AUC
+        if d == d:  # a resample with no mixed (or no two-label) incident has no AUC
             diffs.append(d)
     diffs.sort()
-    lo, hi = diffs[int(0.025 * len(diffs))], diffs[int(0.975 * len(diffs)) - 1]
+    lo, hi = diffs[int(0.025 * len(diffs))], diffs[min(len(diffs) - 1, int(0.975 * len(diffs)))]
     star = "*" if lo > 0 or hi < 0 else ""
     return f"{point:+.3f} [{lo:+.3f}, {hi:+.3f}]{star}"
 
@@ -101,7 +119,7 @@ class Config(pydra.Config):
         self.eval = "yesno_test"
         self.ids = "data/chive/splits/climb_test204.txt"
         self.hard = "data/chive/splits/hard92.txt"
-        self.confidence = "/workspace/agam/chive_runs_dj/confidence.json"
+        self.confidence = pydra.REQUIRED  # confidence_chive.py's confidence.json
         self.reference = "transcript"
         self.draws = 2
 
@@ -166,20 +184,24 @@ def main(cfg: Config) -> None:
             "",
             f"## {name} (n={len(sub)} incidents)",
             "",
-            "| arm | AUC | accuracy | Brier | log loss | AUC vs ref | Brier vs ref | "
-            "transcript-only commit: AUC / Brier |",
-            "|---|---|---|---|---|---|---|---|",
+            "| arm | within-incident AUC | pooled AUC | accuracy | Brier | log loss | "
+            "within AUC vs ref | Brier vs ref | transcript-only commit: within AUC / Brier |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
         for a in arms:
-            s = scores(final[a], labels, sub)
-            t = scores(text[a], labels, sub) if text.get(a) else None
+            s = scores(final[a], labels, sub, cfg.draws)
+            t = scores(text[a], labels, sub, cfg.draws) if text.get(a) else None
             ref = a == cfg.reference
+
+            def vs(metric: str, a: str = a, ref: bool = ref, sub: list[str] = sub) -> str:
+                if ref:
+                    return "-"
+                return paired(final[a], final[cfg.reference], labels, sub, metric, cfg.draws)
+
             lines.append(
-                f"| {a} | {s['auc']:.3f} | {s['accuracy']:.1%} | {s['brier']:.3f} | "
-                f"{s['logloss']:.3f} | "
-                f"{'-' if ref else paired(final[a], final[cfg.reference], labels, sub, 'auc')} | "
-                f"{'-' if ref else paired(final[a], final[cfg.reference], labels, sub, 'brier')} | "
-                + (f"{t['auc']:.3f} / {t['brier']:.3f}" if t else "-")
+                f"| {a} | {s['within_auc']:.3f} | {s['auc']:.3f} | {s['accuracy']:.1%} | "
+                f"{s['brier']:.3f} | {s['logloss']:.3f} | {vs('within_auc')} | {vs('brier')} | "
+                + (f"{t['within_auc']:.3f} / {t['brier']:.3f}" if t else "-")
                 + " |"
             )
     ref_items = final[cfg.reference]

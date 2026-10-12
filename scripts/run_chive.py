@@ -753,6 +753,11 @@ class ChiveConfig(pydra.Config):
             else {}
         )
         needs_target = self.experiments or "continue" in self.variants
+        if self.yesno and needs_target:
+            raise ValueError(
+                "yesno=true is predict-only: experiments and continue_from would let "
+                "the agent measure the answer"
+            )
         if self.stage == "agent" and needs_target and not self.target:
             raise ValueError(
                 "experiments need target=<vLLM URL> (scripts/serve_qwen_vllm_modal.py)"

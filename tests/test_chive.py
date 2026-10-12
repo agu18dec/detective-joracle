@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -320,3 +321,31 @@ def test_yesno_items_tools_and_scoring() -> None:
     s = score_items(items, tools.finished["predictions"])
     assert s["accuracy"] == 1.0 and abs(s["brier"] - (0.01 + 0.04) / 2) < 1e-9
     assert "E1)" in seed(inc, edits=[(it.id, it.text) for it in items])
+
+
+def _yesno_script() -> Any:
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "yesno_chive.py"
+    spec = importlib.util.spec_from_file_location("yesno_chive", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_yesno_metrics_within_incident_auc_ties_and_complete_draws() -> None:
+    y = _yesno_script()
+    assert y.auc([(0.5, True), (0.5, False)]) == 0.5  # ties count half
+    labels = {("a", "E1"): True, ("a", "E2"): False, ("b", "E1"): True, ("c", "E1"): False}
+    items = {
+        ("a", "E1"): [0.9, 0.7],
+        ("a", "E2"): [0.2, 0.4],
+        ("b", "E1"): [0.9, 0.9],
+        ("c", "E1"): [0.1],  # one draw missing: incident c is not scored
+    }
+    g = y.groups(items, labels, 2)
+    assert set(g) == {"a", "b"}
+    m = y.metrics([g["a"], g["b"]])
+    assert m["within_auc"] == 1.0  # only incident a has both labels
+    assert abs(m["brier"] - ((0.01 + 0.09 + 0.04 + 0.16) / 4 + 0.01) / 2) < 1e-9
