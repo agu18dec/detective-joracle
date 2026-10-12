@@ -71,3 +71,18 @@ Separately (dev100, `dev_absence`): absence guidance alone, per reader -- OLens 
 (+5.0 [-2.0, +12.0]), NLA 62.0 -> 67.5, J-lens 61.5 -> 68.5 (+7.0 [+1.5, +13.0]); the gain is on
 absence-type causes (OLens 45.8 -> 64.6, n=24) with present-feature causes flat (71.1 -> 71.7,
 n=76). A generic fix: it goes into the "generic parts" applied to every reader at test.
+
+## Budgeted counterfactual (specified 2026-10-12 00:50 UTC, before any run)
+
+Question: do readouts substitute for experiments, and does the improved harness choose better
+experiments? Held-out test only (`climb_test204.txt`), harnesses frozen as above.
+
+- **Budgets:** 0 (the read-only test, draws 0-1), 1 and 3 experiments
+  (`run_experiment`: edit the conversation, Qwen3.6-27B re-run 12x, graded by the CHIVE grader).
+- **Arms:** transcript only; OLens, NLA and J-lens on the improved harness (textfirst + absence).
+- **Draws:** 2 per incident per budget (204 x 2 x 4 arms x 2 budgets = 3,264 new episodes).
+- **Primary readout:** pass@1 against budget per method, all 204 and the least-confident third
+  (uncertainty strata; hard 46 shown, flagged). Paired differences vs transcript at each budget.
+- **Two-agent concluder** at budgets 1 and 3: a fresh agent sees only the experiments and their
+  results. If readout arms' concluders beat transcript's, readouts led to better-chosen experiments.
+- Reported whatever it shows; health table must be 0 before any number is quoted.
