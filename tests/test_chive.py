@@ -2,6 +2,7 @@
 
 import asyncio
 import gzip
+import importlib.util
 import json
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,11 @@ import pytest
 
 from detective_joracle.agent.backends import FakeBackend
 from detective_joracle.agent.loop import Budget, RunRecord, run_tool_loop_async
+from detective_joracle.chive.claims import auc, build_claims, metrics, statement
 from detective_joracle.chive.data import DATASET, Incident, load_incidents
 from detective_joracle.chive.executor import apply_edit
 from detective_joracle.chive.prompts import seed, system_prompt
-from detective_joracle.chive.readers import load_reader
+from detective_joracle.chive.readers import Reader, load_reader
 from detective_joracle.chive.tools import SUBMIT, ChiveTools, schemas
 
 PIECES = [
@@ -349,3 +351,63 @@ def test_yesno_metrics_within_incident_auc_ties_and_complete_draws() -> None:
     m = y.metrics([g["a"], g["b"]])
     assert m["within_auc"] == 1.0  # only incident a has both labels
     assert abs(m["brier"] - ((0.01 + 0.09 + 0.04 + 0.16) / 4 + 0.01) / 2) < 1e-9
+
+
+def _claims_script() -> Any:
+    path = Path(__file__).resolve().parents[1] / "scripts" / "claims_chive.py"
+    spec = importlib.util.spec_from_file_location("claims_chive", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def with_gt(gt: dict[str, Any]) -> Any:
+    inc = incident()
+    return type(inc)(**{**inc.__dict__, "ground_truth": gt})
+
+
+def test_claims_are_balanced_and_in_chive_form() -> None:
+    gt = {
+        "movers": [
+            {"edit": "drop the word rain", "effect_pp": 70},
+            {"edit": "make it a haiku", "effect_pp": 60},
+        ],
+        "ruled_out": [
+            {"kind": "inert", "basis": "claim_bank", "edit": "say please", "effect_pp": 5},
+            {
+                "kind": "inert",
+                "basis": "experiment_le_15pp",
+                "edit": "states its result",
+                "effect_pp": 3,
+            },
+            {"kind": "refuted", "cause": "not an edit"},
+        ],
+    }
+    claims = build_claims([with_gt(gt)])
+    assert len(claims) == 2 and sorted(c.label for c in claims) == [False, True]
+    s = statement(incident(), "say please")
+    assert "BASELINE" in s and "~67%" in s and "at least 30 percentage points" in s
+
+
+def test_metrics() -> None:
+    assert auc([(0.9, True), (0.1, False), (0.5, True), (0.5, False)]) == 0.875
+    scored = {"a": ([0.9, 0.7], True, "p1"), "b": ([0.2], False, "p1"), "c": ([0.6], True, "p2")}
+    m = metrics(scored, ["a", "b", "c"])
+    assert m["within_auroc"] == 1.0 and m["acc"] == 1.0
+    assert m["brier"] == pytest.approx(((0.01 + 0.09) / 2 + 0.04 + 0.16) / 3)
+
+
+def test_focused_submit_needs_a_look_at_the_edited_tokens() -> None:
+    s = _claims_script()
+    inc = incident()
+    reader = Reader(
+        "olens_rl", "olens", [20], 1, {p: {20: ["x"]} for p in range(inc.n_tokens)}, "p1"
+    )
+    tools = s.ClaimTools(inc, reader)
+    ans = {"probability_true": 0.7, "reasoning": "r", "edited_positions": "t6-t7"}
+    with pytest.raises(ValueError, match="look at the tokens"):
+        asyncio.run(tools.call("submit_answer", ans))
+    asyncio.run(tools.call("inspect", {"position": 7}))
+    assert asyncio.run(tools.call("submit_answer", ans)) == "answer recorded"
+    assert tools.finished["probability_true"] == 0.7
