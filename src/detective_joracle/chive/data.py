@@ -3,7 +3,8 @@
 An incident joins three configs of that dataset on `prompt_id`: the conversation, behaviour and
 base rate (`incidents`); the tokenized transcript with (turn, role) per token, the positions every
 reader indexes (`tokens`); and the established causes with the judge's reference block
-(`ground_truth`). The files are downloaded once into the user cache.
+(`ground_truth`). The files are downloaded once into the user cache; a local directory in the
+same `data/<config>.jsonl` layout works in place of the dataset id.
 """
 
 import json
@@ -61,6 +62,8 @@ def fetch(config: str, dataset: str = DATASET) -> Path:
     dataset id, downloaded on first use."""
     if Path(dataset).is_dir():
         return Path(dataset) / "data" / f"{config}.jsonl"
+    if dataset.startswith((".", "/", "~")) or dataset.count("/") != 1:
+        raise FileNotFoundError(f"{dataset} is neither a directory nor an HF dataset id")
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     path = cache / "detective_joracle" / dataset / f"{config}.jsonl"
     if not path.exists():

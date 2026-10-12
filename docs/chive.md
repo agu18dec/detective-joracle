@@ -14,7 +14,8 @@ held-out test) and `chive_preregistration.md` (confidence strata and controls).
 The 300 incidents are the HF dataset
 [`agu18dec/chive-forensics`](https://huggingface.co/datasets/agu18dec/chive-forensics).
 `detective_joracle.chive.data.load_incidents(ids)` downloads `incidents`, `tokens` and
-`ground_truth` once into `~/.cache/detective_joracle/` and joins them on `prompt_id`. The splits
+`ground_truth` once into `~/.cache/detective_joracle/` and joins them on `prompt_id`. Every
+script takes `dataset=`: an HF dataset id, or a local directory in the same `data/` layout. The splits
 are in `data/chive/splits/`: `climb_dev96` / `climb_test204` (the harness climb), `hard92`, and
 `deep_read19` (incidents read in depth while the harness was designed; leave them out of
 held-out claims). The candidate sets are in `data/chive/choices/`.

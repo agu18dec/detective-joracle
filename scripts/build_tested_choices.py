@@ -21,7 +21,7 @@ from typing import Any
 import pydra
 
 from detective_joracle.agent.loop import run_many
-from detective_joracle.chive.data import Incident, load_incidents, read_ids
+from detective_joracle.chive.data import DATASET, Incident, load_incidents, read_ids
 from detective_joracle.chive.llm import client, json_call
 
 MODELS = ("claude-opus-5", "claude-sonnet-5")  # the second covers content-filter refusals
@@ -106,6 +106,7 @@ async def build(inc: Incident) -> dict[str, Any] | None:
 class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
+        self.dataset = DATASET  # HF dataset id or a local directory (see run_chive.py)
         self.ids = "data/chive/splits/climb_test204.txt"
         self.out = "data/chive/choices/tested_test204.jsonl"
         self.concurrency = 16
@@ -116,7 +117,7 @@ class Config(pydra.Config):
 
 @pydra.main(Config)
 def main(cfg: Config) -> None:
-    incs = load_incidents(read_ids(Path(cfg.ids))).values()
+    incs = load_incidents(read_ids(Path(cfg.ids)), cfg.dataset).values()
     rows: list[dict[str, Any]] = []
 
     async def job(inc: Incident) -> None:
