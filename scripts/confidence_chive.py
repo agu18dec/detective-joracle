@@ -26,7 +26,7 @@ from typing import Any
 import pydra
 
 from detective_joracle.agent.loop import run_many
-from detective_joracle.chive.data import Incident, load_incidents, read_ids
+from detective_joracle.chive.data import DATASET, Incident, load_incidents, read_ids
 from detective_joracle.chive.llm import anthropic_client
 from detective_joracle.chive.prompts import seed
 
@@ -92,6 +92,7 @@ async def ask(c: Any, inc: Incident) -> dict[str, Any] | None:
 class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
+        self.dataset = DATASET  # HF dataset id or a local directory (see run_chive.py)
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/all300.txt"
         self.concurrency = 16
@@ -104,7 +105,7 @@ class Config(pydra.Config):
 def main(cfg: Config) -> None:
     f = cfg.out / "confidence.json"
     done: dict[str, Any] = json.loads(f.read_text()) if f.exists() else {}
-    incs = load_incidents(read_ids(Path(cfg.ids)))
+    incs = load_incidents(read_ids(Path(cfg.ids)), cfg.dataset)
     c = anthropic_client()
 
     async def job(inc: Incident) -> None:

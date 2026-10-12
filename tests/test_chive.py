@@ -246,3 +246,28 @@ def test_load_incidents_joins_the_dataset_configs(
     assert got.ground_truth["targets"] == inc.ground_truth["targets"]
     with pytest.raises(KeyError):
         load_incidents(["missing"])
+
+
+def test_load_incidents_from_a_local_dataset_dir(tmp_path: Path) -> None:
+    inc = incident()
+    (tmp_path / "data").mkdir()
+    rows = {
+        "incidents": {
+            "prompt_id": "p1",
+            "messages": inc.messages,
+            "completion": inc.completion,
+            "behaviour": inc.behaviour,
+            "k": inc.k,
+            "n": inc.n,
+        },
+        "tokens": {
+            "prompt_id": "p1",
+            "token_ids": inc.token_ids,
+            "pieces": inc.pieces,
+            "turn_of": [list(t) for t in inc.turn_of],
+        },
+        "ground_truth": {"prompt_id": "p1", "judge_reference": inc.criteria},
+    }
+    for config, row in rows.items():
+        (tmp_path / "data" / f"{config}.jsonl").write_text(json.dumps(row) + "\n")
+    assert load_incidents(["p1"], str(tmp_path))["p1"].pieces == inc.pieces

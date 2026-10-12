@@ -21,7 +21,7 @@ from typing import Any
 import pydra
 
 from detective_joracle.agent.loop import run_many
-from detective_joracle.chive.data import Incident, load_incidents, read_ids
+from detective_joracle.chive.data import DATASET, Incident, load_incidents, read_ids
 from detective_joracle.chive.llm import client, json_call
 from detective_joracle.chive.prompts import seed
 
@@ -91,6 +91,7 @@ def paired_diff(per: Table, x: str, y: str, sub: set[str] | None = None) -> str:
 class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
+        self.dataset = DATASET  # HF dataset id or a local directory (see run_chive.py)
         self.eval = "e1_readonly"
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/all300.txt"
@@ -105,7 +106,7 @@ class Config(pydra.Config):
 def run(cfg: Config) -> None:
     ids = read_ids(Path(cfg.ids))
     hard = set(read_ids(Path(cfg.hard)))
-    incs = load_incidents(ids)
+    incs = load_incidents(ids, cfg.dataset)
     d = cfg.out / cfg.eval
     cache_f = d / "arbiter.json"
     cache: dict[str, str] = json.loads(cache_f.read_text()) if cache_f.exists() else {}

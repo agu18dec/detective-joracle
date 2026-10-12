@@ -25,7 +25,7 @@ from typing import Any
 import pydra
 
 from detective_joracle.agent.loop import run_many
-from detective_joracle.chive.data import Incident, load_incidents, read_ids
+from detective_joracle.chive.data import DATASET, Incident, load_incidents, read_ids
 from detective_joracle.chive.judge import JUDGE_MODEL
 from detective_joracle.chive.llm import client, json_call
 
@@ -186,6 +186,7 @@ async def label(
 class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
+        self.dataset = DATASET  # HF dataset id or a local directory (see run_chive.py)
         self.eval = "e1_readonly"
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/all300.txt"
@@ -202,7 +203,7 @@ class Config(pydra.Config):
 def run(cfg: Config) -> None:
     ids = set(read_ids(Path(cfg.ids)))
     hard = set(read_ids(Path(cfg.hard)))
-    incs = load_incidents(sorted(ids))
+    incs = load_incidents(sorted(ids), cfg.dataset)
     by = load(cfg.out, cfg.eval, ids)
     base = by["transcript"]
     arms = [a for a in sorted(by) if a != "transcript"]

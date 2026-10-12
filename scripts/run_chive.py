@@ -33,7 +33,7 @@ import pydra
 from detective_joracle.agent.backends import async_anthropic_backend
 from detective_joracle.agent.loop import Budget, RunRecord, run_many, run_tool_loop_async
 from detective_joracle.chive import judge as J
-from detective_joracle.chive.data import Incident, load_incidents, read_ids
+from detective_joracle.chive.data import DATASET, Incident, load_incidents, read_ids
 from detective_joracle.chive.executor import Executor
 from detective_joracle.chive.llm import anthropic_client, client, json_call
 from detective_joracle.chive.prompts import (
@@ -257,7 +257,7 @@ def stage_agent(args: Any) -> None:
     ids = read_ids(args.ids)
     if args.choices:  # candidate selection: only incidents that have a candidate set
         ids = [p for p in ids if p in args.choice_rows]
-    incs = load_incidents(ids)
+    incs = load_incidents(ids, args.dataset)
     order = sorted(ids)
     partner = {p: incs[order[(i + len(order) // 2) % len(order)]] for i, p in enumerate(order)}
     arms = [parse_arm(a) for a in args.arm]
@@ -313,7 +313,7 @@ async def _judge_one(path: Path, inc: Incident, key: str, text: str) -> None:
 
 
 def stage_judge(args: Any) -> None:
-    incs = load_incidents(read_ids(args.ids))
+    incs = load_incidents(read_ids(args.ids), args.dataset)
     jobs = []
     for path in records(args.out, args.eval):
         r = json.loads(path.read_text())
@@ -342,7 +342,7 @@ async def item_score(inc: Incident, h: str) -> tuple[float, str] | None:
 
 
 def stage_top20(args: Any) -> None:
-    incs = load_incidents(read_ids(args.ids))
+    incs = load_incidents(read_ids(args.ids), args.dataset)
     d = args.out / "top20"
     d.mkdir(parents=True, exist_ok=True)
 
@@ -388,7 +388,7 @@ def stage_top20(args: Any) -> None:
 
 
 def stage_concluder(args: Any) -> None:
-    incs = load_incidents(read_ids(args.ids))
+    incs = load_incidents(read_ids(args.ids), args.dataset)
 
     async def one(path: Path, inc: Incident, exps: list[dict[str, Any]]) -> None:
         user = (
@@ -697,6 +697,8 @@ class ChiveConfig(pydra.Config):
         self.eval = "readonly"  # eval name: a directory under `out`
         self.ids = pydra.REQUIRED
         self.hard = ""  # ids of the hard stratum (report)
+        # the incidents: an HF dataset id, or a local directory with the same data/ layout
+        self.dataset = DATASET
         self.arms: list[str] = ["transcript"]
         self.draws = 1
         self.experiments = 0

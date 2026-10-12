@@ -21,12 +21,13 @@ import pydra
 
 sys.path.insert(0, str(Path(__file__).parent))
 from analyze_chive import bank_index, bank_text, quote_check  # noqa: E402
-from detective_joracle.chive.data import load_incidents, read_ids  # noqa: E402
+from detective_joracle.chive.data import DATASET, load_incidents, read_ids  # noqa: E402
 
 
 class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
+        self.dataset = DATASET  # HF dataset id or a local directory (see run_chive.py)
         self.out = pydra.REQUIRED
         self.ids = "data/chive/splits/climb_dev96.txt"
         self.hard = "data/chive/splits/hard92.txt"
@@ -54,7 +55,7 @@ def paired(a: dict[str, list[float]], b: dict[str, list[float]]) -> str:
 def main(cfg: Config) -> None:
     ids = set(read_ids(Path(cfg.ids)))
     hard = set(read_ids(Path(cfg.hard)))
-    incs = load_incidents(sorted(ids))
+    incs = load_incidents(sorted(ids), cfg.dataset)
     recs: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     seen: set[Path] = set()
     for f in sorted(cfg.out.glob("climb_*/*/*.d*.json")):
