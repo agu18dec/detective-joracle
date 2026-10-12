@@ -83,7 +83,8 @@ def load_reader(
         cells=by_pos,
         source_id=src.prompt_id,
         n_tokens=inc.n_tokens,
-        coverage_note=str(rec.get("coverage_note", "")),
+        # the note describes the bank's own incident: dropped under the cross-incident control
+        coverage_note="" if partner is not None else str(rec.get("coverage_note", "")),
     )
 
 
@@ -126,8 +127,11 @@ def describe(reader: Reader) -> str:
         else ", ".join(map(str, reader.layers))
     )
     text = DESCRIBE[reader.kind].format(layers=layers, k=reader.k)
-    covered = sum(1 for cell in reader.cells.values() if cell)
-    if reader.n_tokens and covered < reader.n_tokens:
+    covered = sum(1 for cell in reader.cells.values() if any(cell.values()))
+    # the boundary description already says which positions it covers
+    if reader.kind != "boundary" and reader.n_tokens and covered < reader.n_tokens:
+        text = text.replace("exist at every token", "exist at the tokens read")
+        text = text.replace("at every token and", "at the tokens read and")
         note = f" ({reader.coverage_note})" if reader.coverage_note else ""
         text += (
             f" In this conversation readouts exist at only {covered} of {reader.n_tokens} "

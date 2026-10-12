@@ -279,5 +279,8 @@ def test_describe_flags_sparse_readouts(tmp_path: Path) -> None:
     cells = {3: {20: ["a"]}, 5: {20: ["b"]}}
     sparse = Reader("olens_rl", "olens", [20], 1, cells, "p1", n_tokens=16, coverage_note="x")
     assert "only 2 of 16 tokens (x)" in describe(sparse)
+    assert "every token" not in describe(sparse)
+    jl = Reader("jlens", "jlens", [20], 1, cells, "p1", n_tokens=16)
+    assert "every token" not in describe(jl)
     dense = Reader("olens_rl", "olens", [20], 1, {p: {20: ["a"]} for p in range(4)}, "p1", 4)
     assert "only" not in describe(dense)
