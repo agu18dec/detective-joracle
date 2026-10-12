@@ -313,7 +313,7 @@ def heldout_pareto(cfg: Config, test: set[str]) -> None:
                     else:
                         rr, nr = rr + score, nr + 1
             rows[arm][k] = (100 * rr / nr, 100 * kk / nk)
-    fig, axes = plt.subplots(1, 2, figsize=(19, 8))
+    fig, axes = plt.subplots(1, 2, figsize=(19, 7.5), sharex=True, sharey=True)
     for ax, k in zip(axes, (1, 4), strict=True):
         pts = [(rows[a][k][0], rows[a][k][1], a) for a in rows]
         front = sorted(
@@ -326,27 +326,27 @@ def heldout_pareto(cfg: Config, test: set[str]) -> None:
             lw=2,
             ls="--",
             zorder=1,
-            label="Pareto front",
+            label="Pareto front" if k == 4 else None,
         )
         for x, y, a in pts:
             c, _ = TEST_STYLE[a]
-            ax.scatter(x, y, s=170, color=c, edgecolor="white", lw=2, zorder=3)
-            left = a == "nla_B"
-            ax.annotate(
-                label_of[a],
-                (x, y),
-                xytext=(-10 if left else 8, -4 if left else 5),
-                textcoords="offset points",
-                fontsize=12,
-                ha="right" if left else "left",
+            ax.scatter(
+                x,
+                y,
+                s=190,
+                color=c,
+                edgecolor="white",
+                lw=2,
+                zorder=3,
+                label=label_of[a] if k == 4 else None,
             )
         ax.set_title(f"pass@{k}", loc="left")
         ax.set_xlabel("rescue: right where a transcript run was WRONG (%)")
-        ax.set_xlim(10, 80 if k == 4 else 60)
-        ax.set_ylim(80 if k == 4 else 70, 100)
+        ax.set_xlim(15, 75)
+        ax.set_ylim(80, 100)
         ax.grid(alpha=0.3)
     axes[0].set_ylabel("keep: right where a transcript run was RIGHT (%)")
-    axes[1].legend(loc="lower right", frameon=False)
+    axes[1].legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=13)
     fig.suptitle(
         "Held-out keep vs rescue (204 incidents; each scored on the 4 runs not used to "
         "label right/wrong)",
