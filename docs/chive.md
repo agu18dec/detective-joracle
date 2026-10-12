@@ -20,7 +20,7 @@ are in `data/chive/splits/`: `climb_dev96` / `climb_test204` (the harness climb)
 held-out claims). The candidate sets are in `data/chive/choices/`.
 
 **Readouts.** A reader arm reads a precomputed readout file per incident
-(`<bank>/<prompt_id>.json.gz`: `token_ids` plus `cells[pos][layer] = [samples]`). These files
+(`<bank>/<prompt_id>.json.gz`: `token_ids` plus `readouts[layer][pos] = [samples]`). These files
 are not in the dataset. They come from `scripts/chive_bank/readers_modal.py` in the
 global-workspace repo, at these settings: OLens RL (`s3d_rl600`) 4 samples per cell, every
 position, layers 20-60 step 4; NLA 4 samples per cell at L42; J-lens top-10 tokens at every
@@ -33,10 +33,11 @@ uv venv --python 3.12 .venv && uv pip install -e ".[dev,plot]"
 ```
 
 - **Claude:** keyless OAuth through the opsec tunnel (`chive/llm.py`; socket
-  `OP_REMOTE_SOCK`, default `/tmp/.opsec-agam.sock`; `ant auth login` on the Mac). Unset
-  `ANTHROPIC_API_KEY` first: if it is set, even empty, it shadows the token.
+  `OP_REMOTE_SOCK`, default `/tmp/.opsec-agam.sock`; `ant auth login` on the Mac). Run
+  `unset ANTHROPIC_API_KEY` first: a set key is used instead of the keyless token.
 - **Target, for experiments only** (budgets > 0): Qwen3.6-27B on vLLM,
-  `modal deploy scripts/serve_qwen_vllm_modal.py`, then pass its URL as `target=`.
+  `modal deploy scripts/serve_qwen_vllm_modal.py`, then pass its URL as `target=` (required
+  with `experiments > 0`).
   Read-only runs need no GPU.
 
 ## The harness

@@ -32,7 +32,7 @@ class Config(pydra.Config):
         self.hard = "data/chive/splits/hard92.txt"
         self.base = "olens_rl_tfa"
         self.reference = "transcript_cont"
-        self.bank = "/workspace/agam/chive_bank/s3d_rl600_all"  # OLens bank for the quote check
+        self.bank = pydra.REQUIRED  # OLens readout bank, for the quote check
 
     def finalize(self) -> None:
         self.out, self.bank = Path(self.out), Path(self.bank)

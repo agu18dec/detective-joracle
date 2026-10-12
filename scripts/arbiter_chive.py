@@ -63,8 +63,8 @@ async def arbitrate(inc: Incident, a: dict[str, Any], b: dict[str, Any], flip: b
     )
     for model in MODELS:
         got = await json_call(client(), model=model, system=SYSTEM, user=user, schema=SCHEMA)
-        if got:
-            picked_first = got["choice"] == "1"
+        if got and str(got.get("choice")) in ("1", "2"):
+            picked_first = str(got["choice"]) == "1"
             return ("b" if flip else "a") if picked_first else ("a" if flip else "b")
     return None
 
@@ -79,10 +79,12 @@ def mean(per: Table, col: str, sub: set[str] | None = None) -> float:
 
 def paired_diff(per: Table, x: str, y: str, sub: set[str] | None = None) -> str:
     """y minus x, matched by incident, with a 95% bootstrap CI."""
-    ps = [p for p in per[y] if sub is None or p in sub]
+    ps = sorted(p for p in per[y] if p in per[x] and (sub is None or p in sub))
+    if not ps:
+        return "-"
     dd = [sum(per[y][p]) / len(per[y][p]) - sum(per[x][p]) / len(per[x][p]) for p in ps]
-    random.seed(0)
-    bs = sorted(sum(random.choice(dd) for _ in dd) / len(dd) for _ in range(4000))
+    rng = random.Random(0)
+    bs = sorted(sum(rng.choice(dd) for _ in dd) / len(dd) for _ in range(4000))
     return f"{100 * sum(dd) / len(dd):+.1f} [{100 * bs[100]:+.1f}, {100 * bs[3899]:+.1f}]"
 
 

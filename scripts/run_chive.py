@@ -96,10 +96,10 @@ def done(path: Path) -> bool:
         return False
     r = json.loads(path.read_text())
     stop = str(r.get("stopped_by", ""))
-    refused = stop == "idle" and not r.get("result")
-    # "salvaged finish after <API error>": an answer forced when the API failed mid-episode,
-    # a truncated investigation, so it is rerun like an error
-    return not stop.startswith(("error", "salvaged")) and not refused
+    # no final answer (a refusal, or a budget stop after an idle nudge) is rerun, never
+    # silently dropped from pass@1; "salvaged finish after <API error>" is an answer forced
+    # when the API failed mid-episode, a truncated investigation, so it is rerun like an error
+    return bool(r.get("result")) and not stop.startswith(("error", "salvaged"))
 
 
 # --------------------------------------------------------------------------- agent
@@ -496,11 +496,12 @@ def stage_report(args: Any) -> None:
     ) -> str:
         """b minus a, matched by incident (mean over its draws), with a 95% bootstrap CI."""
         t = per if table is None else table
-        common = [p for p in t[a] if p in t[b] and (sub is None or p in sub)]
+        common = sorted(p for p in t[a] if p in t[b] and (sub is None or p in sub))
         if not common:
             return "-"
         d = [sum(t[b][p]) / len(t[b][p]) - sum(t[a][p]) / len(t[a][p]) for p in common]
-        boots = sorted(sum(random.choice(d) for _ in d) / len(d) for _ in range(4000))
+        rng = random.Random(0)
+        boots = sorted(sum(rng.choice(d) for _ in d) / len(d) for _ in range(4000))
         return (
             f"{scale * sum(d) / len(d):+.1f} [{scale * boots[100]:+.1f}, "
             f"{scale * boots[3899]:+.1f}] n={len(common)}"
@@ -697,9 +698,9 @@ class ChiveConfig(pydra.Config):
         self.arms: list[str] = ["transcript"]
         self.draws = 1
         self.experiments = 0
-        # a dedicated copy of the target server (scripts/serve_qwen_vllm_modal.py); the shared
-        # chive-qwen-vllm endpoint queues behind other workloads
-        self.target = "https://safety-sahan-2-agam--chive-forensics-qwen-serve.modal.run"
+        # the Qwen3.6-27B vLLM server for experiments (scripts/serve_qwen_vllm_modal.py prints
+        # its URL); needed only with experiments > 0 or the continue variant
+        self.target = ""
         self.concurrency = 16
         self.max_calls = 50
         self.output_budget = 60_000
@@ -725,6 +726,10 @@ class ChiveConfig(pydra.Config):
             if self.choices
             else {}
         )
+        if (self.experiments or "continue" in self.variants) and not self.target:
+            raise ValueError(
+                "experiments need target=<vLLM URL> (scripts/serve_qwen_vllm_modal.py)"
+            )
         if self.stage not in STAGES:
             raise ValueError(f"stage must be one of {sorted(STAGES)}")
         self.out.mkdir(parents=True, exist_ok=True)

@@ -37,7 +37,7 @@ def mean_of(by: dict[str, dict[str, list[float]]], arm: str, sub: set[str]) -> t
 
 def paired(by: dict[str, dict[str, list[float]]], a: str, b: str, sub: set[str]) -> str:
     """a minus b, matched by incident, with a 95% bootstrap CI ('*' = CI excludes 0)."""
-    ps = [p for p in sub if p in by[a] and p in by[b]]
+    ps = [p for p in sorted(sub) if p in by[a] and p in by[b]]
     if not ps:
         return "-"
     d = [sum(by[a][p]) / len(by[a][p]) - sum(by[b][p]) / len(by[b][p]) for p in ps]
