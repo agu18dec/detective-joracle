@@ -19,16 +19,16 @@ from detective_joracle.chive.data import read_ids  # noqa: E402
 
 # dev arms: label -> (eval dir, arm name)
 DEV = {
-    "OLens, improved harness": ("climb_textfirst_absence", "olens_rl_tfa"),
-    "OLens improved + readout digest": ("climb_tfa_digest", "olens_rl_tfa_digest"),
-    "OLens improved + 1 experiment": ("climb_tfa_experiment", "olens_rl_tfa_exp"),
-    "OLens improved + J-lens tool": ("climb_tfa_jlens", "olens_rl_tfa_jlens"),
-    "OLens improved + continue_from (guided)": ("climb_tfa_continue_guided", "olens_rl_tfa_cont2"),
-    "OLens improved + continue_from": ("climb_textfirst_absence_continue", "olens_rl_tfac"),
-    "OLens improved + boundary readouts": ("climb_tfa_boundary", "olens_rl_tfa_boundary"),
+    "OLens + harness": ("climb_textfirst_absence", "olens_rl_tfa"),
+    "OLens + harness + readout digest": ("climb_tfa_digest", "olens_rl_tfa_digest"),
+    "OLens + harness + 1 experiment": ("climb_tfa_experiment", "olens_rl_tfa_exp"),
+    "OLens + harness + J-lens tool": ("climb_tfa_jlens", "olens_rl_tfa_jlens"),
+    "OLens + harness + continue_from (guided)": ("climb_tfa_continue_guided", "olens_rl_tfa_cont2"),
+    "OLens + harness + continue_from": ("climb_textfirst_absence_continue", "olens_rl_tfac"),
+    "OLens + harness + boundary readouts": ("climb_tfa_boundary", "olens_rl_tfa_boundary"),
     "OLens, original harness": ("climb_textfirst_absence", "olens_rl"),
-    "NLA, improved harness": ("climb_readers_improved", "nla_tfa"),
-    "J-lens, improved harness": ("climb_readers_improved", "jlens_tfa"),
+    "NLA + harness": ("climb_readers_improved", "nla_tfa"),
+    "J-lens + harness": ("climb_readers_improved", "jlens_tfa"),
     "NLA": ("climb_textfirst_absence", "nla"),
     "J-lens": ("climb_textfirst_absence", "jlens"),
     "transcript + 1 experiment": ("climb_tfa_experiment", "transcript_exp"),
@@ -74,7 +74,7 @@ class Config(pydra.Config):
 
 def forest(cfg: Config, dev: set[str]) -> None:
     data = {k: draws(cfg.out, *v, dev) for k, v in DEV.items()}
-    base = data["OLens, improved harness"]
+    base = data["OLens + harness"]
     rows = []
     for label, d in data.items():
         if not d:
@@ -89,7 +89,7 @@ def forest(cfg: Config, dev: set[str]) -> None:
         ax.text(1.02, i, f"{m:.1f}%", transform=ax.get_yaxis_transform(), va="center", fontsize=14)
     ax.axvline(0, color="#444", lw=1.2)
     ax.set_yticks(range(len(rows)), [r[0] for r in rows])
-    ax.set_xlabel("pass@1 minus OLens, improved harness (pp), paired, 95% CI")
+    ax.set_xlabel("pass@1 minus OLens + harness (pp), paired, 95% CI")
     ax.set_title("Harness climb on dev (96 incidents x 2 draws)", loc="left")
     ax.text(
         1.02,
@@ -105,11 +105,11 @@ def forest(cfg: Config, dev: set[str]) -> None:
 
 
 DEV_READERS = {  # label -> (eval dir, arm, style key in TEST_STYLE)
-    "OLens, improved harness": ("climb_textfirst_absence", "olens_rl_tfa", "olens_rl_B"),
+    "OLens + harness": ("climb_textfirst_absence", "olens_rl_tfa", "olens_rl_B"),
     "OLens, original harness": ("climb_textfirst_absence", "olens_rl", "olens_rl"),
-    "NLA, improved harness": ("climb_readers_improved", "nla_tfa", "nla_B"),
+    "NLA + harness": ("climb_readers_improved", "nla_tfa", "nla_B"),
     "NLA, original harness": ("climb_textfirst_absence", "nla", "nla"),
-    "J-lens, improved harness": ("climb_readers_improved", "jlens_tfa", "jlens_B"),
+    "J-lens + harness": ("climb_readers_improved", "jlens_tfa", "jlens_B"),
     "J-lens, original harness": ("climb_textfirst_absence", "jlens", "jlens"),
     "transcript + continue_from": (
         "climb_textfirst_absence_continue",
@@ -121,7 +121,7 @@ DEV_READERS = {  # label -> (eval dir, arm, style key in TEST_STYLE)
 
 
 def keep_rescue(cfg: Config, dev: set[str]) -> None:
-    """Dev: each reader under the original vs the improved harness (tool variants: forest)."""
+    """Dev: each reader under the original vs the harness (tool variants: forest)."""
     tr: dict[tuple[str, int], float] = {}
     for f in (cfg.out / "climb_textfirst_absence" / "transcript").glob("*.json"):
         r = json.loads(f.read_text())
@@ -159,23 +159,23 @@ def keep_rescue(cfg: Config, dev: set[str]) -> None:
     ax.set_ylim(75, 96)
     ax.set_xlabel("rescue: pass@1 where a transcript draw FAILED (%)")
     ax.set_ylabel("keep: pass@1 where a transcript draw PASSED (%)")
-    ax.set_title("Keep vs rescue on dev (circles: improved harness, squares: original)", loc="left")
+    ax.set_title("Keep vs rescue on dev (circles: harness, squares: original)", loc="left")
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(cfg.plots / "climb_dev_keep_rescue.png", dpi=160)
 
 
 TEST_ARMS = {
-    "OLens, improved harness": "olens_rl_B",
+    "OLens + harness": "olens_rl_B",
     "OLens, original harness": "olens_rl",
-    "NLA, improved harness": "nla_B",
+    "NLA + harness": "nla_B",
     "NLA, original harness": "nla",
-    "J-lens, improved harness": "jlens_B",
+    "J-lens + harness": "jlens_B",
     "J-lens, original harness": "jlens",
     "transcript + continue_from": "transcript_cont",
     "transcript": "transcript",
 }
-TEST_STYLE = {  # colour per method; solid = improved harness, dashed = original
+TEST_STYLE = {  # colour per method; solid = harness, dashed = original
     "olens_rl_B": ("#1f6f8b", "-"),
     "olens_rl": ("#1f6f8b", "--"),
     "nla_B": ("#c77d2e", "-"),
@@ -232,9 +232,10 @@ def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
     tr = draws(cfg.out, "climb_test", "transcript", test)
     fig, ax = plt.subplots(figsize=(11, 8.5))
     pts = []
+    best = {"olens_rl_B", "nla_B", "jlens_B", "transcript_cont", "transcript"}  # best settings
     for label, arm in TEST_ARMS.items():
         d = complete(cfg, arm, test)
-        if not d or arm == "transcript" and not tr:
+        if arm not in best or not d or arm == "transcript" and not tr:
             continue
         k = r = nk = nr = 0.0
         for p, v in d.items():
@@ -266,7 +267,17 @@ def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
     ax.set_ylim(70, 100)
     ax.set_xlabel("rescue: pass@1 where a transcript draw FAILED (%)")
     ax.set_ylabel("keep: pass@1 where a transcript draw PASSED (%)")
-    ax.set_title("Keep vs rescue on the held-out test (circles: improved harness)", loc="left")
+    ax.set_title("Keep vs rescue on the held-out test (204 incidents x 5 draws)", loc="left")
+    ax.text(
+        0.01,
+        0.02,
+        "keep = right where the transcript-only agent was right (no harm)\n"
+        "rescue = right where the transcript-only agent was wrong (added value)",
+        transform=ax.transAxes,
+        fontsize=12,
+        color="#444",
+        va="bottom",
+    )
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(cfg.plots / "heldout_keep_rescue.png", dpi=160)

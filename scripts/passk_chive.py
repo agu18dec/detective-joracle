@@ -20,9 +20,9 @@ import pydra
 from detective_joracle.chive.data import read_ids
 
 LABEL = {
-    "olens_rl_B": "OLens, improved harness",
-    "nla_B": "NLA, improved harness",
-    "jlens_B": "J-lens, improved harness",
+    "olens_rl_B": "OLens + harness",
+    "nla_B": "NLA + harness",
+    "jlens_B": "J-lens + harness",
     "olens_rl": "OLens, original harness",
     "nla": "NLA, original harness",
     "jlens": "J-lens, original harness",
