@@ -204,7 +204,12 @@ def schemas(
             "enum": letters,
             "description": "the letter of the candidate cause you conclude is the cause",
         }
-        props["required"] = ["choice", "hypothesis"]
+        props["properties"]["probabilities"] = {
+            "type": "object",
+            "description": "your probability that each candidate is the cause, one entry per "
+            'letter, summing to 1 (e.g. {"A": 0.6, "B": 0.3, "C": 0.1})',
+        }
+        props["required"] = ["choice", "probabilities", "hypothesis"]
     return out
 
 
@@ -467,7 +472,21 @@ class ChiveTools:
                 raise ValueError(f"give `choice`: one of {', '.join(self.letters)}")
             args = {**args, "choice": choice}
             fields += ("choice",)
+            probs = args.get("probabilities")
+            if not isinstance(probs, dict):
+                raise ValueError("give `probabilities`: one probability per candidate letter")
+            vals = {
+                str(k).strip().strip(")").upper(): float(v)
+                for k, v in probs.items()
+                if str(v).replace(".", "", 1).isdigit()
+            }
+            total = sum(max(0.0, v) for k, v in vals.items() if k in self.letters)
+            if total <= 0:
+                raise ValueError("`probabilities` must give positive weight to the candidates")
+            norm = {k: max(0.0, vals.get(k, 0.0)) / total for k in self.letters}
         self.finished = {k: str(args.get(k) or "") for k in fields}
+        if self.letters:
+            self.finished["probabilities"] = norm
         event["missing_fields"] = [k for k in fields if not self.finished[k].strip()]
         return "Submitted."
 

@@ -194,6 +194,15 @@ async def _episode(
         rec.tool_log = tools.log
         if row and tools.finished:
             ok = tools.finished["choice"] == row["truth"]
+            probs = tools.finished.get("probabilities") or {}
+            extra["choice_probs"] = {
+                "p_truth": float(probs.get(row["truth"], 0.0)),
+                "brier": sum(
+                    (float(probs.get(o["letter"], 0.0)) - float(o["letter"] == row["truth"])) ** 2
+                    for o in row["options"]
+                ),
+                "chance": 1 / len(row["options"]),
+            }
             extra["choice_eval"] = {
                 "choice": tools.finished["choice"],
                 "truth": row["truth"],
@@ -612,6 +621,29 @@ def stage_report(args: Any) -> None:
                 vs = paired("transcript", arm, sub) if arm != "transcript" and tr else ""
                 cells.append(f"{m:.1%} (n={n}) {vs}".strip())
             lines.append(f"| {arm} | " + " | ".join(cells) + " |")
+    if args.key == "choice_eval":  # fine-grained: probability on the truth, Brier score
+        cp: dict[str, list[dict[str, float]]] = defaultdict(list)
+        for path in records(args.out, args.eval):
+            r = json.loads(path.read_text())
+            if r["prompt_id"] in ids and r.get("choice_probs"):
+                cp[r["arm"]].append(r["choice_probs"])
+        if cp:
+            lines += [
+                "",
+                "## Fine-grained: probability on the true cause",
+                "",
+                "| arm | episodes | mean p(truth) | mean chance | p(truth) / chance | Brier "
+                "(lower is better) |",
+                "|---|---|---|---|---|---|",
+            ]
+            for arm in sorted(cp):
+                xs = cp[arm]
+                pt = sum(x["p_truth"] for x in xs) / len(xs)
+                ch = sum(x["chance"] for x in xs) / len(xs)
+                br = sum(x["brier"] for x in xs) / len(xs)
+                lines.append(
+                    f"| {arm} | {len(xs)} | {pt:.3f} | {ch:.3f} | {pt / ch:.2f} | {br:.3f} |"
+                )
     lists = {}  # the transcript-only top-20: what is conceivable from the text alone
     for f in (args.out / "top20").glob("*.json"):
         t = json.loads(f.read_text())

@@ -153,12 +153,26 @@ def test_candidate_selection(tmp_path: Path) -> None:
     first = seed(inc, cands)
     assert "## Candidate causes" in first and "B) poems are sad by default" in first
     sub = schemas(None, 0, ["A", "B"])[-1]["function"]["parameters"]
-    assert sub["required"] == ["choice", "hypothesis"] and sub["properties"]["choice"]["enum"]
+    assert sub["required"] == ["choice", "probabilities", "hypothesis"]
     tools = ChiveTools(inc, None, letters=["A", "B"])
     backend = FakeBackend(
         [
             ("", [(SUBMIT, {"hypothesis": "rain", "choice": "C"})], 10),  # invalid: ERROR, continue
-            ("", [(SUBMIT, {"hypothesis": "rain cues sadness", "choice": "a)"})], 10),
+            ("", [(SUBMIT, {"hypothesis": "rain", "choice": "A"})], 10),  # no probabilities: ERROR
+            (
+                "",
+                [
+                    (
+                        SUBMIT,
+                        {
+                            "hypothesis": "rain cues sadness",
+                            "choice": "a)",
+                            "probabilities": {"A": 3, "B": 1},
+                        },
+                    )
+                ],
+                10,
+            ),
         ],
         terminal=SUBMIT,
     )
@@ -176,7 +190,8 @@ def test_candidate_selection(tmp_path: Path) -> None:
         )
     )
     assert tools.finished and tools.finished["choice"] == "A"
-    assert tools.events[0].get("error")
+    assert tools.finished["probabilities"] == {"A": 0.75, "B": 0.25}  # normalised
+    assert tools.events[0].get("error") and tools.events[1].get("error")
 
 
 def test_position_shuffle_control(tmp_path: Path) -> None:

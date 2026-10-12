@@ -150,7 +150,7 @@ def seed(
     )
     task = (
         "Decide which candidate is the cause, then call submit_hypothesis with its letter "
-        "as `choice`."
+        "as `choice` and your probability for every candidate as `probabilities`."
         if candidates
         else "Find the feature that drives the behaviour, then call submit_hypothesis."
     )

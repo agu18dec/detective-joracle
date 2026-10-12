@@ -26,11 +26,8 @@ DEV = {
     "OLens + harness + continue_from (guided)": ("climb_tfa_continue_guided", "olens_rl_tfa_cont2"),
     "OLens + harness + continue_from": ("climb_textfirst_absence_continue", "olens_rl_tfac"),
     "OLens + harness + boundary readouts": ("climb_tfa_boundary", "olens_rl_tfa_boundary"),
-    "OLens, original harness": ("climb_textfirst_absence", "olens_rl"),
     "NLA + harness": ("climb_readers_improved", "nla_tfa"),
     "J-lens + harness": ("climb_readers_improved", "jlens_tfa"),
-    "NLA": ("climb_textfirst_absence", "nla"),
-    "J-lens": ("climb_textfirst_absence", "jlens"),
     "transcript + 1 experiment": ("climb_tfa_experiment", "transcript_exp"),
     "transcript + continue_from": ("climb_textfirst_absence_continue", "transcript_cont"),
     "transcript": ("climb_textfirst_absence", "transcript"),
@@ -106,11 +103,8 @@ def forest(cfg: Config, dev: set[str]) -> None:
 
 DEV_READERS = {  # label -> (eval dir, arm, style key in TEST_STYLE)
     "OLens + harness": ("climb_textfirst_absence", "olens_rl_tfa", "olens_rl_B"),
-    "OLens, original harness": ("climb_textfirst_absence", "olens_rl", "olens_rl"),
     "NLA + harness": ("climb_readers_improved", "nla_tfa", "nla_B"),
-    "NLA, original harness": ("climb_textfirst_absence", "nla", "nla"),
     "J-lens + harness": ("climb_readers_improved", "jlens_tfa", "jlens_B"),
-    "J-lens, original harness": ("climb_textfirst_absence", "jlens", "jlens"),
     "transcript + continue_from": (
         "climb_textfirst_absence_continue",
         "transcript_cont",
@@ -159,7 +153,7 @@ def keep_rescue(cfg: Config, dev: set[str]) -> None:
     ax.set_ylim(75, 96)
     ax.set_xlabel("rescue: pass@1 where a transcript draw FAILED (%)")
     ax.set_ylabel("keep: pass@1 where a transcript draw PASSED (%)")
-    ax.set_title("Keep vs rescue on dev (circles: harness, squares: original)", loc="left")
+    ax.set_title("Keep vs rescue on dev (96 incidents x 2 draws)", loc="left")
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(cfg.plots / "climb_dev_keep_rescue.png", dpi=160)
@@ -167,11 +161,9 @@ def keep_rescue(cfg: Config, dev: set[str]) -> None:
 
 TEST_ARMS = {
     "OLens + harness": "olens_rl_B",
-    "OLens, original harness": "olens_rl",
+    "OLens + harness, other question's readouts": "olens_rl_B_otherq",
     "NLA + harness": "nla_B",
-    "NLA, original harness": "nla",
     "J-lens + harness": "jlens_B",
-    "J-lens, original harness": "jlens",
     "transcript + continue_from": "transcript_cont",
     "transcript": "transcript",
 }
@@ -232,7 +224,7 @@ def heldout_keep_rescue(cfg: Config, test: set[str]) -> None:
     tr = draws(cfg.out, "climb_test", "transcript", test)
     fig, ax = plt.subplots(figsize=(11, 8.5))
     pts = []
-    best = {"olens_rl_B", "nla_B", "jlens_B", "transcript_cont", "transcript"}  # best settings
+    best = {"olens_rl_B", "nla_B", "jlens_B", "transcript_cont", "transcript", "olens_rl_B_otherq"}
     for label, arm in TEST_ARMS.items():
         d = complete(cfg, arm, test)
         if arm not in best or not d or arm == "transcript" and not tr:

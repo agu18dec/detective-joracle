@@ -28,6 +28,7 @@ LABEL = {
     "jlens": "J-lens, original harness",
     "transcript": "transcript only",
     "transcript_cont": "transcript + continue_from",
+    "olens_rl_B_otherq": "OLens + harness, other question's readouts",
 }
 
 
