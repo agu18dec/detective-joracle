@@ -57,7 +57,10 @@ class Incident:
 
 
 def fetch(config: str, dataset: str = DATASET) -> Path:
-    """Path to `data/<config>.jsonl` of the dataset, downloaded on first use."""
+    """Path to `data/<config>.jsonl` of the dataset: a local directory in that layout, or an HF
+    dataset id, downloaded on first use."""
+    if Path(dataset).is_dir():
+        return Path(dataset) / "data" / f"{config}.jsonl"
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     path = cache / "detective_joracle" / dataset / f"{config}.jsonl"
     if not path.exists():
