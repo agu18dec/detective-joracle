@@ -27,6 +27,8 @@ DEV = {
     "OLens improved + continue_from": ("climb_textfirst_absence_continue", "olens_rl_tfac"),
     "OLens improved + boundary readouts": ("climb_tfa_boundary", "olens_rl_tfa_boundary"),
     "OLens, original harness": ("climb_textfirst_absence", "olens_rl"),
+    "NLA, improved harness": ("climb_readers_improved", "nla_tfa"),
+    "J-lens, improved harness": ("climb_readers_improved", "jlens_tfa"),
     "NLA": ("climb_textfirst_absence", "nla"),
     "J-lens": ("climb_textfirst_absence", "jlens"),
     "transcript + 1 experiment": ("climb_tfa_experiment", "transcript_exp"),
@@ -102,14 +104,30 @@ def forest(cfg: Config, dev: set[str]) -> None:
     fig.savefig(cfg.plots / "climb_dev_forest.png", dpi=160)
 
 
+DEV_READERS = {  # label -> (eval dir, arm, style key in TEST_STYLE)
+    "OLens, improved harness": ("climb_textfirst_absence", "olens_rl_tfa", "olens_rl_B"),
+    "OLens, original harness": ("climb_textfirst_absence", "olens_rl", "olens_rl"),
+    "NLA, improved harness": ("climb_readers_improved", "nla_tfa", "nla_B"),
+    "NLA, original harness": ("climb_textfirst_absence", "nla", "nla"),
+    "J-lens, improved harness": ("climb_readers_improved", "jlens_tfa", "jlens_B"),
+    "J-lens, original harness": ("climb_textfirst_absence", "jlens", "jlens"),
+    "transcript + continue_from": (
+        "climb_textfirst_absence_continue",
+        "transcript_cont",
+        "transcript_cont",
+    ),
+    "transcript": ("climb_textfirst_absence", "transcript", "transcript"),
+}
+
+
 def keep_rescue(cfg: Config, dev: set[str]) -> None:
+    """Dev: each reader under the original vs the improved harness (tool variants: forest)."""
     tr: dict[tuple[str, int], float] = {}
     for f in (cfg.out / "climb_textfirst_absence" / "transcript").glob("*.json"):
         r = json.loads(f.read_text())
         tr[(r["prompt_id"], int(r["seed"]))] = float(r["judge"]["pass"])
     fig, ax = plt.subplots(figsize=(11, 8.5))
-    pts: list[tuple[float, float, str, str]] = []
-    for label, (ev, arm) in DEV.items():
+    for label, (ev, arm, style) in DEV_READERS.items():
         k = rr = nk = nr = 0.0
         for f in (cfg.out / ev / arm).glob("*.json"):
             r = json.loads(f.read_text())
@@ -124,32 +142,24 @@ def keep_rescue(cfg: Config, dev: set[str]) -> None:
                 rr, nr = rr + r["judge"]["pass"], nr + 1
         if not nk:
             continue
-        c = OLENS if label.startswith("OLens") else OTHER
-        pts.append((100 * rr / nr, 100 * k / nk, label, c))
-    groups: dict[tuple[float, float], list[str]] = defaultdict(list)
-    colors: dict[tuple[float, float], str] = {}
-    for x, y, label, c in pts:  # identical points share one label
-        groups[(round(x, 1), round(y, 1))].append(label)
-        colors.setdefault((round(x, 1), round(y, 1)), c)
-    placed: list[tuple[float, float]] = []
-    for (x, y), labels in groups.items():
-        ax.scatter(x, y, s=140, color=colors[(x, y)], edgecolor="white", lw=2, zorder=3)
-        near = any(abs(x - px) < 3.0 and abs(y - py) < 0.8 for px, py in placed)
-        crowded_right = any(0 < gx - x < 9 and abs(gy - y) < 0.6 for gx, gy in groups)
-        ax.annotate(
-            " = ".join(labels),
-            (x, y),
-            xytext=(-7 if crowded_right else 7, -16 if near else 5),
-            textcoords="offset points",
-            fontsize=12,
-            ha="right" if crowded_right else "left",
+        c, _ = TEST_STYLE[style]
+        x, y = 100 * rr / nr, 100 * k / nk
+        ax.scatter(
+            x,
+            y,
+            s=170,
+            color=c,
+            edgecolor="white",
+            lw=2,
+            zorder=3,
+            marker="s" if "original" in label else "o",
         )
-        placed.append((x, y))
-    xs = [x for x, _ in groups]
-    ax.set_xlim(min(xs) - 7, max(xs) + 12)  # room for labels on both sides
+        ax.annotate(label, (x, y), xytext=(9, -4), textcoords="offset points", fontsize=12)
+    ax.set_xlim(10, 50)
+    ax.set_ylim(75, 96)
     ax.set_xlabel("rescue: pass@1 where a transcript draw FAILED (%)")
     ax.set_ylabel("keep: pass@1 where a transcript draw PASSED (%)")
-    ax.set_title("Keep vs rescue on dev (up and right is better)", loc="left")
+    ax.set_title("Keep vs rescue on dev (circles: improved harness, squares: original)", loc="left")
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(cfg.plots / "climb_dev_keep_rescue.png", dpi=160)
