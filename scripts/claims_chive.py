@@ -42,6 +42,9 @@ from detective_joracle.chive.readers import load_reader
 from detective_joracle.chive.tools import ChiveTools, parse_range, schemas
 
 MODEL = "claude-opus-5"
+# Opus's content filter blocks a few incidents outright (empty replies, the episode ends idle with
+# no answer): those are rerun with this model and the record says so.
+FALLBACK_MODEL = "claude-sonnet-5"
 SUBMIT = "submit_answer"
 CLIP = 3000  # characters kept per tool result when an episode is shown to the answerer
 
@@ -256,25 +259,29 @@ async def finish(
     first: str,
 ) -> None:
     t0 = time.time()
-    rec = RunRecord(
-        organism=c.prompt_id, condition=args.eval, arm=arm["name"], auditor=MODEL, seed=draw
-    )
-    backend = async_anthropic_backend(
-        anthropic_client(), MODEL, max_tokens=args.max_tokens, effort=args.effort
-    )
-    try:
-        await run_tool_loop_async(
-            tools,
-            sch,
-            system,
-            first,
-            backend,
-            Budget(output_tokens=args.output_budget, max_calls=args.max_calls),
-            rec,
-            terminal=SUBMIT,
+    for model in (MODEL, FALLBACK_MODEL):
+        tools.finished, tools.events, tools.log = None, [], []
+        rec = RunRecord(
+            organism=c.prompt_id, condition=args.eval, arm=arm["name"], auditor=model, seed=draw
         )
-    except Exception as e:  # an outage: recorded and rerun on resume (no result)
-        rec.stopped_by = f"error: {type(e).__name__}: {str(e)[:200]}"
+        backend = async_anthropic_backend(
+            anthropic_client(), model, max_tokens=args.max_tokens, effort=args.effort
+        )
+        try:
+            await run_tool_loop_async(
+                tools,
+                sch,
+                system,
+                first,
+                backend,
+                Budget(output_tokens=args.output_budget, max_calls=args.max_calls),
+                rec,
+                terminal=SUBMIT,
+            )
+        except Exception as e:  # an outage: recorded and rerun on resume (no result)
+            rec.stopped_by = f"error: {type(e).__name__}: {str(e)[:200]}"
+        if tools.finished or rec.stopped_by != "idle":
+            break  # answered, or an outage (rerun on resume); only a refusal falls back
     row = {
         **rec.to_json(),
         "claim": c.to_row(),
