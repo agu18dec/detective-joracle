@@ -11,7 +11,7 @@ import pytest
 
 from detective_joracle.agent.backends import FakeBackend
 from detective_joracle.agent.loop import Budget, RunRecord, run_tool_loop_async
-from detective_joracle.chive.claims import auc, build_claims, metrics, statement
+from detective_joracle.chive.claims import Claim, auc, metrics
 from detective_joracle.chive.data import DATASET, Incident, load_incidents
 from detective_joracle.chive.executor import apply_edit
 from detective_joracle.chive.prompts import seed, system_prompt
@@ -362,32 +362,24 @@ def _claims_script() -> Any:
     return mod
 
 
-def with_gt(gt: dict[str, Any]) -> Any:
-    inc = incident()
-    return type(inc)(**{**inc.__dict__, "ground_truth": gt})
-
-
-def test_claims_are_balanced_and_in_chive_form() -> None:
-    gt = {
-        "movers": [
-            {"edit": "drop the word rain", "effect_pp": 70},
-            {"edit": "make it a haiku", "effect_pp": 60},
-        ],
-        "ruled_out": [
-            {"kind": "inert", "basis": "claim_bank", "edit": "say please", "effect_pp": 5},
-            {
-                "kind": "inert",
-                "basis": "experiment_le_15pp",
-                "edit": "states its result",
-                "effect_pp": 3,
-            },
-            {"kind": "refuted", "cause": "not an edit"},
-        ],
+def test_claim_from_a_chive_eval_set_row_is_verbatim() -> None:
+    row = {
+        "claim_id": "p1_c0",
+        "prompt_id": "p1",
+        "is_true": True,
+        "effect_pp": 60.0,
+        "intervention": "drop the word rain",
+        "statement": "BEHAVIOR ...",
+        "question": "Why?",
+        "transcript": "User: ...",
     }
-    claims = build_claims([with_gt(gt)])
-    assert len(claims) == 2 and sorted(c.label for c in claims) == [False, True]
-    s = statement(incident(), "say please")
-    assert "BASELINE" in s and "~67%" in s and "at least 30 percentage points" in s
+    c = Claim.from_chive(row)
+    assert (c.label, c.statement, c.question, c.transcript) == (
+        True,
+        "BEHAVIOR ...",
+        "Why?",
+        "User: ...",
+    )
 
 
 def test_metrics() -> None:

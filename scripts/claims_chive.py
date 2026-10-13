@@ -1,7 +1,7 @@
 """CHIVE's binary claim eval: one claim, one answer (P(true)); see chive/claims.py for the claims.
 
 Stages (resumable; records under <out>/<eval>/<arm>/):
-  build   the balanced claim set -> claims= (jsonl)
+  build   CHIVE's own eval sets (eval_sets=), restricted to incidents with readouts -> claims=
   agent   one FOCUSED episode per claim and draw: the investigator, with one method (transcript or
           a reader), answers only this claim. Before it may submit it must name the tokens the
           intervention changes (`edited_positions`) and have looked at them: show_tokens for
@@ -34,10 +34,10 @@ import pydra
 
 from detective_joracle.agent.backends import async_anthropic_backend
 from detective_joracle.agent.loop import Budget, RunRecord, run_many, run_tool_loop_async
-from detective_joracle.chive.claims import Claim, Scored, build_claims, metrics, paired
+from detective_joracle.chive.claims import Claim, Scored, metrics, paired
 from detective_joracle.chive.data import DATASET, Incident, load_incidents, read_ids
 from detective_joracle.chive.llm import anthropic_client
-from detective_joracle.chive.prompts import ABSENCE, EARLIER_TURNS, method_section
+from detective_joracle.chive.prompts import method_section
 from detective_joracle.chive.readers import load_reader
 from detective_joracle.chive.tools import ChiveTools, parse_range, schemas
 
@@ -48,49 +48,61 @@ FALLBACK_MODEL = "claude-sonnet-5"
 SUBMIT = "submit_answer"
 CLIP = 3000  # characters kept per tool result when an episode is shown to the answerer
 
-FRAMING = """## Your task
-You will see a conversation with a target model, a behaviour in its response, and a SINGLE \
-claim asserting one specific causal fact about that behaviour: that one intervention on the \
-conversation would change how often the behaviour occurs. The claim is either true or false; \
-the ground truth was established by re-running the model on the intervened conversation. \
-Estimate, as a calibrated probability, how likely the claim is to be TRUE.
-Calibration: across the claims in this eval, true and false are EQUALLY common, so a claim \
-you cannot adjudicate should sit near 0.5; do not anchor below it by default, and do not treat \
-a claim sounding plausible as a reason for suspicion. Use the full 0-1 range. Weigh the \
-strongest case that it is TRUE and the strongest case that it is FALSE before deciding."""
+# CHIVE's own prompts, verbatim (adamkarvonen/chive, chive/binary_eval/run_binary_eval.py)
+PLAIN_SYSTEM = """You are shown a transcript of a language model's behavior, a question about why it behaved that way, and a SINGLE claim asserting one specific causal fact about that behavior. The claim may or may not be correct. Your job is to estimate, as a calibrated probability, how likely the claim is to be TRUE.
 
-FOCUS = """## How to answer
-Your only job is this one claim. First find the exact tokens of the conversation that the \
-intervention changes (show_tokens). {look} Ask what the model does with those tokens: does the \
-behaviour depend on them, or would it happen anyway? Then call submit_answer with \
-`edited_positions` (the t-range the intervention changes), your reasoning, and \
-`probability_true`."""
+The ground truth was established by counterfactual experiments (re-running the model under controlled changes) that you cannot see. Reason from the transcript and from what you know about how language models actually behave.
+
+Calibration is as important as direction:
+- Across the claims in this set, true and false claims are EQUALLY common. A claim you genuinely cannot adjudicate should sit near 0.5; do not anchor below it by default.
+- "Plausible" is not a reason for suspicion. A claim sounding reasonable is weak evidence it is TRUE, not a trap to be marked down. Be willing to go well above 0.5 when the transcript and your knowledge of LLMs support the claim.
+- Use the full 0-1 range: near 1 when you are confident the claim is true, near 0 when confident it is false."""
+
+PLAIN_PROMPT = """Transcript:
+{transcript}
+
+Question: {question}
+
+Claim:
+{statement}
+
+Is this claim true? In your reasoning, weigh the strongest case that it is TRUE and the strongest case that it is FALSE before deciding. Then call the `answer` tool with your calibrated probability that the claim is true."""
+
+AGENT_TASK_FRAMING = (
+    "## Your task\n"
+    "You will see a transcript of a target model's behavior, a question about it, and a "
+    "SINGLE claim asserting one specific causal fact about that behavior. The claim is either "
+    "true or false. Use your tools to gather internal evidence that bears on it, then call "
+    "`submit_answer` with your calibrated probability that the claim is TRUE.\n"
+    "You have a limited number of investigation turns — gather what you need efficiently and "
+    "be sure to call `submit_answer` before you run out.\n"
+    "Calibration: across the claims in this eval, true and false are EQUALLY common, so a claim "
+    "you cannot adjudicate should sit near 0.5 — do not anchor below it by default, and do not "
+    "treat a claim sounding plausible as a reason for suspicion. Use the full 0-1 range."
+)
+
+# Ours (the user asked for the agent to look at the edited tokens before answering):
+FOCUS = """## Before you answer
+First find the exact tokens of the conversation that the intervention changes (show_tokens). \
+{look} Then call submit_answer with `edited_positions` (the t-range the intervention changes), \
+your reasoning, and `probability_true`."""
 LOOK = {
     "transcript": "Read them and their surroundings closely.",
     "reader": "Then inspect the readouts AT those tokens and at the template tokens right before "
-    "the response: is the model's reading of them part of what produces the behaviour?",
+    "the response.",
 }
 
-ANSWER_SYSTEM = """You are shown a conversation with a target model, a behaviour in its \
-response, and a SINGLE claim asserting one specific causal fact about that behaviour. The claim \
-may or may not be correct; the ground truth was established by counterfactual experiments \
-(re-running the model under controlled changes). Estimate, as a calibrated probability, how \
-likely the claim is to be TRUE.
-{episode}Calibration: across the claims in this eval, true and false are EQUALLY common, so a \
-claim you cannot adjudicate should sit near 0.5; do not anchor below it by default. Use the full \
-0-1 range. Weigh the strongest case for TRUE and for FALSE, then call submit_answer."""
-EPISODE_NOTE = """You also get the full record of an independent investigation of this \
-incident by another agent, which did not see the claim: its tool calls and their results, the \
-experiment it ran on the target model (a real measurement) and its conclusion. Use what is \
-relevant as evidence; it may be wrong.
-"""
+# Two-agent: the plain answerer, also shown another agent's whole investigation of the incident.
+EPISODE_NOTE = """
+
+You also see the full record of an independent investigation of this incident by another agent, which did not see the claim: its tool calls, their results and its conclusion. Use what is relevant as evidence; it may be wrong."""
 
 
 GAP_NOTE = """The ground truth: a TRUE claim's intervention moved the behaviour rate by 50 points \
 or more; a FALSE claim's moved it by 15 points or less. Nothing lies in between."""
 
 
-def submit_schema(focused: bool) -> dict[str, Any]:
+def submit_schema(focused: bool, name: str = SUBMIT) -> dict[str, Any]:
     props: dict[str, Any] = {
         "probability_true": {"type": "number", "description": "P(claim is true), in [0, 1]"},
         "reasoning": {"type": "string"},
@@ -104,8 +116,9 @@ def submit_schema(focused: bool) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
-            "name": SUBMIT,
-            "description": "Your final answer: the probability that the claim is true.",
+            "name": name,
+            "description": "Submit your final answer once you have investigated. You MUST provide "
+            "probability_true (a number in [0, 1]); it is the answer itself.",
             "parameters": {"type": "object", "properties": props, "required": req},
         },
     }
@@ -119,9 +132,10 @@ class ClaimTools(ChiveTools):
     """The method's tools plus submit_answer, gated on having looked at the edited tokens."""
 
     focused: bool = True
+    submit_name: str = SUBMIT
 
     async def call(self, name: str, args: dict[str, Any]) -> str:
-        if name != SUBMIT:
+        if name != self.submit_name:
             return await super().call(name, args)
         p = args.get("probability_true")
         if not isinstance(p, int | float) or not 0 <= float(p) <= 1:
@@ -142,19 +156,6 @@ class ClaimTools(ChiveTools):
                 )
         self.finished = {**args, "probability_true": float(p)}
         return "answer recorded"
-
-
-def incident_text(inc: Incident) -> str:
-    convo = "\n\n".join(
-        f"T{i + 1} [{m['role']}]:\n{m['content']}" for i, m in enumerate(inc.messages)
-    )
-    earlier = any(m["role"] == "assistant" for m in inc.messages)
-    return (
-        f"## The incident\nThe target model was run {inc.n} times on this conversation; in "
-        f"{inc.k} of {inc.n} runs its response showed the behaviour below.\n\n## Conversation\n"
-        f"{convo}\n\n## The response (one run where the behaviour occurred)\n{inc.completion}\n\n"
-        + (f"{EARLIER_TURNS}\n\n" if earlier else "")
-    )
 
 
 def render_episode(rec: dict[str, Any]) -> str:
@@ -217,15 +218,16 @@ async def focused_episode(
         submit_schema(True)
     ]
     system = "\n\n".join(
-        [FRAMING, method_section(reader)]
-        + ([ABSENCE] if reader is not None else [])
+        [AGENT_TASK_FRAMING, method_section(reader)]
         + [FOCUS.format(look=LOOK["transcript" if reader is None else "reader"])]
         + ([GAP_NOTE] if args.gap_note else [])
     )
-    first = (
-        incident_text(inc)
-        + f"## Claim (estimate the probability this is TRUE)\n{c.statement}\n\nPositions are "
-        f"tokens t0..t{inc.n_tokens - 1}; the response starts at t{inc.response_start}."
+    first = (  # CHIVE's agent seed: the transcript, the question, the claim
+        f"The target model's transcript:\n\n{c.transcript}\n\nPositions are tokens "
+        f"t0..t{inc.n_tokens - 1} (show_tokens gives them); the response starts at "
+        f"t{inc.response_start}.\n\nQuestion: {c.question}\n\nClaim (estimate the probability "
+        f"this is TRUE):\n{c.statement}\n\nInvestigate with your tools, then call submit_answer "
+        "with your calibrated probability that the claim is true."
     )
     await finish(args, arm, c, draw, path, tools, sch, system, first)
 
@@ -235,16 +237,16 @@ async def answer_episode(
 ) -> None:
     path = rec_path(args.out, args.eval, arm["name"], c.claim_id, draw)
     tools = ClaimTools(inc, None)
-    tools.focused = False
-    system = ANSWER_SYSTEM.format(episode=EPISODE_NOTE if episode else "")
+    tools.focused, tools.submit_name = False, "answer"  # CHIVE's plain answerer calls `answer`
+    system = PLAIN_SYSTEM + (EPISODE_NOTE if episode else "")
     if args.gap_note:
-        system += "\n" + GAP_NOTE
-    first = (
-        incident_text(inc)
-        + (f"## The independent investigation\n{episode}\n\n" if episode else "")
-        + f"## Claim (estimate the probability this is TRUE)\n{c.statement}"
+        system += "\n\n" + GAP_NOTE
+    transcript = c.transcript + (
+        f"\n\nIndependent investigation of this incident:\n{episode}" if episode else ""
     )
-    await finish(args, arm, c, draw, path, tools, [submit_schema(False)], system, first)
+    first = PLAIN_PROMPT.format(transcript=transcript, question=c.question, statement=c.statement)
+    sch = [submit_schema(False, "answer")]
+    await finish(args, arm, c, draw, path, tools, sch, system, first)
 
 
 async def finish(
@@ -276,7 +278,7 @@ async def finish(
                 backend,
                 Budget(output_tokens=args.output_budget, max_calls=args.max_calls),
                 rec,
-                terminal=SUBMIT,
+                terminal=tools.submit_name,
             )
         except Exception as e:  # an outage: recorded and rerun on resume (no result)
             rec.stopped_by = f"error: {type(e).__name__}: {str(e)[:200]}"
@@ -307,8 +309,14 @@ def load_claims(path: Path) -> list[Claim]:
 
 
 def stage_build(args: Any) -> None:
-    incs = load_incidents(read_ids(args.ids), args.dataset)
-    claims = build_claims(list(incs.values()), seed=args.seed)
+    """CHIVE's own eval sets (claim bank -> concreteness >= 3 -> balanced), restricted to the
+    incidents this dataset has (the readers' banks cover them), so every arm scores one set."""
+    have = set(read_ids(args.ids))
+    rows = [json.loads(line) for f in args.eval_sets for line in Path(f).open()]
+    claims = [Claim.from_chive(r) for r in rows if r["prompt_id"] in have]
+    print(
+        f"{len(rows)} CHIVE claims; {len(rows) - len(claims)} dropped (incident not in {args.ids})"
+    )
     args.claims.parent.mkdir(parents=True, exist_ok=True)
     args.claims.write_text(
         "".join(json.dumps(c.to_row(), ensure_ascii=False) + "\n" for c in claims)
@@ -423,7 +431,11 @@ class Config(pydra.Config):
         super().__init__()
         self.stage = pydra.REQUIRED  # build | agent | answer | report
         self.claims = "data/chive/claims/claims300.jsonl"
-        self.ids = "data/chive/splits/all300.txt"  # build
+        self.ids = "data/chive/splits/all300.txt"  # build: the incidents with readout banks
+        self.eval_sets: list[str] = [  # build: CHIVE's eval sets (build_eval_set.py output)
+            "/workspace/agam/chive/data/runs/qwen3p6_27b_pilot/eval_set_conc3_n1000.jsonl",
+            "/workspace/agam/chive/data/runs/qwen3p6_27b_run2/eval_set_conc3_n1000.jsonl",
+        ]
         self.dataset = DATASET
         self.seed = 0
         self.out = "runs/claims"

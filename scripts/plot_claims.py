@@ -21,10 +21,8 @@ import pydra  # noqa: E402
 from detective_joracle.chive.claims import auc  # noqa: E402
 
 SETTINGS = [  # (eval dir, label)
-    ("plain", "plain answerer\n(no tools)"),
     ("focused", "focused episode\nper claim"),
-    ("two_agent_ro", "two-agent:\nA read-only"),
-    ("two_agent", "two-agent:\nA + 1 experiment"),
+    ("two_agent_ro", "two-agent: B answers from\nA's read-only investigation"),
 ]
 METHODS = {  # arm name per setting -> method
     "plain": "transcript",
@@ -36,14 +34,12 @@ METHODS = {  # arm name per setting -> method
     "nla_A": "NLA",
     "jlens": "J-lens",
     "jlens_A": "J-lens",
-    "olens_rl_otherq": "OLens, other incident's readouts",
 }
 COLOR = {
     "transcript": "#9a9a9a",
     "OLens": "#1f6f8b",
     "NLA": "#c77d2e",
     "J-lens": "#7a5ea8",
-    "OLens, other incident's readouts": "#bfdbe5",
 }
 plt.rcParams.update({"font.size": 14, "axes.titlesize": 16, "axes.labelsize": 15})
 
@@ -102,7 +98,7 @@ def main(cfg: Config) -> None:
     ranked = sorted(conf, key=lambda p: conf[p]["top_p"])
     low = set(ranked[: len(ranked) // 3])
     data = {ev: load(cfg.out, ev) for ev, _ in SETTINGS}
-    plain = data["plain"]["plain"]
+    plain = load(cfg.out, "plain")["plain"]  # defines the misread claims; not plotted
     misread = [c for c, v in plain.items() if 0 in v and (v[0][0] >= 0.5) != v[0][1]]
     all_ids = [c["claim_id"] for c in claims]
     strata = {
