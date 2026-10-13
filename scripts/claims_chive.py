@@ -91,6 +91,18 @@ LOOK = {
     "reader": "Then inspect the readouts AT those tokens and at the template tokens right before "
     "the response.",
 }
+# v2 (failure analysis of v1): readouts describe the ORIGINAL prompt only, so they cannot show
+# that an edit would not matter; restrict what they may be used for.
+LOOK_V2 = (
+    "Then inspect the readouts at those tokens. They describe how the model read the ORIGINAL "
+    "conversation only: use them for what the model knows or noticed, how it parses an ambiguous "
+    "token, and whether it registered the cue the intervention removes or adds. Do NOT infer that "
+    "an edit will not matter because a concept also appears at other positions or in the plan, "
+    "or that it will matter because the edited span encodes something relevant: readouts cannot "
+    "show what the model does without that span. Before relying on a readout, ask: would it look "
+    "different if the claim were false? Lines marked [not in the conversation: ...] name details "
+    "the verbalizer borrowed from similar contexts; do not read them as the model's content."
+)
 
 # Two-agent: the plain answerer, also shown another agent's whole investigation of the incident.
 EPISODE_NOTE = """
@@ -213,13 +225,19 @@ async def focused_episode(
             arm["name"], arm["kind"], arm["bank"], inc, partner if arm["shuffled"] else None
         )
     )
-    tools = ClaimTools(inc, reader)
+    tools = ClaimTools(inc, reader, subst_flag=args.look == "v2")
     sch = [s for s in schemas(reader, 0) if name_of(s) != "submit_hypothesis"] + [
         submit_schema(True)
     ]
     system = "\n\n".join(
         [AGENT_TASK_FRAMING, method_section(reader)]
-        + [FOCUS.format(look=LOOK["transcript" if reader is None else "reader"])]
+        + [
+            FOCUS.format(
+                look=LOOK["transcript"]
+                if reader is None
+                else (LOOK_V2 if args.look == "v2" else LOOK["reader"])
+            )
+        ]
         + ([GAP_NOTE] if args.gap_note else [])
     )
     first = (  # CHIVE's agent seed: the transcript, the question, the claim
@@ -451,6 +469,7 @@ class Config(pydra.Config):
         self.confidence = ""  # report: confidence_chive.py's confidence.json
         self.hard = "data/chive/splits/hard92.txt"
         self.reference = "transcript"
+        self.look = "v1"  # focused readers: v1 = "inspect AT those tokens"; v2 = restricted use
         self.gap_note = False  # wording ablation: also state the >= 50 / <= 15 point gap
 
     def finalize(self) -> None:

@@ -76,6 +76,18 @@ that feature is read -- not merely because the readouts also show something else
 being prominent in the readouts shows that it is represented, not that it causes the behaviour. \
 If you do overturn it, say in `rival_ruled_out_by` what contradicted it."""
 
+TEXTFIRST_STRICT = """## Transcript first
+Your readout tools are locked until you call commit_text_hypothesis with your best \
+transcript-only hypothesis and how confident you are in it. Read the conversation closely before \
+committing. Afterwards, use the readouts to test that hypothesis: look for evidence for AND \
+against it. A readout at a position only reflects the text up to that position, so a generic \
+association showing up early is not evidence that a plan forms before your feature is read. \
+Overturn the committed driver only if (1) you have inspected the driver's own tokens and the \
+model's reading of them cannot produce the behaviour, and (2) the replacement you propose shows \
+the behaviour itself in at least half of the samples at two or more layers. A concept being \
+prominent in the readouts shows that it is represented, not that it causes the behaviour. If you \
+do overturn it, say in `rival_ruled_out_by` what contradicted it."""
+
 ABSENCE = """## Absences
 Some causes are absences: something the conversation does not say -- no prohibition, an \
 unspecified venue, format or audience, an instruction that describes rather than binds. Readouts \
@@ -137,7 +149,7 @@ def system_prompt(
     if "switchbar" in variants and reader is not None:
         parts.append(SWITCHING)
     if "textfirst" in variants and reader is not None:
-        parts.append(TEXTFIRST)
+        parts.append(TEXTFIRST_STRICT if "overturn2" in variants else TEXTFIRST)
     if "absence" in variants and reader is not None:
         parts.append(ABSENCE)
     if "story" in variants and reader is not None:

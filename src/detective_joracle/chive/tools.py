@@ -274,6 +274,8 @@ class ChiveTools:
     text_first: bool = False  # readout tools locked until commit_text_hypothesis
     aux: Reader | None = None  # a second method's readouts: <name>_search / <name>_inspect
     committed: dict[str, Any] | None = None
+    subst_flag: bool = False  # mark readout names absent from the conversation
+    _text: str | None = None
 
     async def call(self, name: str, args: dict[str, Any]) -> str:
         handlers = {
@@ -409,6 +411,17 @@ class ChiveTools:
                 lines.append(f"   L{layer}: {s[:CLIP]}")
         return "\n".join(lines)
 
+    def flag(self, sample: str) -> str:
+        """With subst_flag: mark names and numbers a readout uses that appear nowhere in the
+        conversation -- usually the verbalizer substituting a similar context's details."""
+        if not self.subst_flag:
+            return sample
+        if self._text is None:
+            self._text = "".join(self.inc.pieces).lower()
+        names = {w for w in re.findall(r"\b(?:[A-Z][a-z]{2,}|\d{2,})\b", sample)}
+        absent = sorted(w for w in names if w.lower() not in self._text)
+        return sample + (f" [not in the conversation: {', '.join(absent[:6])}]" if absent else "")
+
     def inspect(self, args: dict[str, Any], event: dict[str, Any]) -> str:
         assert self.reader is not None
         pos = int(str(args.get("position", -1)).strip().lstrip("tT"))
@@ -422,7 +435,8 @@ class ChiveTools:
         for layer, samples in sorted(self.reader.cell(pos).items()):
             if layers is None or layer in layers:
                 lines.append(
-                    f"L{layer}: " + " | ".join(f"({i}) {s}" for i, s in enumerate(samples, start=1))
+                    f"L{layer}: "
+                    + " | ".join(f"({i}) {self.flag(s)}" for i, s in enumerate(samples, start=1))
                 )
         neighbours = [
             p for p in range(pos - w, pos + w + 1) if p != pos and 0 <= p < self.inc.n_tokens
@@ -433,7 +447,7 @@ class ChiveTools:
                 lines.append(f"{self.inc.where(p)}")
                 for layer, samples in sorted(self.reader.cell(p).items()):
                     if (layers is None or layer in layers) and samples:
-                        lines.append(f"   L{layer}: {samples[0]}")
+                        lines.append(f"   L{layer}: {self.flag(samples[0])}")
         return "\n".join(lines)
 
     def notebook(self, args: dict[str, Any], event: dict[str, Any]) -> str:
