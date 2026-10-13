@@ -21,6 +21,7 @@ WINDOW = {
     "olens": 2,
     "jlens": 2,
     "nla": 4,
+    "mlnla": 2,
     "boundary": 2,
 }  # neighbouring positions an inspect shows by default
 MAX_WINDOW = 8

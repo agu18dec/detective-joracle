@@ -16,7 +16,7 @@ from typing import Any
 
 from .data import Incident
 
-KINDS = ("olens", "nla", "jlens", "boundary")
+KINDS = ("olens", "nla", "mlnla", "jlens", "boundary")
 
 
 @dataclass
@@ -111,6 +111,14 @@ including what the model represents but never writes -- an assumption, a framing
 plan for its answer, a judgement about the user. Explanations exist at every token, at layer 42 \
 only, with {k} independent samples per token. Details are often borrowed from similar \
 contexts: trust what recurs across samples and across neighbouring tokens.""",
+    "mlnla": """The multi-layer NLA is a trained verbalizer: a copy of the target model reads the \
+activation at one token and one layer (it is told which layer) and writes a free-text \
+explanation of what that activation encodes, including what the model represents but never \
+writes -- an assumption, a framing or default, a plan for its answer, a judgement about the \
+user. Explanations exist at every token, at layers {layers}, with {k} independent samples per \
+(token, layer). Details are often borrowed from similar contexts: trust what recurs across \
+samples, layers and neighbouring tokens. Early layers mostly read the input, middle layers \
+compose it, late layers plan the answer.""",
     "jlens": """J-lens gives, at every token and at every layer {layers}, the 10 vocabulary tokens \
 nearest the target model's activation -- a single-token view of what it represents there, \
 including what it never writes. Read them as hints to extrapolate from ('ruins', 'glass', 'dust' \
