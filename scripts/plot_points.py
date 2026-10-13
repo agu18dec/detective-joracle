@@ -1,14 +1,18 @@
-"""Point-level results: recall of non-obvious points and the disproved-claim rate, per method
-and stratum, with 95% bootstrap CIs over incidents. Draws the current run (distinct points,
-0-10 scores) and, below it, the earlier run (0/1/2 scores, original points).
+"""Point-level results (points_chive.py): recall of NON-OBVIOUS points, recall of PRIMARY-cause
+points, and the disproved-claim rate, per method and stratum, 95% bootstrap CIs over incidents.
+Definitions match points_chive.py report: obvious = an independent no-tools answer scores the
+point >= 7 (1-10 scale) in >= 2 of 3 tries; recall = mean (score - 1) / 9; disproved rate =
+contradicted / asserted claims (rivals the answer rejects excluded); rivals rejected = share of
+CHIVE's ruled-out alternatives the answer explicitly rules out.
 
-    python scripts/plot_points.py plots=plots/chive
+    python scripts/plot_points.py out=/tmp/chive_points4 plots=plots/chive
 """
 
 import json
 import random
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
@@ -22,39 +26,57 @@ ARMS = {
     "jlens_B": ("J-lens", "#7a5ea8"),
     "transcript": ("transcript only", "#9a9a9a"),
 }
-RUNS = [
-    ("/tmp/chive_points", 10, "distinct points, scored 0-10"),
-    ("/tmp/chive_points_v1", 2, "earlier run: original points, scored 0/1/2"),
+PANELS = [
+    ("nonobvious", "recall of NON-OBVIOUS points (higher = better)"),
+    ("primary", "recall of PRIMARY-cause points (higher = better)"),
+    ("disproved", "share of asserted claims DISPROVED (lower = better)"),
+    ("rival_rejected", "ruled-out alternatives REJECTED (higher = better)"),
 ]
-BROKEN = {"prompt_002961"}  # v1: its point list came back as a string (1,303 'points')
 plt.rcParams.update({"font.size": 14, "axes.titlesize": 15, "axes.labelsize": 14})
 
 
-def per_incident(run: str, scale: int) -> dict[str, dict[str, tuple[float, float]]]:
-    g: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-    for f in Path(run, "grades").glob("*/*.json"):
+def per_incident(out: Path) -> dict[str, dict[str, dict[str, float]]]:
+    g: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    for f in (out / "grades").glob("*/*.json"):
         r = json.loads(f.read_text())
-        if r["prompt_id"] not in BROKEN:
-            g[r["arm"]][r["prompt_id"]].append(r)
+        g[r["arm"]][r["prompt_id"]].append(r)
+    plain = {p: v for p, v in g.pop("plain").items() if len(v) == 3}
+    tags = {f.stem: json.loads(f.read_text())["primary"] for f in (out / "tags").glob("*.json")}
     full = {a: {p: v for p, v in d.items() if len(v) == 5} for a, d in g.items()}
-    common = sorted(set.intersection(*[set(x) for x in full.values()]))
-    hi = 7 if scale == 10 else 2
-    out: dict[str, dict[str, tuple[float, float]]] = {a: {} for a in full}
-    for p in common:
-        tr = full["transcript"][p]
-        n = len(tr[0]["point_scores"])
-        non = [i for i in range(n) if sum(r["point_scores"][i] >= hi for r in tr) < 3]
+    common = set.intersection(*[set(x) for x in full.values()]) & set(plain) & set(tags)
+    res: dict[str, dict[str, dict[str, float]]] = {a: {} for a in full}
+    for p in sorted(common):
+        n = len(tags[p])
+        idx = {
+            "nonobvious": [
+                i for i in range(n) if sum(r["point_scores"][i] >= 7 for r in plain[p]) < 2
+            ],
+            "primary": [i for i in range(n) if tags[p][i]],
+        }
         for a in full:
             rs = full[a][p]
-            rec = (
-                sum(sum(r["point_scores"][i] for i in non) / (scale * len(non)) for r in rs) / 5
-                if non
-                else float("nan")
+            row = {
+                k: (
+                    sum(sum(r["point_scores"][i] - 1 for i in ix) / (9 * len(ix)) for r in rs) / 5
+                    if ix
+                    else float("nan")
+                )
+                for k, ix in idx.items()
+            }
+            claims = [c for r in rs for c in r["claims"] if c.get("label") != "rejected"]
+            row["disproved"] = sum(c["label"] == "contradicted" for c in claims) / max(
+                len(claims), 1
             )
-            claims = [c for r in rs for c in r["claims"]]
-            con = sum(c["label"] == "contradicted" for c in claims) / max(len(claims), 1)
-            out[a][p] = (rec, con)
-    return out
+            rv = [
+                x
+                for f in (out / "rivals" / a).glob(f"{p}.d*.json")
+                for x in json.loads(f.read_text())["rivals"]
+            ]
+            row["rival_rejected"] = (
+                sum(x == "rejected" for x in rv) / len(rv) if rv else float("nan")
+            )
+            res[a][p] = row
+    return res
 
 
 def mean_ci(xs: list[float]) -> tuple[float, float, float]:
@@ -67,50 +89,44 @@ def mean_ci(xs: list[float]) -> tuple[float, float, float]:
 class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
+        self.out = "/tmp/chive_points4"
         self.plots = "plots/chive"
         self.confidence = "/workspace/agam/chive_runs_dj/confidence.json"
         self.hard = "data/chive/splits/hard92.txt"
 
     def finalize(self) -> None:
-        self.plots = Path(self.plots)
+        self.out, self.plots = Path(self.out), Path(self.plots)
 
 
 @pydra.main(Config)
 def main(cfg: Config) -> None:
+    data = per_incident(cfg.out)
+    ids = sorted(next(iter(data.values())))
     conf = json.loads(Path(cfg.confidence).read_text())
     ranked = sorted(conf, key=lambda p: conf[p]["top_p"])
     low = set(ranked[: len(ranked) // 3])
     hard = set(Path(cfg.hard).read_text().split())
-    fig, axes = plt.subplots(len(RUNS), 2, figsize=(20, 6.2 * len(RUNS)))
-    for row, (run, scale, label) in enumerate(RUNS):
-        data = per_incident(run, scale)
-        ids = sorted(next(iter(data.values())))
-        strata = {
-            f"all ({len(ids)})": ids,
-            f"least-confident\nthird ({sum(p in low for p in ids)})": [p for p in ids if p in low],
-            f"hard ({sum(p in hard for p in ids)})": [p for p in ids if p in hard],
-        }
-        for col, (metric, title) in enumerate(
-            [
-                (0, "recall of NON-OBVIOUS points"),
-                (1, "share of claims DISPROVED by CHIVE's experiments"),
-            ]
-        ):
-            ax = axes[row][col]
-            w = 0.8 / len(ARMS)
-            for j, sub in enumerate(strata.values()):
-                for i, (arm, (name, colour)) in enumerate(ARMS.items()):
-                    m, lo, hi_ = mean_ci([data[arm][p][metric] for p in sub])
-                    x = j + (i - (len(ARMS) - 1) / 2) * w
-                    ax.bar(x, m, w * 0.9, color=colour, label=name if j == 0 else None)
-                    ax.errorbar(x, m, yerr=[[m - lo], [hi_ - m]], color="#333", lw=1.2, capsize=3)
-            ax.set_xticks(range(len(strata)), list(strata))
-            ax.set_title(f"{title} — {label}", loc="left")
-            ax.set_ylabel("%" + (" (higher = better)" if metric == 0 else " (lower = better)"))
-            ax.grid(axis="y", alpha=0.3)
-    axes[0][1].legend(loc="upper left", bbox_to_anchor=(1.01, 1), frameon=False)
+    strata = {
+        f"all ({len(ids)})": ids,
+        f"least-confident\nthird ({sum(p in low for p in ids)})": [p for p in ids if p in low],
+        f"hard ({sum(p in hard for p in ids)})": [p for p in ids if p in hard],
+    }
+    fig, axes = plt.subplots(2, 2, figsize=(22, 12))
+    w = 0.8 / len(ARMS)
+    for ax, (metric, title) in zip(axes.flat, PANELS, strict=True):
+        for j, sub in enumerate(strata.values()):
+            for i, (arm, (name, colour)) in enumerate(ARMS.items()):
+                m, lo, hi = mean_ci([data[arm][p][metric] for p in sub])
+                x = j + (i - (len(ARMS) - 1) / 2) * w
+                ax.bar(x, m, w * 0.9, color=colour, label=name if j == 0 else None)
+                ax.errorbar(x, m, yerr=[[m - lo], [hi - m]], color="#333", lw=1.2, capsize=3)
+        ax.set_xticks(range(len(strata)), list(strata))
+        ax.set_title(title, loc="left")
+        ax.set_ylabel("%")
+        ax.grid(axis="y", alpha=0.3)
+    axes[0, 1].legend(loc="upper left", bbox_to_anchor=(1.01, 1), frameon=False)
     fig.suptitle(
-        "Point-level grading of held-out free-form explanations (204 incidents x 5 runs; "
+        "Point-level grading of held-out free-form explanations (5 runs per incident; "
         "95% CI over incidents)",
         x=0.01,
         ha="left",
@@ -118,7 +134,7 @@ def main(cfg: Config) -> None:
     fig.tight_layout()
     cfg.plots.mkdir(parents=True, exist_ok=True)
     fig.savefig(cfg.plots / "points.png", dpi=160, bbox_inches="tight")
-    print(f"wrote {cfg.plots / 'points.png'}")
+    print(f"wrote {cfg.plots / 'points.png'} ({len(ids)} incidents)")
 
 
 if __name__ == "__main__":
