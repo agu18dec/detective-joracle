@@ -91,17 +91,20 @@ LOOK = {
     "reader": "Then inspect the readouts AT those tokens and at the template tokens right before "
     "the response.",
 }
-# v2 (failure analysis of v1): readouts describe the ORIGINAL prompt only, so they cannot show
-# that an edit would not matter; restrict what they may be used for.
+# v2 (from reading v1's losses): estimate from the text first, then let the readouts adjust it;
+# say what readouts of the ORIGINAL conversation can and cannot show about an edit.
 LOOK_V2 = (
-    "Then inspect the readouts at those tokens. They describe how the model read the ORIGINAL "
-    "conversation only: use them for what the model knows or noticed, how it parses an ambiguous "
-    "token, and whether it registered the cue the intervention removes or adds. Do NOT infer that "
-    "an edit will not matter because a concept also appears at other positions or in the plan, "
-    "or that it will matter because the edited span encodes something relevant: readouts cannot "
-    "show what the model does without that span. Before relying on a readout, ask: would it look "
-    "different if the claim were false? Lines marked [not in the conversation: ...] name details "
-    "the verbalizer borrowed from similar contexts; do not read them as the model's content."
+    "Before inspecting any readout, write in the notebook your text-only probability for the "
+    "claim. Then inspect the readouts at the edited tokens and at the template tokens right before "
+    "the response, and adjust that estimate. The readouts show how the model read the ORIGINAL "
+    "conversation; they cannot show what it would do without the edited span. So a concept that "
+    "also appears at other positions, or is missing from the plan, does NOT show the edit is "
+    "harmless (another copy may not be enough, and a cue can work without being named), and a "
+    "relevant feature at the edited span does NOT show the edit matters. What readouts do show "
+    "well: how the model parses the edited span (misread, ignored, or the key cue its plan "
+    "cites) and what it knows. Move your estimate far from the text-only one only on evidence of "
+    "that kind. Lines marked [not in the conversation: ...] name details the verbalizer "
+    "borrowed from similar contexts; they are not the model's content."
 )
 
 # Two-agent: the plain answerer, also shown another agent's whole investigation of the incident.
