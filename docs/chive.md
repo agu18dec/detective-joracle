@@ -5,9 +5,11 @@ the model shows in `k` of 30 samples, and ONE method for looking inside the mode
 *why* the model behaves this way. A judge scores the answer against the cause that CHIVE
 established by counterfactual experiments. Methods: the transcript alone, OLens, NLA, J-lens.
 
-Code: `src/detective_joracle/chive/` (data, readers, tools, prompts, executor, judge) and
+Code: `src/detective_joracle/chive/` (data, readers, tools, prompts, executor, judge, claims) and
 `scripts/*chive*.py`. Protocol and results: `chive_harness_climb.md` (the harness climb and
-held-out test) and `chive_preregistration.md` (confidence strata and controls).
+held-out test), `chive_preregistration.md` (confidence strata and controls) and
+`chive_points_and_claims.md` (point-level and claim-level scoring of the held-out answers, the
+multi-layer NLA arm, the story variant and the SWE-chat pilot).
 
 ## Data
 
@@ -53,7 +55,7 @@ neighbours). The frozen harness adds two prompt rules, `variants=['textfirst','a
 - **absence:** some causes are absences (a missing instruction, version or error text), and
   readouts cannot show an absence.
 
-Arms are `transcript` or `NAME=BANK_DIR:KIND` with `KIND` one of `olens | nla | jlens`.
+Arms are `transcript` or `NAME=BANK_DIR:KIND` with `KIND` one of `olens | nla | mlnla | jlens`. Variants: `textfirst`, `absence` (the frozen harness) and `story` (a chronological account; a discovery mode, worse at cause-scoring).
 
 ## Reproduce the held-out test
 
@@ -87,6 +89,9 @@ Other entrypoints, each documented in its header:
 | `climb_chive.py` | the dev A/B table of harness variants |
 | `build_tested_choices.py` | candidate sets from CHIVE's tested alternatives |
 | `plot_chive.py` | figures for the read-only, one-experiment and candidate evals |
+| `claims_chive.py` | CHIVE's binary claim eval: one focused episode per claim, AUROC |
+| `points_chive.py` | point-level grading: recall of non-obvious / primary points, disproved claims, rivals |
+| `plot_heldout_methods.py`, `plot_claims.py`, `plot_points.py` | the figures in `docs/figures/chive/` |
 
 ## Results (held-out, 204 incidents x 5 draws)
 
@@ -94,6 +99,7 @@ Other entrypoints, each documented in its header:
 |---|---|---|
 | OLens + harness | 73.1% | 89.7% |
 | NLA + harness | 71.7% | 87.3% |
+| multi-layer NLA + harness | 70.0% | 84.3% |
 | J-lens + harness | 72.0% | 85.8% |
 | transcript only | 70.1% | 82.8% |
 

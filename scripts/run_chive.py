@@ -174,7 +174,6 @@ async def _episode(
             text_first=tfirst,
             aux=aux,
             edits=edit_ids,
-            subst_flag="subflag" in args.variants,
         )
         backend = agent_backend(args.max_tokens, args.effort, model)
         system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants), aux)

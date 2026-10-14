@@ -76,22 +76,6 @@ that feature is read -- not merely because the readouts also show something else
 being prominent in the readouts shows that it is represented, not that it causes the behaviour. \
 If you do overturn it, say in `rival_ruled_out_by` what contradicted it."""
 
-TEXTFIRST_V2 = """## Transcript first
-Your readout tools are locked until you call commit_text_hypothesis with your best \
-transcript-only hypothesis and how confident you are in it. Read the conversation closely before \
-committing. Afterwards, use the readouts to test that hypothesis: look for evidence for AND \
-against it.
-What readouts can and cannot show: a readout at a position reflects only the text up to that \
-position. So an association that already appears at an early position shows that the model CAN \
-form it there, not that a later feature is idle -- the later feature can still be what drives the \
-response. Overturn your hypothesis when the model's own reading of the feature you named shows it \
-cannot produce the behaviour (it is misread, ignored, or read the opposite way), or when the \
-readouts at the decision point (the template tokens before the response and its first tokens) \
-state a different reason or plan for the behaviour. When the readouts are consistent with both \
-your hypothesis and a rival, keep your hypothesis. A concept being prominent in the readouts \
-shows that it is represented, not that it causes the behaviour. If you do overturn it, say in \
-`rival_ruled_out_by` what contradicted it."""
-
 ABSENCE = """## Absences
 Some causes are absences: something the conversation does not say -- no prohibition, an \
 unspecified venue, format or audience, an instruction that describes rather than binds. Readouts \
@@ -153,7 +137,7 @@ def system_prompt(
     if "switchbar" in variants and reader is not None:
         parts.append(SWITCHING)
     if "textfirst" in variants and reader is not None:
-        parts.append(TEXTFIRST_V2 if "textfirst2" in variants else TEXTFIRST)
+        parts.append(TEXTFIRST)
     if "absence" in variants and reader is not None:
         parts.append(ABSENCE)
     if "story" in variants and reader is not None:

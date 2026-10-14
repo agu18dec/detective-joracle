@@ -403,11 +403,3 @@ def test_focused_submit_needs_a_look_at_the_edited_tokens() -> None:
     asyncio.run(tools.call("inspect", {"position": 7}))
     assert asyncio.run(tools.call("submit_answer", ans)) == "answer recorded"
     assert tools.finished["probability_true"] == 0.7
-
-
-def test_subst_flag_marks_names_absent_from_the_conversation() -> None:
-    tools = ChiveTools(incident(), None, subst_flag=True)
-    out = tools.flag("rain over Hoboken, 2019")
-    assert "Hoboken" in out.split("[")[1] and "2019" in out.split("[")[1]
-    assert tools.flag("Grey skies") == "Grey skies"  # in the conversation: no flag
-    assert ChiveTools(incident(), None).flag("rain over Hoboken") == "rain over Hoboken"
