@@ -100,6 +100,30 @@ least-confident 66: OLens is +2.2 [−0.1, +4.6].
 - **This is a reader effect, not an OLens one.** All three readers show the same pattern.
 - **Recall of the explanation does not rise overall.** It rises only on the hard incidents.
 
+### Point-level wins and losses against transcript
+
+Two counts, each per point or alternative:
+- **Non-obvious points:** a reader *wins* a point when its runs state it (≥ 7) in at least 3 of 5
+  and transcript's in at most 1; it *loses* one in the reverse case.
+- **Ruled-out alternatives:** an alternative is *avoided* when transcript asserts it in at least
+  3 of 5 runs and the reader in at most 1; *newly asserted* is the reverse.
+
+| reader | non-obvious points won / lost | ruled-out alternatives avoided / newly asserted |
+|---|---|---|
+| OLens | 27 / 17 | 33 / 7 |
+| multi-layer NLA | 15 / 23 | 26 / 9 |
+| J-lens | 14 / 21 | 29 / 10 |
+
+OLens is the only reader that wins more non-obvious points than it loses. Every reader avoids
+far more ruled-out alternatives than it newly asserts. Case studies for both effects are in the
+case viewer, under "What the point-level eval says OLens does".
+
+The figure (`docs/figures/chive/points.png`) has six panels: non-obvious recall, primary-cause
+recall, disproved claims per answer, precision, and rivals rejected / asserted. The OLens minus
+transcript paired difference is printed above each OLens bar. Primary-cause recall gains are
+significant on the least-confident third (+4.4*) and the hard 46 (+5.9*). Precision gains grow
+with difficulty: +3.7*, +8.1*, +8.5*.
+
 ### Where the gains are (pass@1, `scripts/points_extra.py`)
 
 Incidents are split by how the other three readers do. Each reader gets the same treatment.
