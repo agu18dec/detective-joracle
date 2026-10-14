@@ -14,7 +14,7 @@ Stages (resumable; records under <out>/<eval>/<arm>/):
           stratum (all, least-confident third, hard), paired by incident vs `reference`.
 
     python scripts/claims_chive.py stage=build ids=data/chive/splits/all300.txt \\
-        claims=data/chive/claims/claims300.jsonl
+        claims=data/chive/claims/chive_eval370.jsonl
     python scripts/claims_chive.py stage=agent claims=... out=runs/claims eval=focused \\
         "arms=['transcript','olens_rl=<bank>:olens']"
     python scripts/claims_chive.py stage=answer claims=... out=runs/claims eval=two_agent \\
@@ -303,8 +303,15 @@ async def finish(
     )
 
 
-def load_claims(path: Path) -> list[Claim]:
-    return [Claim(**json.loads(line)) for line in path.open()]
+def load_claims(path: Path, for_prompts: bool = False) -> list[Claim]:
+    """for_prompts: the prompts quote CHIVE's transcript and question, so refuse a file without
+    them (data/chive/claims/claims300.jsonl predates them: report-only, see docs)."""
+    claims = [Claim(**json.loads(line)) for line in path.open()]
+    if for_prompts and any(not (c.transcript and c.question) for c in claims):
+        raise ValueError(
+            f"{path}: claims without CHIVE's transcript/question; rebuild with stage=build"
+        )
+    return claims
 
 
 def stage_build(args: Any) -> None:
@@ -327,7 +334,7 @@ def stage_build(args: Any) -> None:
 
 
 def stage_agent(args: Any) -> None:
-    claims = load_claims(args.claims)
+    claims = load_claims(args.claims, for_prompts=True)
     pids = sorted({c.prompt_id for c in claims})
     incs = load_incidents(pids, args.dataset)
     partner = {p: incs[pids[(i + len(pids) // 2) % len(pids)]] for i, p in enumerate(pids)}
@@ -347,9 +354,10 @@ def stage_agent(args: Any) -> None:
 
 
 def stage_answer(args: Any) -> None:
-    claims = load_claims(args.claims)
+    claims = load_claims(args.claims, for_prompts=True)
     incs = load_incidents(sorted({c.prompt_id for c in claims}), args.dataset)
     jobs = []
+    missing = 0
     for (
         spec
     ) in args.arms:  # with episodes=: an arm of THAT eval (A's method); draw d reads A's draw d
@@ -362,6 +370,7 @@ def stage_answer(args: Any) -> None:
                 if args.episodes:
                     f = Path(args.episodes) / spec / f"{c.prompt_id}.d{d}.json"
                     if not f.exists():
+                        missing += 1
                         continue
                     episode = render_episode(json.loads(f.read_text()))
                 arm = {"name": name}
@@ -370,7 +379,7 @@ def stage_answer(args: Any) -> None:
                         args, a, c, incs[c.prompt_id], e, d
                     )
                 )
-    print(f"answer: {len(jobs)} answers to get", flush=True)
+    print(f"answer: {len(jobs)} answers to get; {missing} skipped (no episode)", flush=True)
     asyncio.run(run_many(jobs, args.concurrency))
 
 
@@ -409,14 +418,14 @@ def stage_report(args: Any) -> None:
             "",
             f"## {name} ({len(sub)} claims, {n_inc} incidents)",
             "",
-            "| arm | AUROC | within-incident AUROC | Brier | acc@0.5 | AUROC vs ref | Brier vs ref |",
-            "|---|---|---|---|---|---|---|",
+            "| arm | n | AUROC | within-incident AUROC | Brier | acc@0.5 | AUROC vs ref | Brier vs ref |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for a in arms:
             m = metrics(scored[a], sub)
             ref = a == args.reference or args.reference not in scored
             lines.append(
-                f"| {a} | {m['auroc']:.3f} | {m['within_auroc']:.3f} | {m['brier']:.3f} | "
+                f"| {a} | {sum(c in scored[a] for c in sub)} | {m['auroc']:.3f} | {m['within_auroc']:.3f} | {m['brier']:.3f} | "
                 f"{m['acc']:.1%} | {'-' if ref else paired(scored[a], scored[args.reference], sub, 'auroc')} | "
                 f"{'-' if ref else paired(scored[a], scored[args.reference], sub, 'brier')} |"
             )
@@ -429,7 +438,7 @@ class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
         self.stage = pydra.REQUIRED  # build | agent | answer | report
-        self.claims = "data/chive/claims/claims300.jsonl"
+        self.claims = "data/chive/claims/chive_eval370.jsonl"
         self.ids = "data/chive/splits/all300.txt"  # build: the incidents with readout banks
         self.eval_sets: list[str] = [  # build: CHIVE's eval sets (build_eval_set.py output)
             "/workspace/agam/chive/data/runs/qwen3p6_27b_pilot/eval_set_conc3_n1000.jsonl",

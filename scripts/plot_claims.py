@@ -121,15 +121,14 @@ def main(cfg: Config) -> None:
             w = 0.8 / max(len(arms), 1)
             for i, a in enumerate(arms):
                 rows = data[ev][a]
-                # misread claims: score a run other than the selecting draw for the plain answerer
-                dr = 1 if (ev == "plain" and metric == "acc") else 0
 
-                def stat(
-                    sub: list[str], rows: Rows = rows, dr: int = dr, metric: str = metric
-                ) -> float:
-                    pts = [
-                        rows[c].get(dr) or next(iter(rows[c].values())) for c in sub if c in rows
-                    ]
+                def stat(sub: list[str], rows: Rows = rows, metric: str = metric) -> float:
+                    # the draw-mean p per claim, as in claims.metrics
+                    pts = []
+                    for c in sub:
+                        if c in rows:
+                            ds = list(rows[c].values())
+                            pts.append((sum(d[0] for d in ds) / len(ds), ds[0][1], ds[0][2]))
                     if metric == "acc":
                         return 100 * sum((p >= 0.5) == y for p, y, _ in pts) / max(len(pts), 1)
                     return auc([(p, y) for p, y, _ in pts])
@@ -152,7 +151,7 @@ def main(cfg: Config) -> None:
     handles = [plt.Rectangle((0, 0), 1, 1, color=COLOR[m], label=m) for m in methods]
     axes[-1].legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1), frameon=False)
     fig.suptitle(
-        "CHIVE claim eval (CHIVE's own format): would this edit move the behaviour by >= 30 points? "
+        "CHIVE claim eval (CHIVE's own format): would this edit move the behaviour by >= 30 points? (TRUE: moved >= 50, FALSE: <= 15) "
         "(95% CI, bootstrap over incidents)",
         x=0.01,
         ha="left",

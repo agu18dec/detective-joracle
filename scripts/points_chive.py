@@ -12,6 +12,11 @@ Stages (resumable; JSON under out=):
           split into its own claims, each supported / contradicted (it asserts something CHIVE ruled
           out or a measured result contradicts) / rejected (it names a rival only to rule it out)
           / not_covered -> grades/<arm>/<pid>.d<k>.json
+  rivals  for each alternative CHIVE ruled out: does the answer reject it, assert it, or not
+          address it -> rivals/<arm>/<pid>.d<k>.json
+  support a reader that never sees the conversation marks every point (true) and ruled-out
+          alternative (false) yes / no / silent, from the final answer or the whole episode
+          (agent notes and calls) -> support/{final,episode}/<arm>/<pid>.d<k>.json (no report yet)
   rep     the grader's reliability: a fresh re-grade of a random sample -> grades_rep/
   report  per arm and stratum: recall of non-obvious points and of primary-cause points (mean
           (point score - 1) / 9), the disproved-claim rate (contradicted / asserted claims, rejected
@@ -276,6 +281,7 @@ async def grade_one(args: Any, incs: dict[str, Incident], arm: str, f: Path, out
         and isinstance(scores, list)
         and len(scores) == len(pts)
         and isinstance(got.get("claims"), list)
+        and all(isinstance(c, dict) and c.get("label") in LABELS for c in got["claims"])
     ):
         write(out, {"prompt_id": rec["prompt_id"], "arm": arm, **got})
 
@@ -388,6 +394,9 @@ def stage_report(args: Any, incs: dict[str, Incident]) -> None:
     g = load_grades(args.out / "grades")
     plain = {p: v for p, v in g.pop("plain", {}).items() if len(v) == N_PLAIN}
     full = {a: {p: v for p, v in d.items() if len(v) == 5} for a, d in g.items()}
+    for a, d in g.items():  # an incident is kept only if every arm has all 5 grades
+        if len(full[a]) < len(d):
+            print(f"report: {a} has {len(d) - len(full[a])} incidents with < 5 grades (dropped)")
     tags = {
         f.stem: json.loads(f.read_text())["primary"] for f in (args.out / "tags").glob("*.json")
     }
@@ -481,6 +490,9 @@ def stage_report(args: Any, incs: dict[str, Incident]) -> None:
                     if vals[a][p][m] == vals[a][p][m]
                     and vals["transcript"][p][m] == vals["transcript"][p][m]
                 ]
+                if not d:
+                    cmp.append("n/a")
+                    continue
                 rng = random.Random(0)
                 bs = sorted(sum(rng.choice(d) for _ in d) / len(d) for _ in range(4000))
                 cmp.append(
@@ -534,7 +546,7 @@ class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
         self.stage = pydra.REQUIRED
-        self.out = "/tmp/chive_points3"
+        self.out = "runs/points"
         self.ids = "data/chive/splits/climb_test204.txt"
         self.dataset = DATASET
         self.hard = "data/chive/splits/hard92.txt"

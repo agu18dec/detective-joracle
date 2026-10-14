@@ -1,7 +1,8 @@
 """CHIVE's binary claim eval (adamkarvonen/chive, chive/binary_eval): the claims of CHIVE's own
 eval sets (claim bank -> concreteness >= 3 -> balanced 50/50), each a BEHAVIOR / BASELINE /
-INTERVENTION / PREDICTION (moves the rate by >= 30 points) statement. Scored by pooled AUROC
-(CHIVE's headline), within-incident AUROC, Brier and accuracy at 0.5."""
+INTERVENTION / PREDICTION statement (the prediction: the edit moves the rate by >= 30 points). The
+sets keep only clear cases: a TRUE claim's edit moved the rate by >= 50 points, a FALSE one's by
+<= 15. Scored by pooled AUROC (CHIVE's headline), within-incident AUROC, Brier and accuracy."""
 
 import math
 import random
@@ -95,8 +96,14 @@ def paired(a: Scored, b: Scored, claim_ids: list[str], metric: str) -> str:
     rng = random.Random(0)
     diffs = []
     for _ in range(2000):
-        smp = [c for i in (rng.choice(incs) for _ in incs) for c in by_inc[i]]
-        d = metrics(a, smp)[metric] - metrics(b, smp)[metric]
+        # each drawn incident is a separate copy, so a repeat counts twice in within-incident AUROC
+        sa: Scored = {}
+        sb: Scored = {}
+        for k, i in enumerate(rng.choice(incs) for _ in incs):
+            for c in by_inc[i]:
+                sa[f"{c}#{k}"] = (a[c][0], a[c][1], f"{i}#{k}")
+                sb[f"{c}#{k}"] = (b[c][0], b[c][1], f"{i}#{k}")
+        d = metrics(sa, list(sa))[metric] - metrics(sb, list(sb))[metric]
         if d == d:
             diffs.append(d)
     diffs.sort()

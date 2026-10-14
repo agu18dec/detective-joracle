@@ -80,6 +80,11 @@ disproved share and the rival shares pool the 5 runs before dividing.
 | rivals rejected | 24.0% | 24.9% | 24.7% | 24.9% | +1.0 [−1.9, +3.9] |
 | rivals asserted | 21.1% | 15.7% | 16.9% | 15.1% | −5.4 [−7.8, −3.1]* |
 
+Rows from claims per answer down to precision, and the "70%" figure below, come from
+`scripts/points_extra.py` (the 70% from a keyword match on the not-covered claims), not
+`stage=report`; the report has CIs only for non-obvious recall, disproved share and rivals
+rejected.
+
 On the hard 46: OLens non-obvious recall is +3.7 [+1.1, +6.4]*, multi-layer NLA +2.5*, J-lens
 +0.8, and every reader has a disproved share about 13 points lower than transcript. On the
 least-confident 66: OLens is +2.2 [−0.1, +4.6].
@@ -95,16 +100,16 @@ least-confident 66: OLens is +2.2 [−0.1, +4.6].
 - **This is a reader effect, not an OLens one.** All three readers show the same pattern.
 - **Recall of the explanation does not rise overall.** It rises only on the hard incidents.
 
-### Where the gains are (pass@1, `/tmp/chive_points4/analysis`)
+### Where the gains are (pass@1, `scripts/points_extra.py`)
 
 Incidents are split by how the other three readers do. Each reader gets the same treatment.
 
 | gain vs transcript | others mostly fail (≤ 40%) | middling | others mostly pass (≥ 80%) |
 |---|---|---|---|
-| OLens | +0.0 (n=46) | +1.6 | +5.4* |
-| NLA L42 | −0.5 | −7.8 | +6.5* |
-| multi-layer NLA | −6.5 | −2.3 | +3.8 |
-| J-lens | −0.9 | −3.2 | +4.8* |
+| OLens | +0.4 (n=47) | +3.1 (n=39) | +4.8* (n=112) |
+| NLA L42 | −0.9 | −6.2 | +6.2* |
+| multi-layer NLA | −5.2 | −2.5 | +3.4 |
+| J-lens | +1.3 | −4.4 | +4.4* |
 
 - **The average gains sit on incidents where every reader gains.** Per-incident gains correlate
   0.6-0.75 across readers.
@@ -129,11 +134,23 @@ keyless token was revoked; rerun `stage=support`, which resumes.
 
 ## Claim-level eval (`scripts/claims_chive.py`)
 
-This is CHIVE's own binary claim format. Each claim is a statement about one intervention, true
-when CHIVE measured an effect of at least 30 points. There are 688 claims, balanced, built from
-CHIVE's eval sets (`data/chive/claims/claims300.jsonl`). Each claim gets one focused episode
-whose output is `probability_true`. The agent must inspect the edited tokens before it submits.
-Scoring is pooled AUROC (CHIVE's headline) and within-incident AUROC.
+This is CHIVE's binary claim format. Each claim predicts that one intervention moves the
+behaviour rate by at least 30 points. The sets keep only clear cases: true claims moved it by at
+least 50 points, false ones by at most 15. Each claim gets one focused episode whose output is
+`probability_true`, and the agent must inspect the edited tokens before it submits. Scoring is
+pooled AUROC (CHIVE's headline) and within-incident AUROC.
+
+**Which claims and prompts produced these numbers.** The results below are on
+`data/chive/claims/claims300.jsonl`: 688 balanced claims over the 300 incidents, before CHIVE's
+concreteness filter. They were run on 2026-10-12 with the prompts at commit **f9c1feb**, which
+render the conversation from the incident. After that run the script switched to CHIVE's verbatim
+prompts, which quote CHIVE's own `transcript` and `question` fields. Those prompts run on CHIVE's
+eval set `chive_eval370.jsonl` (367 claims, concreteness ≥ 3; `stage=build` writes it), which is
+now the default. **Neither set has been run under the current prompts yet.** `claims300.jsonl`
+lacks those two fields, so the agent and answer stages refuse it; use it only with
+`stage=report` and `plot_claims.py`. To reproduce the numbers below, check out f9c1feb's
+`scripts/claims_chive.py`. The dropped claims prompt v2 (−0.014) ran after the switch with an
+empty transcript in its prompt, so that result is confounded as well as dropped.
 
 | setting | AUROC |
 |---|---|
@@ -195,5 +212,27 @@ for s in points tag plain grade rivals support rep report; do $P stage=$s out=$O
 .venv/bin/python scripts/plot_points.py out=$O plots=plots/chive
 ```
 
-The answer records come from the held-out run (`ARMS` in `points_chive.py`). Every stage
-resumes. `stage=report` prints all the tables above except the reader-split ones.
+The answer records come from the held-out run (`ARMS` in `points_chive.py`), and every stage
+resumes. `stage=report` prints the main point table: recall, disproved share, disproved per
+answer and rivals. `python scripts/points_extra.py $O` prints the per-answer counts, precision
+and the reader-split table. The points prompt asks for 3-8 points; 3-12 are accepted.
+
+## Handoff: open items (2026-10-14)
+
+- **`support` stage:** 7,698 of 8,640 calls are in `/tmp/chive_points4/support`, and the stage
+  resumes. It needs a working keyless token (the Mac's `ant auth login`; the tunnel currently
+  serves a revoked one). It has no report code yet. Write one that gives found / truth rejected
+  / wrong asserted / rival rejected per arm, final vs episode, with paired CIs, plus a per-point
+  OLens-minus-transcript gain list.
+- **Claims under the current prompts:** run `stage=agent` / `stage=answer` on
+  `chive_eval370.jsonl` (plain, transcript, OLens).
+- **Confirm the solo rescues:** add 10 more runs per reader on the 45 incidents transcript
+  fails, deciding the test before running.
+- **Experiment on SWE-chat `scaleup_swechat_001677`:** restore the clipped task-notification
+  header naming the Node/CLI agent, or put its sections in order. Prediction: the "TA Insider
+  completed" behaviour drops. Needs the Qwen vLLM endpoint and CHIVE's grader.
+- **Review leftovers on PR #9 (low):** draw counts (5 runs, 3 plain) are hardcoded;
+  `episode_text` has no total length cap.
+- **Viewer:** the 20 outcome-chosen "Where OLens helped" picks live in global-workspace
+  `scripts/chive_eval/case_viewer/picks.json` (`set: "helped"`); drafts and the selection rule
+  are in `/workspace/agam/root_offload/olens_an/` (`helped/`, `helped_select.py`), with the earlier case write-ups (`CASE_STUDIES.md`, `best/`, `cases/`) and the 001677 template-token readout dump.

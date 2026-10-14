@@ -5,7 +5,7 @@ point >= 7 (1-10 scale) in >= 2 of 3 tries; recall = mean (score - 1) / 9; dispr
 contradicted / asserted claims (rivals the answer rejects excluded); rivals rejected = share of
 CHIVE's ruled-out alternatives the answer explicitly rules out.
 
-    python scripts/plot_points.py out=/tmp/chive_points4 plots=plots/chive
+    python scripts/plot_points.py out=runs/points plots=plots/chive
 """
 
 import json
@@ -89,7 +89,7 @@ def mean_ci(xs: list[float]) -> tuple[float, float, float]:
 class Config(pydra.Config):
     def __init__(self) -> None:
         super().__init__()
-        self.out = "/tmp/chive_points4"
+        self.out = "runs/points"
         self.plots = "plots/chive"
         self.confidence = "/workspace/agam/chive_runs_dj/confidence.json"
         self.hard = "data/chive/splits/hard92.txt"
