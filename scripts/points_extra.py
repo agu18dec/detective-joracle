@@ -192,3 +192,33 @@ for a, b in itertools.combinations(READERS, 2):
     num = sum((u - ma) * (v - mb) for u, v in zip(xa, xb, strict=True))
     den = (sum((u - ma) ** 2 for u in xa) * sum((v - mb) ** 2 for v in xb)) ** 0.5
     print(f"  gain correlation {a} ~ {b}: {num / den:.2f}")
+
+
+def hits(arm: str, p: str, i: int) -> int:
+    return sum(r["point_scores"][i] >= 7 for r in g[arm][p])
+
+
+rivals: dict[str, dict[str, list[list[str]]]] = defaultdict(lambda: defaultdict(list))
+for f in (OUT / "rivals").glob("*/*.json"):
+    r = json.loads(f.read_text())
+    rivals[r["arm"]][r["prompt_id"]].append(r["rivals"])
+print("\nwins / losses vs transcript (>= 3 of 5 runs vs <= 1 of 5)")
+for x in ["olens_rl_B", "mlnla_B", "jlens_B"]:
+    won = lost = avoided = added = 0
+    for p in common:
+        n = len(tags[p])
+        for i in range(n):
+            if sum(r["point_scores"][i] >= 7 for r in plain[p]) >= 2:
+                continue  # obvious
+            won += hits(x, p, i) >= 3 and hits("transcript", p, i) <= 1
+            lost += hits("transcript", p, i) >= 3 and hits(x, p, i) <= 1
+        if len(rivals[x][p]) == 5 and len(rivals["transcript"][p]) == 5:
+            for k in range(len(rivals[x][p][0])):
+                ax = sum(v[k] == "asserted" for v in rivals[x][p])
+                at = sum(v[k] == "asserted" for v in rivals["transcript"][p])
+                avoided += at >= 3 and ax <= 1
+                added += ax >= 3 and at <= 1
+    print(
+        f"  {x}: non-obvious points won {won} / lost {lost}; "
+        f"ruled-out alternatives avoided {avoided} / newly asserted {added}"
+    )

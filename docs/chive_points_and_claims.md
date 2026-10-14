@@ -102,7 +102,7 @@ least-confident 66: OLens is +2.2 [−0.1, +4.6].
 
 ### Point-level wins and losses against transcript
 
-Two counts, each per point or alternative:
+Two counts over the 198 incidents (`scripts/points_extra.py`), each per point or alternative:
 - **Non-obvious points:** a reader *wins* a point when its runs state it (≥ 7) in at least 3 of 5
   and transcript's in at most 1; it *loses* one in the reverse case.
 - **Ruled-out alternatives:** an alternative is *avoided* when transcript asserts it in at least
@@ -110,9 +110,9 @@ Two counts, each per point or alternative:
 
 | reader | non-obvious points won / lost | ruled-out alternatives avoided / newly asserted |
 |---|---|---|
-| OLens | 27 / 17 | 33 / 7 |
-| multi-layer NLA | 15 / 23 | 26 / 9 |
-| J-lens | 14 / 21 | 29 / 10 |
+| OLens | 27 / 17 | 31 / 7 |
+| multi-layer NLA | 15 / 22 | 26 / 9 |
+| J-lens | 14 / 20 | 27 / 10 |
 
 OLens is the only reader that wins more non-obvious points than it loses. Every reader avoids
 far more ruled-out alternatives than it newly asserts. Case studies for both effects are in the
