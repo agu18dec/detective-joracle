@@ -25,8 +25,10 @@ Stages (resumable; JSON under out=):
 
 import asyncio
 import json
+import os
 import random
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -37,12 +39,29 @@ from detective_joracle.chive.data import DATASET, Incident, load_incidents, read
 from detective_joracle.chive.llm import client, json_call
 
 MODEL = "claude-opus-5"
-ARMS = {  # arm -> record dir (held-out free-form, frozen harness, 5 draws)
+DEFAULT_ARMS = {  # arm -> record dir (held-out free-form, frozen harness, 5 draws)
     "transcript": "/workspace/agam/chive_runs_dj/climb_test/transcript",
     "olens_rl_B": "/workspace/agam/chive_runs_dj/climb_test/olens_rl_B",
     "jlens_B": "/workspace/agam/chive_runs_dj/climb_test/jlens_B",
     "mlnla_B": "/tmp/chive_mlnla/climb_test/mlnla_B",
 }
+DEFAULT_DRAW_GLOB = "*.d*.json"  # every draw of every arm
+
+
+def arms_from_env(env: Mapping[str, str] = os.environ) -> dict[str, str]:
+    """``POINTS_ARMS='{"arm": "record dir", ...}'`` grades other runs (e.g. the fresh CHIVE
+    batches, docs/chive_fresh_scaleup.md); unset, the held-out climb_test arms above."""
+    return json.loads(env["POINTS_ARMS"]) if env.get("POINTS_ARMS") else dict(DEFAULT_ARMS)
+
+
+def draw_glob_from_env(env: Mapping[str, str] = os.environ) -> str:
+    """``POINTS_DRAW_GLOB`` selects the record files per arm, e.g. ``*.d[0-4].json`` = the 5 base
+    draws (excludes extra draws run later for another analysis)."""
+    return env.get("POINTS_DRAW_GLOB", DEFAULT_DRAW_GLOB)
+
+
+ARMS = arms_from_env()
+DRAW_GLOB = draw_glob_from_env()
 N_PLAIN = 3
 
 POINTS_SYSTEM = """You split the established explanation of a language model's behaviour into \
@@ -287,7 +306,7 @@ async def grade_one(args: Any, incs: dict[str, Incident], arm: str, f: Path, out
 
 
 def answer_files(args: Any, incs: dict[str, Incident]) -> list[tuple[str, Path]]:
-    files = [(arm, f) for arm, d in ARMS.items() for f in sorted(Path(d).glob("*.d*.json"))]
+    files = [(arm, f) for arm, d in ARMS.items() for f in sorted(Path(d).glob(DRAW_GLOB))]
     files += [("plain", f) for f in sorted((args.out / "plain").glob("*.json"))]
     return [
         (a, f)

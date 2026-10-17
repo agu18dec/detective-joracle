@@ -7,9 +7,12 @@ for the viewer). A malformed call raises ``ValueError`` (the loop shows it to th
 """
 
 import json
+import os
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..agent.loop import ToolLog
@@ -30,6 +33,19 @@ SAMPLES_PER_HIT = 3
 CLIP = 700  # characters of one readout in a search hit
 SHOW_TOKENS_MAX = 400
 SUBMIT = "submit_hypothesis"
+
+
+def baseline_counts(inc: Incident, env: Mapping[str, str] = os.environ) -> tuple[int, int]:
+    """The (k, n) an experiment result is compared against: the incident's CHIVE baseline, or,
+    with env ``CHIVE_BASELINES`` = a JSON file ``{prompt_id: {"k", "n", ...}}``, the baseline
+    re-measured with the experiment executor itself (``scripts/chive_fresh/baselines.py``), so the
+    effect compares like with like. Incidents missing from the file keep the CHIVE baseline."""
+    path = env.get("CHIVE_BASELINES")
+    if path:
+        b = json.loads(Path(path).read_text()).get(inc.prompt_id)
+        if b:
+            return int(b["k"]), int(b["n"])
+    return inc.k, inc.n
 
 
 def _schema(
@@ -486,7 +502,8 @@ class ChiveTools:
         }
         self.experiments_run.append(rec)
         event["experiment"] = {k: rec[k] for k in ("k", "n", "rate")}
-        base = self.inc.k / max(1, self.inc.n)
+        bk, bn = baseline_counts(self.inc)
+        base = bk / max(1, bn)
         shown = "".join(
             f"\n--- response {i + 1} [behaviour: {'yes' if v else 'no'}] ---\n{c[:1500]}"
             for i, (c, v) in enumerate(zip(res["completions"], res["verdicts"], strict=True))
@@ -494,7 +511,7 @@ class ChiveTools:
         )
         return (
             f"The behaviour occurred in {res['k']} of {res['n']} responses ({res['rate']:.0%}); "
-            f"baseline {self.inc.k}/{self.inc.n} ({base:.0%}).{shown}"
+            f"baseline {bk}/{bn} ({base:.0%}).{shown}"
         )
 
     def submit(self, args: dict[str, Any], event: dict[str, Any]) -> str:

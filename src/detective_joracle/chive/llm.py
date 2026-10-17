@@ -1,9 +1,12 @@
 """Claude over Anthropic's OpenAI-compatible endpoint, with keyless auth, plus a JSON helper.
 
 Auth, in order: ``ANTHROPIC_API_KEY`` if set; else a short-lived OAuth token fetched through the
-opsec tunnel's unix socket (``ant auth login`` on the Mac). The
+opsec tunnel's unix socket (``ant auth login`` on the Mac); else, when that socket does not exist
+(e.g. on a pod), the token pushed into the Modal Dict ``CHIVE_OAUTH_DICT`` (default
+``anthropic-oauth``, environment ``CHIVE_OAUTH_DICT_ENV``, default ``agam``) by ``push-judge-token``
+on the Mac, stored as ``{"token": ..., "pushed_at": ...}`` under the key ``token``. The
 token is re-fetched every ``REFRESH_S`` seconds and after a 401, so a multi-hour run outlives
-any one token. ``json_call`` gets structured output with a forced tool call, which the
+any one token (and picks up a re-push within ``REFRESH_S``). ``json_call`` gets structured output with a forced tool call, which the
 endpoint supports for every Claude model.
 """
 
@@ -20,7 +23,9 @@ from openai import AsyncOpenAI, AuthenticationError
 
 BASE_URL = "https://api.anthropic.com/v1/"
 OAUTH_BETA = "oauth-2025-04-20"
-REFRESH_S = 20 * 60
+REFRESH_S = 5 * 60
+DICT_NAME = os.environ.get("CHIVE_OAUTH_DICT", "anthropic-oauth")
+DICT_ENV = os.environ.get("CHIVE_OAUTH_DICT_ENV", "agam")
 
 
 class _Token:
@@ -55,10 +60,27 @@ class _Token:
 SOCK = os.environ.get("OP_REMOTE_SOCK", "/tmp/.opsec-agam.sock")
 
 
+def _token_from_dict() -> str:
+    """The OAuth token Agam pushed into the Modal Dict ``DICT_NAME`` (``push-judge-token``)."""
+    try:
+        import modal
+    except ImportError as e:  # same failure class as a missing tunnel
+        raise ConnectionError(
+            f"no opsec tunnel at {SOCK} and no `modal` package for the Modal Dict {DICT_NAME}"
+        ) from e
+    entry = modal.Dict.from_name(DICT_NAME, environment_name=DICT_ENV).get("token")
+    if not isinstance(entry, dict) or not entry.get("token"):
+        raise RuntimeError(
+            f"no OAuth token in Modal Dict {DICT_NAME}: run push-judge-token on the Mac"
+        )
+    return str(entry["token"])
+
+
 def _token_once() -> str:
-    """One OAuth token from the Mac through the opsec tunnel's unix socket."""
+    """One OAuth token: through the opsec tunnel's unix socket (Mac) when it exists, else from
+    the Modal Dict ``DICT_NAME`` (pod)."""
     if not os.path.exists(SOCK):
-        raise ConnectionError(f"no opsec tunnel at {SOCK} (on the Mac: start the optunnel)")
+        return _token_from_dict()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(30)
         s.connect(SOCK)

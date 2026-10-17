@@ -8,6 +8,8 @@ the CHIVE ``turns`` spec with turns numbered T1..Tn and optional exact-text span
 
 import asyncio
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -97,12 +99,17 @@ def apply_edit(messages: list[dict[str, str]], turns: Any) -> list[dict[str, str
     return out
 
 
+def samples_per_experiment(env: Mapping[str, str] = os.environ) -> int:
+    """Target samples per experiment: env ``CHIVE_EXP_N`` (default 12, the frozen harness)."""
+    return int(env.get("CHIVE_EXP_N", "12"))
+
+
 @dataclass
 class Executor:
     target_url: str
     target_model: str = "Qwen/Qwen3.6-27B"
     grader_model: str = "claude-opus-5"
-    N = 12
+    N = samples_per_experiment()  # read once, at import
     max_tokens: int = 500
 
     def _complete(self, messages: list[dict[str, str]]) -> list[str]:
