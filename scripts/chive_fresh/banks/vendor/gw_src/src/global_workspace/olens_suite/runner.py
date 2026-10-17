@@ -1,0 +1,310 @@
+"""In-container GPU helpers shared by the olens_suite Modal runners.
+
+Everything here runs INSIDE a Modal container (torch + CUDA + the pip deps present), reached via
+the image's ``add_local_dir(src)`` mount. Heavy deps are imported lazily inside each function so
+this module imports cleanly on CPU-only clients (mypy, tests, the local entrypoints).
+
+Two of the suite's load-bearing guards live here, each protecting against a failure that produced
+a plausible-looking but wrong result during development:
+
+  INERT ADAPTER   The OLens checkpoint was trained with compile_blocks=on, so its keys carry
+                  `._orig_mod.`. Loading onto an uncompiled model matches NOTHING and PEFT
+                  reports no error — you get the base model wearing a LoRA-shaped hat, which
+                  reads exactly like an interesting negative result. We compile-wrap first, then
+                  assert the adapter measurably changes logits (`load_lens`).
+  MERGE DRIFT     After capture the adapter is baked into the weights so generation runs eager
+                  (~4x faster). Verified against pre-merge logits; aborts if it drifted
+                  (`merge_lens`).
+"""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+PROBE_TEXT = "The capital of France is"
+
+
+@dataclass(frozen=True)
+class AoReadContract:
+    """A frozen AO read contract: one checkpoint, fed exactly the way it was trained.
+
+    Reading a checkpoint with another's transform/alpha/prompt is a different experiment,
+    not a noisier one — launchers take the whole contract, never individual numbers.
+    """
+
+    repo: str  # HF dataset repo holding the adapter
+    path: str  # path of the adapter dir inside the repo
+    prompt_kind: str  # verbalizer prompt the student was trained on (renderer_for key)
+    transform: str  # injection transform (make_sampler): "unit" | "scaled"
+    alpha: float  # unit-transform injection norm
+    layers: tuple[int, ...]  # default read layers
+
+    @property
+    def olens(self) -> str:
+        """The ``<repo>:<path>`` spec :func:`load_lens` takes."""
+        return f"{self.repo}:{self.path}"
+
+
+# The RL bullet AO ("ddp600"), served under its own contract (its meta.json / inject.json):
+# the concepts_raw 4-bullet student, injection = unit-normalized activation x alpha 16000.
+# Single source of truth for every ddp600 launcher (scripts/chive/ao_server_modal.py, the
+# scripts/diagnostic/filler_* reads); the registry row lives in docs/project/checkpoints.md.
+DDP600 = AoReadContract(
+    repo="agu18dec/local-workspace",
+    path="ckpts/ao/rl/iolens.final.ddp600.s0",
+    prompt_kind="concepts_raw",
+    transform="unit",
+    alpha=16000.0,
+    layers=(20, 36, 44, 52, 60),
+)
+
+# The ptag-lineage s3d pair (registry rows `s3d.rl` / `s3d.sft` in checkpoints.md and
+# diagnostic/inject_spec.py): same read contract as ddp600 (concepts_raw, unit alpha=16000,
+# trained band 20-60 step 4 — the 5 read layers are a subsample). Served for the CHIVE
+# predictor-agent eval by scripts/chive/ao_server_modal.py (CHIVE_AO_CONTRACT=S3D_RL600 /
+# S3D_SFT251 selects which).
+# NOTE (registry): RL branches A (clipped-std) / B (beta 0.05) may supersede iter_000600.
+S3D_RL600 = AoReadContract(
+    repo="agu18dec/local-workspace",
+    path="ckpts/ao/rl/s3d.ddp600.s0/iter_000600",
+    prompt_kind="concepts_raw",
+    transform="unit",
+    alpha=16000.0,
+    layers=(20, 36, 44, 52, 60),
+)
+
+S3D_SFT251 = AoReadContract(
+    repo="agu18dec/local-workspace",
+    path="ckpts/ao/distill/s3d.omp4bp.s2/step251",
+    prompt_kind="concepts_raw",
+    transform="unit",
+    alpha=16000.0,
+    layers=(20, 36, 44, 52, 60),
+)
+
+
+def resolve_blocks(model: Any) -> Any:
+    """The decoder-block ``ModuleList`` of a (possibly PEFT-wrapped) HF causal LM.
+
+    Text-arch checkpoints keep the blocks at ``model.model.layers``; the VL-arch snapshot
+    nests them one level down under ``language_model``. PEFT wrappers are unwrapped first.
+    """
+    if hasattr(model, "get_base_model"):
+        model = model.get_base_model()
+    inner = model.model
+    return inner.layers if hasattr(inner, "layers") else inner.language_model.layers
+
+
+def load_base(model_id: str, device: str = "cuda") -> tuple[Any, Any]:
+    """Tokenizer (left-padding, eos as pad fallback) + bf16 base model on `device`."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model_id)
+    tok.padding_side = "left"
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    base = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, device_map=device)
+    return tok, base
+
+
+def _fetch_adapter(repo: str, run_name: str) -> Path:
+    """Adapter dir for ``<repo>:<run>`` — model or dataset repo, ``<run>/lora/`` or flat.
+
+    The AO program's checkpoints live in a DATASET repo (agu18dec/local-workspace) and the
+    RL arm keeps its adapter at the run root (no ``lora/``); the original model-repo +
+    ``lora/``-only contract 404s on both. ``<repo>:.`` (or an empty run name) reads a repo
+    whose adapter sits at the REPO root (e.g. agu18dec/iolens-rl-clipstd-v1-iter075).
+    """
+    # ``vol:<path>`` — the adapter lives on the mounted iolens Modal volume (/ckvol), the only
+    # store for checkpoints newer than the 2026-08-20 HF quota wall (runner_common.ckpt_volume).
+    if repo == "vol":
+        for cand in (Path("/ckvol") / run_name / "lora", Path("/ckvol") / run_name):
+            if (cand / "adapter_model.safetensors").exists():
+                return cand
+        raise FileNotFoundError(f"no adapter under /ckvol/{run_name} (is the volume mounted?)")
+
+    from huggingface_hub import hf_hub_download, snapshot_download
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    # Fast path: fetch the two adapter files by name. snapshot_download lists the whole repo
+    # (hundreds of paginated API calls on local-workspace) even with allow_patterns, which
+    # 429s when many containers start at once; this is a handful of calls and works offline
+    # from the cache.
+    flat_root = run_name in ("", ".")
+    subs = ("lora", "") if flat_root else (f"{run_name}/lora", run_name)
+    for repo_type in ("dataset", "model"):
+        for sub in subs:
+            names = [f"{sub}/{f}" if sub else f
+                     for f in ("adapter_config.json", "adapter_model.safetensors")]
+            try:
+                got = [Path(hf_hub_download(repo, n, repo_type=repo_type)) for n in names]
+            except Exception:  # absent here: try the next layout, then fall back to listing
+                continue
+            return got[1].parent
+
+    flat_root = run_name in ("", ".")
+    pats = (
+        ["lora/*", "adapter_*"]
+        if flat_root
+        else [f"{run_name}/lora/*", f"{run_name}/adapter_*"]
+    )
+    try:
+        root = Path(snapshot_download(repo, allow_patterns=pats))
+    except RepositoryNotFoundError:
+        root = Path(snapshot_download(repo, repo_type="dataset", allow_patterns=pats))
+    cands = (root / "lora", root) if flat_root else (root / run_name / "lora", root / run_name)
+    for cand in cands:
+        if (cand / "adapter_model.safetensors").exists():
+            return cand
+    raise FileNotFoundError(f"no adapter under {repo}:{run_name} (tried lora/ and flat)")
+
+
+def load_lens(model_id: str, olens: str, device: str = "cuda") -> tuple[Any, Any, Any, Any, float]:
+    """Base model + OLens LoRA (``<repo>:<run>``), guarded against the INERT-ADAPTER failure.
+
+    Returns ``(tok, model, probe_ids, on_logits, delta)``. Keep ``probe_ids`` and ``on_logits``:
+    `merge_lens` re-checks the same probe against them after merging.
+    """
+    import torch
+    import torch.nn as nn
+    from peft import PeftModel
+    from safetensors import safe_open
+
+    tok, base = load_base(model_id, device)
+
+    # ---- OLens: compile-wrap iff the checkpoint needs it, then ASSERT it is live -----------
+    repo, run_name = olens.split(":", 1)
+    lora = _fetch_adapter(repo, run_name)
+    with safe_open(str(lora / "adapter_model.safetensors"), framework="pt") as f:
+        needs_compile = any("_orig_mod." in k for k in f.keys())  # noqa: SIM118
+    if needs_compile:
+        for m in base.modules():
+            ls = getattr(m, "layers", None)
+            if isinstance(ls, nn.ModuleList) and hasattr(m, "norm"):
+                blocks: Any = ls  # ModuleList __setitem__ wants a Module; compile returns a wrapper
+                for i in range(len(ls)):
+                    blocks[i] = torch.compile(blocks[i], dynamic=False)
+                print(f"[olens] compiled {len(ls)} blocks (_orig_mod checkpoint)", flush=True)
+                break
+    model = PeftModel.from_pretrained(base, str(lora)).eval()
+    probe = tok(PROBE_TEXT, return_tensors="pt").input_ids.to(device)
+    with torch.no_grad():
+        on = model(probe).logits[0, -1].float()
+        with model.disable_adapter():
+            off = model(probe).logits[0, -1].float()
+    delta = float((on - off).abs().max().item())
+    print(f"[olens] logit_delta={delta:.3f}", flush=True)
+    if delta < 1e-3:
+        raise RuntimeError("INERT adapter: it changes nothing. Check the _orig_mod key handling.")
+    return tok, model, probe, on, delta
+
+
+def merge_lens(model: Any, probe_ids: Any, ref_logits: Any) -> tuple[Any, float]:
+    """merge_and_unload + strip the ``_orig_mod`` compile wrappers, guarded against MERGE DRIFT.
+
+    Merging bakes the adapter into the weights so generation runs eager (~4x faster). Verified
+    against the pre-merge logits (`ref_logits` from `load_lens`); aborts if behaviour drifted.
+    Returns ``(merged_model, drift)``.
+    """
+    import torch
+    import torch.nn as nn
+
+    ref = ref_logits.clone()
+    model = model.merge_and_unload()
+    for m in model.modules():
+        ls = getattr(m, "layers", None)
+        if isinstance(ls, nn.ModuleList) and hasattr(m, "norm"):
+            blocks: Any = ls
+            for i in range(len(ls)):
+                if hasattr(blocks[i], "_orig_mod"):
+                    blocks[i] = blocks[i]._orig_mod
+            break
+    model.eval()
+    with torch.no_grad():
+        drift = float((model(probe_ids).logits[0, -1].float() - ref).abs().max().item())
+    print(f"[merge] drift={drift:.4f}", flush=True)
+    if drift > 0.5:
+        raise RuntimeError(f"merge changed behaviour (drift {drift}); refusing to proceed")
+    return model, drift
+
+
+def make_sampler(
+    model: Any,
+    tok: Any,
+    wv_prompts: dict[int, Any],
+    scale: float,
+    device: str = "cuda",
+    *,
+    transform: str = "scaled",
+    alpha: float = 0.0,
+) -> Callable[..., list[list[str]]]:
+    """The shared injection sampler over a MERGED model.
+
+    ``wv_prompts`` maps layer -> rendered verbalizer prompt (``render_wv_explain_prompt``), each
+    carrying ``input_ids`` and the injection ``slot``. The returned ``sample`` embeds the prompt,
+    writes ``scale * vec`` into the slot row (k rows per input vector), and samples:
+
+        sample(layer, vecs_2d, k, seed, max_new, temperature, top_p, batch=240)
+          -> [[k texts] for each row of vecs_2d]
+
+    Single-vector callers pass ``vec.unsqueeze(0)`` and take ``[0]``. Generation is DETERMINISTIC
+    given (activation, seed): the seed is set once per call and the batches consume the RNG
+    sequentially, so re-sampling at the same seed reproduces the block byte-for-byte.
+    """
+    import torch
+
+    embed = model.get_input_embeddings()
+
+    def sample(
+        layer: int,
+        vecs_2d: Any,
+        k: int,
+        seed: int,
+        max_new: int,
+        temperature: float,
+        top_p: float,
+        batch: int = 240,
+    ) -> list[list[str]]:
+        p = wv_prompts[layer]
+        pe0 = embed(torch.tensor([p.input_ids], device=device))[0]
+        v = vecs_2d.to(device).float()
+        if transform == "unit":  # norm-matched alpha * h/||h|| — the distill/RL AO contract
+            if alpha <= 0:
+                raise ValueError("transform=unit needs alpha > 0")
+            v = alpha * v / v.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        elif transform == "scaled":
+            v = scale * v
+        else:
+            raise ValueError(f"unknown transform {transform!r} (scaled|unit)")
+        rows = v.repeat_interleave(k, dim=0)
+        torch.manual_seed(seed)
+        outs: list[str] = []
+        for s in range(0, rows.shape[0], batch):
+            ch = rows[s : s + batch]
+            pe = pe0.unsqueeze(0).expand(ch.shape[0], -1, -1).clone()
+            pe[:, p.slot, :] = ch.to(pe.dtype)
+            at = torch.ones(pe.shape[0], pe.shape[1], dtype=torch.long, device=device)
+            with torch.no_grad():
+                g = model.generate(
+                    inputs_embeds=pe,
+                    attention_mask=at,
+                    max_new_tokens=max_new,
+                    do_sample=True,
+                    temperature=temperature,
+                    top_p=top_p,
+                    pad_token_id=tok.eos_token_id,
+                )
+            outs += tok.batch_decode(g, skip_special_tokens=True)
+        return [outs[i * k : (i + 1) * k] for i in range(vecs_2d.shape[0])]
+
+    return sample
+
+
+def matched_noise(vec: Any) -> Any:
+    """Gaussian noise renormalized to `vec`'s norm — the noise control for the readouts."""
+    import torch
+
+    g = torch.randn_like(vec)
+    return g / g.norm(dim=-1, keepdim=True) * vec.norm(dim=-1, keepdim=True)

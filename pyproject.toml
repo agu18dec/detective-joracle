@@ -47,7 +47,7 @@ packages = ["src/detective_joracle"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests", "scripts"]
-extend-exclude = ["servers"]
+extend-exclude = ["servers", "scripts/chive_fresh/banks/vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]

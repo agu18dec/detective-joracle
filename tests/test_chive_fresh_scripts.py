@@ -399,3 +399,21 @@ def test_build_incidents_tokenize_transcript() -> None:
     assert by_piece["<|im_start|>"] == [0, "control"] and by_piece["assistant"] == [0, "control"]
     with pytest.raises(ValueError, match="tokens >"):
         bi.tokenize_transcript(_FakeTok(), [{"role": "user", "content": "x " * 8000}], "y")
+
+
+# ------------------------------------------------------------------ bank container code
+def test_gw_src_defaults_to_the_vendored_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("modal")
+    monkeypatch.delenv("GW_SRC", raising=False)
+    rm = _load("banks/readers_modal.py")
+    vendored = FRESH / "banks" / "vendor" / "gw_src" / "src"
+    assert rm.GW_SRC == vendored
+    for f in (
+        "global_workspace/olens_suite/runner.py",
+        "global_workspace/ola/verbalizer.py",
+        "jlens/hooks.py",
+    ):
+        assert (rm.GW_SRC / f).is_file(), f
+    assert "515f5977244f6837216a48d997299fb766f00f91" in (vendored.parent / "README.md").read_text()
+    monkeypatch.setenv("GW_SRC", "/elsewhere/src")
+    assert _load("banks/readers_modal.py").GW_SRC == Path("/elsewhere/src")

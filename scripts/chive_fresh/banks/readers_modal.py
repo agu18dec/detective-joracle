@@ -42,9 +42,9 @@ Pinned revisions: bank_common.py. HF snapshots and the merged checkpoints live o
 `chive-fresh-hf` (`prep` fills it once per reader; idempotent, skipped with --skip-prep).
 GPU list: env CHIVE_BANKS_GPU (default H200; e.g. H200,B200 to widen).
 Container code: env GW_SRC = a global-workspace ``src/`` dir (``global_workspace`` + ``jlens``)
-uploaded into the image. Default: the snapshot the fresh banks were built with,
-/workspace/agam/chive_scale/banks_code/gw_src/src (it differs from global-workspace main in
-olens_suite/runner.py, olens_suite/karvonen.py and ola/verbalizer.py), else ``./gw_src/src``.
+uploaded into the image. Default: the vendored snapshot the fresh banks were built with,
+``vendor/gw_src/src`` (provenance in vendor/gw_src/README.md; it differs from global-workspace
+main in olens_suite/runner.py, olens_suite/karvonen.py and ola/verbalizer.py).
 """
 
 import json
@@ -66,20 +66,7 @@ OUT_VOLUME = os.environ.get("CHIVE_BANKS_VOLUME", "chive-fresh-banks")
 GPU = os.environ.get("CHIVE_BANKS_GPU", "H200").split(",")
 HF = "/hf"
 OUT = "/out"
-GW_SRC = Path(
-    os.environ.get("GW_SRC")
-    or next(
-        (
-            str(p)
-            for p in (
-                Path("/workspace/agam/chive_scale/banks_code/gw_src/src"),
-                HERE / "gw_src" / "src",
-            )
-            if p.is_dir()
-        ),
-        str(HERE / "gw_src" / "src"),
-    )
-)
+GW_SRC = Path(os.environ.get("GW_SRC") or HERE / "vendor" / "gw_src" / "src")
 MERGED = {
     "nla": f"{HF}/merged/nla_rl400_vl",
     "mlnla": f"{HF}/merged/mlnla_rl600_vl",

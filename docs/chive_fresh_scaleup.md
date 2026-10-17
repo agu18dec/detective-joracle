@@ -44,7 +44,7 @@ Every path is an env var whose default is the pod layout the runs used:
 | `CHIVE_TARGET_URL` | the vLLM endpoint serving the target, Qwen3.6-27B (`chive-qwen-vllm` app) |
 | `HARNESS_DIR` / `HARNESS_PY` | this repo and its `.venv` python |
 | `CHIVE_LOGS` | `/workspace/agam/logs/chive_fresh` |
-| `GW_SRC` | global-workspace `src/` snapshot uploaded into the bank containers (see Banks) |
+| `GW_SRC` | global-workspace `src/` uploaded into the bank containers (default: the vendored snapshot, see Banks) |
 
 ## Pipeline
 
@@ -113,10 +113,11 @@ harness's token-id check passes. It writes `<bank>/<pid>.json.gz` to the Modal v
 `chive-fresh-banks`, keeping HF snapshots and merged checkpoints on `chive-fresh-hf`. Every HF
 revision is pinned in `bank_common.py`. Reruns resume at (incident, layer) granularity.
 
-GPU list: `CHIVE_BANKS_GPU`. `GW_SRC` defaults to the snapshot the fresh banks were built with,
-`/workspace/agam/chive_scale/banks_code/gw_src/src`. It differs from global-workspace main in
-`olens_suite/runner.py`, `olens_suite/karvonen.py` and `ola/verbalizer.py`, so keep using it when
-you rebuild banks.
+GPU list: `CHIVE_BANKS_GPU`. `GW_SRC` defaults to the vendored snapshot the fresh banks were
+built with, `scripts/chive_fresh/banks/vendor/gw_src/src`. Its README records the source:
+`agam/chive-hard-cases@515f597`, plus `karvonen.py` from `camila/mlnla-viewer-am@9966287`. It
+differs from global-workspace main in `olens_suite/runner.py`, `olens_suite/karvonen.py` and
+`ola/verbalizer.py`, so keep using it when you rebuild banks.
 
 | bank | reader | settings |
 |---|---|---|
