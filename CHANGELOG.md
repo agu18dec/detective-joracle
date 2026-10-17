@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased: CHIVE fresh-incident scale-up
+
+* `chive/llm.py`: on a host without the opsec tunnel socket, the keyless token comes from the
+  Modal Dict `anthropic-oauth` (env `agam`; `CHIVE_OAUTH_DICT` / `CHIVE_OAUTH_DICT_ENV`), pushed
+  by `push-judge-token`; token refresh every 5 min.
+* Env switches, all off by default: `CHIVE_EXP_N` (samples per experiment), `CHIVE_BASELINES`
+  (experiment baseline re-measured with the same executor), `POINTS_ARMS` / `POINTS_DRAW_GLOB`
+  (`points_chive.py` inputs).
+* `scripts/chive_fresh/`: keyless CHIVE runner with runtime patches, CHIVE run dir -> dataset
+  builder, Modal bank builders (OLens, single-readout OLens, NLA, multi-layer NLA, J-lens),
+  derived banks, judge v2, point / strata / paired / shuffled-control reports, claims AUROC, and
+  job scripts. Docs: `docs/chive_fresh_scaleup.md`.
+
 ## 0.2.0 (unreleased)
 
 The agent loop can host another benchmark; every addition is opt-in and existing callers see

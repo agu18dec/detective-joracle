@@ -9,7 +9,10 @@ Code: `src/detective_joracle/chive/` (data, readers, tools, prompts, executor, j
 `scripts/*chive*.py`. Protocol and results: `chive_harness_climb.md` (the harness climb and
 held-out test), `chive_preregistration.md` (confidence strata and controls) and
 `chive_points_and_claims.md` (point-level and claim-level scoring of the held-out answers, the
-multi-layer NLA arm, the story variant and the SWE-chat pilot).
+multi-layer NLA arm, the story variant and the SWE-chat pilot). `chive_fresh_scaleup.md`: the
+scale-up to 915 fresh CHIVE incidents (CHIVE run -> dataset -> banks -> harness -> judges,
+`scripts/chive_fresh/`), with more arms, shuffled controls, judge v2 and a budgeted
+counterfactual.
 
 ## Data
 
@@ -25,7 +28,8 @@ held-out claims). The candidate sets are in `data/chive/choices/`.
 **Readouts.** A reader arm reads a precomputed readout file per incident
 (`<bank>/<prompt_id>.json.gz`: `token_ids` plus `readouts[layer][pos] = [samples]`). These files
 are not in the dataset. They come from `scripts/chive_bank/readers_modal.py` in the
-global-workspace repo, at these settings: OLens RL (`s3d_rl600`) 4 samples per cell, every
+global-workspace repo (for new incidents: `scripts/chive_fresh/banks/readers_modal.py` here, same
+settings, see `chive_fresh_scaleup.md`), at these settings: OLens RL (`s3d_rl600`) 4 samples per cell, every
 position, layers 20-60 step 4; NLA 4 samples per cell at L42; J-lens top-10 tokens at every
 layer. The loader checks token ids against the incident and refuses a mismatch.
 
@@ -35,13 +39,22 @@ layer. The loader checks token ids against the incident and refuses a mismatch.
 uv venv --python 3.12 .venv && uv pip install -e ".[dev,plot]"
 ```
 
-- **Claude:** keyless OAuth through the opsec tunnel (`chive/llm.py`; socket
-  `OP_REMOTE_SOCK`, default `/tmp/.opsec-agam.sock`; `ant auth login` on the Mac). Run
-  `unset ANTHROPIC_API_KEY` first: a set key is used instead of the keyless token.
+- **Claude:** keyless OAuth (`chive/llm.py`). On the Mac, it comes through the opsec tunnel
+  (socket `OP_REMOTE_SOCK`, default `/tmp/.opsec-agam.sock`; `ant auth login`). Where that socket
+  does not exist (the pod), it comes from the Modal Dict `anthropic-oauth` (env `agam`; override
+  with `CHIVE_OAUTH_DICT` / `CHIVE_OAUTH_DICT_ENV`), which Agam fills with `push-judge-token` on the
+  Mac. The token is re-read every 5 min and after a 401. Run `unset ANTHROPIC_API_KEY` first: a set
+  key is used instead of the keyless token.
 - **Target, for experiments only** (budgets > 0): Qwen3.6-27B on vLLM,
   `modal deploy scripts/serve_qwen_vllm_modal.py`, then pass its URL as `target=` (required
   with `experiments > 0`).
   Read-only runs need no GPU.
+- **Env switches** (all off by default, frozen behaviour):
+  - `CHIVE_EXP_N`: target samples per experiment (default 12).
+  - `CHIVE_BASELINES`: a JSON `{prompt_id: {k, n}}` of baselines re-measured with the same
+    executor, used as the experiment's comparison point.
+  - `POINTS_ARMS` / `POINTS_DRAW_GLOB`: the record dirs and draws `points_chive.py` grades.
+  - `chive_fresh_scaleup.md` shows how they are used.
 
 ## The harness
 
@@ -92,6 +105,7 @@ Other entrypoints, each documented in its header:
 | `claims_chive.py` | CHIVE's binary claim eval: one focused episode per claim, AUROC |
 | `points_chive.py` | point-level grading: recall of non-obvious / primary points, disproved claims, rivals |
 | `plot_heldout_methods.py`, `plot_claims.py`, `plot_points.py` | the figures in `docs/figures/chive/` |
+| `chive_fresh/` | the fresh-incident pipeline: keyless CHIVE runner, dataset builder, bank builders, judge v2, reports (`chive_fresh_scaleup.md`) |
 
 ## Results (held-out, 204 incidents x 5 draws)
 
