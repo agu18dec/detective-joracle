@@ -288,6 +288,8 @@ class ChiveTools:
     edits: list[str] | None = None  # yes/no: the edit ids that need a prediction
     continuation: bool = False  # the continue_from tool (needs an executor for the target)
     text_first: bool = False  # readout tools locked until commit_text_hypothesis
+    recur: bool = False  # search reports recurrence vs the base rate (variant "recur")
+    llmfilter: bool = False  # inspect output condensed by an LLM filter (variant "llmfilter")
     aux: Reader | None = None  # a second method's readouts: <name>_search / <name>_inspect
     committed: dict[str, Any] | None = None
 
@@ -330,6 +332,8 @@ class ChiveTools:
                 out = self.commit(args)
             else:
                 out = handlers[name](args, event)
+                if name == "inspect" and self.llmfilter:
+                    out = await filter_inspect(out, self.reader.kind if self.reader else "")
         except ValueError as e:
             event["error"] = str(e)
             self.events.append(event)
@@ -417,7 +421,26 @@ class ChiveTools:
             "By turn: " + ", ".join(f"{t} {c}" for t, c in by_turn.most_common()),
             f"Top {len(top)} positions (most matching readouts first):",
         ]
+        if self.recur:
+            base = n_hits / max(1, n_scanned)
+            lines.insert(1, f"Base rate: {100 * base:.2f}% of all readouts match this pattern.")
         for p in top:
+            if self.recur:
+                cell = self.reader.cell(p)
+                tot = sum(len(v) for v in cell.values()) or 1
+                n_layers = len({layer for layer, _ in hits[p]})
+                near = sum(1 for q in range(p - 2, p + 3) if q != p and q in hits)
+                rate = len(hits[p]) / tot
+                verdict = ("RECURRING" if (len(hits[p]) >= 3 and n_layers >= 2 and rate >= 3 * base)
+                           else "SINGLE/WEAK -- not evidence on its own")
+                lines.append(
+                    f"{self.inc.where(p)}: {len(hits[p])}/{tot} readouts here match "
+                    f"({100 * rate:.0f}% vs base {100 * base:.2f}%), {n_layers} layers, "
+                    f"{near} of 4 neighbours also match -> {verdict} -- {self.inc.context(p, 6)}"
+                )
+                for layer, s in sorted(hits[p])[:SAMPLES_PER_HIT]:
+                    lines.append(f"   L{layer}: {s[:CLIP]}")
+                continue
             lines.append(
                 f"{self.inc.where(p)}: {len(hits[p])} matching -- {self.inc.context(p, 6)}"
             )
@@ -562,3 +585,28 @@ def render_experiments(exps: list[dict[str, Any]]) -> str:
                     f"--- response {j + 1} [behaviour: {'yes' if v else 'no'}] ---\n{c[:1500]}"
                 )
     return "\n\n".join(parts)
+
+
+FILTER_SYS = """You condense raw interpretability readouts for an investigator. Each readout is one sampled \
+description of what a language model's activation encodes at one token and layer; single samples often \
+borrow vivid details from similar contexts and can mislead. From the raw tool output below:
+1. List the claims about what the model represents that RECUR: in at least 2 samples or 2 layers at the \
+inspected position or its neighbours. For each: the claim in a few words, its count (e.g. "7/44 readouts, \
+L28-L48"), and one short quoted example.
+2. Do not list: restatements of text visible near the token, generic chat-template chatter, or details that \
+appear only once.
+3. End with one line: "Dropped one-off claims: <n>; e.g. <2-3 short examples>".
+Keep the header lines (=== position ===, context) verbatim at the top. Plain text, at most 25 lines."""
+
+
+async def filter_inspect(raw: str, kind: str) -> str:
+    from . import llm
+    try:
+        c = llm.client()
+        r = await c.chat.completions.create(model="claude-sonnet-5", max_tokens=1500,
+                                            messages=[{"role": "system", "content": FILTER_SYS},
+                                                      {"role": "user", "content": f"Reader: {kind}\n\n{raw[:60000]}"}])
+        txt = (r.choices[0].message.content or "").strip()
+    except Exception as e:  # filter outage: fall back to the raw output
+        return raw + f"\n(filter unavailable: {type(e).__name__})"
+    return "FILTERED VIEW (an assistant kept only recurring claims, with counts):\n" + txt

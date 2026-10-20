@@ -27,6 +27,8 @@ with KIND one of olens | nla | jlens.
 
 import asyncio
 import json
+import os
+import threading
 import time
 import traceback
 from collections import Counter, defaultdict
@@ -174,6 +176,8 @@ async def _episode(
             text_first=tfirst,
             aux=aux,
             edits=edit_ids,
+            recur="recur" in args.variants,
+            llmfilter="llmfilter" in args.variants,
         )
         backend = agent_backend(args.max_tokens, args.effort, model)
         system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants), aux)
@@ -262,7 +266,7 @@ def _save(
         "seconds": round(time.time() - t0, 1),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(row, ensure_ascii=False))
+    _atomic_write(path, json.dumps(row, ensure_ascii=False))
     errs = sum(1 for e in extra.get("events", []) if e.get("error"))
     log(
         args.out,
@@ -304,6 +308,14 @@ def stage_agent(args: Any) -> None:
 # --------------------------------------------------------------------------- judge / top20 / B
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write a record atomically (temp file + rename): concurrent judge/agent processes on the same
+    eval dir must never interleave writes into one file."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.monotonic_ns()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def records(out: Path, ev: str) -> list[Path]:
     return sorted((out / ev).glob("*/*.d*.json"))
 
@@ -330,7 +342,7 @@ async def _judge_one(path: Path, inc: Incident, key: str, text: str) -> None:
     got = await full_score(inc, text)
     r = json.loads(path.read_text())
     r[key] = got
-    path.write_text(json.dumps(r, ensure_ascii=False))
+    _atomic_write(path, json.dumps(r, ensure_ascii=False))
 
 
 def stage_judge(args: Any) -> None:
@@ -402,7 +414,7 @@ def stage_top20(args: Any) -> None:
         rec["item_scores"] = [g[0] for g in got_scores]
         rec["item_judges"] = sorted({g[1] for g in got_scores})
         rec["matches"] = [x >= J.PASS for x in rec["item_scores"]]
-        f.write_text(json.dumps(rec, ensure_ascii=False))
+        _atomic_write(f, json.dumps(rec, ensure_ascii=False))
 
     asyncio.run(run_many([lambda i=i: one(i) for i in incs.values()], args.concurrency))
     log(args.out, f"top20: {len(list(d.glob('*.json')))} lists")
@@ -436,7 +448,7 @@ def stage_concluder(args: Any) -> None:
         judgement = await full_score(inc, got["hypothesis"])
         r = json.loads(path.read_text())
         r["concluder"], r["concluder_judge"] = got, judgement
-        path.write_text(json.dumps(r, ensure_ascii=False))
+        _atomic_write(path, json.dumps(r, ensure_ascii=False))
 
     jobs = []
     for path in records(args.out, args.eval):

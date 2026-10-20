@@ -255,3 +255,83 @@ python3 $A/hverify.py fresh1 <pid> <pos> '<regex>' --others   # recount readouts
 
 `passk_chive.py eval=<batch>_exp1n30 ...` and `run_chive.py stage=report` work on the fresh evals
 just as on `climb_test`. Every stage and script resumes, so it is safe to rerun.
+
+## Final results (2026-10-20)
+
+Copied from /workspace/agam/experiments/chive/SUMMARY.md. HF (private): agu18dec/chive-fresh-readers-eval @ f359a8f5b80ba80b98d467a7a6837bf4377b5ea8.
+### Setup
+- 915 fresh CHIVE incidents (4 batches from the CHIVE pipeline; same structure as climb_test204: ~2.3 true causes,
+  ~2.6 refuted rivals per incident).
+- Same frozen detective-joracle harness for every arm: Opus 5 investigator (effort max), textfirst + absence
+  variants, Opus 1-10 judge (3 replicates, pass = mean ≥ 7) against the ground truth.
+- Arms: transcript only; OLens ×4 (4-bullet RL600, k=4 samples per cell); multi-layer NLA ×4 (camilablank rl600,
+  k=4); J-lens L20-60; plus single-bullet OLens ×1/2/4/8/16. Readouts at layers 20-60 step 4, every token.
+
+### Results (915 incidents, 10 draws each)
+| arm | pass@1 | Δ vs transcript | pass@5 |
+|---|---|---|---|
+| transcript | 64.7 | – | 77.5 |
+| OLens ×4 | 68.3 | +3.6 [+1.8, +5.6] | 84.5 |
+| J-lens L20-60 | 67.8 | +3.1 [+1.3, +4.9] | 82.1 |
+| multi-layer NLA ×4 | 69.8 | +5.1 [+3.3, +6.9] | 85.0 |
+OLens − NLA paired (10 draws): pass@1 −1.5 [−2.8, −0.1]; pass@5 −0.5 [−2.0, +1.0]; hardest third −0.6 [−3.2, +2.1];
+least-confident third −3.0 [−5.9, −0.1].
+
+### Is it a bug? No
+- Judge: true cause passes 99%, refuted rival / other-incident / generic 0%; ~1% verdict flips on re-judge;
+  re-scores the original NLA run 70.0 → 70.0 (`judge_audit.png`).
+- Readouts: banks complete (100% coverage, k samples per cell), token-aligned (harness checks token ids), served
+  in full to the agent (no trimming); shuffled readouts drop every reader to transcript level (`shuffled_control.png`).
+- Replication of climb_test204 (Agam's held-out): identical prompts and served readouts; rebuilt banks = original
+  banks within noise. With 15 draws pooled, OLens − NLA is +1.5 [−1.3, +4.2] overall and +6.0 [+0.1, +12.5] on the
+  least-confident third. The original NLA run was a low draw (and kept 47 rate-limited episodes)
+  (`climb_test204_pooled.png`, replicate_runs/REPORT.md).
+- On the fresh 915 the least-confident third reverses: OLens − NLA −3.6 [−6.5, −0.5] at 10 draws (n=240).
+
+### Why every arm is close
+- ~50% of incidents are solved by transcript alone in every draw; ~22% fail every draw.
+- About a third of incidents are coin flips for the Opus investigator (draw-to-draw variance, equal for OLens and NLA:
+  `nla_variance.png`); 76% of outcomes are fixed by the transcript-only hypothesis the agent commits before readouts.
+- Readouts add +7-8 pp within a run (fail→pass 16%, pass→fail 8%), the same for OLens and NLA; J-lens +2.
+
+### What OLens and NLA readouts are like
+- NLA: ~45% of samples open with a genre/register label ("Genre: alternate-history wiki entry…"). Bland, rarely lures.
+- OLens: specific content (entities, dates, constraints). More informative but sometimes lures the agent to a refuted
+  rival (8 of 21 NLA-only wins are OLens lures; analysis/nla_vs_olens.md).
+
+### Harness changes tried to make OLens win (dev: 240 incidents × 3 draws)
+| change | OLens | NLA |
+|---|---|---|
+| recurrence counts in search | −1.5 | −2.4 |
+| LLM readout filter | −3.6 | −0.8 |
+| commit 3 candidates, readouts choose | −2.4 | −2.6 |
+| consensus pick across draws | +1.7 | +2.8 |
+| antilure prompt (held-out fresh3+4) | +1.0 | −0.2 |
+| more samples: single-bullet ×16 vs ×1 | +2.5 (ties NLA) | – |
+
+### Point eval (judge v2, final hypothesis only; transcript/OLens/NLA at 10 draws, J-lens L0-62 at 5; n=911)
+| metric | transcript | OLens ×4 | NLA ×4 | OLens − tr | NLA − tr |
+|---|---|---|---|---|---|
+| true points asserted | 28.9 | 28.0 | 28.5 | −0.9 [−1.6, −0.1] | −0.4 [−1.1, +0.3] |
+| non-obvious points asserted | 14.0 | 13.7 | 14.0 | −0.3 [−1.1, +0.4] | −0.1 [−0.7, +0.7] |
+| refuted rivals asserted | 31.4 | 23.3 | 23.9 | −8.1 [−10.1, −6.3] | −7.5 [−9.4, −5.6] |
+Readouts do not raise recall of true (or non-obvious) points; they cut assertion of refuted rivals by ~8 pp, equally for
+OLens and NLA (−10 pp on the least-confident third). That is where the free-form pass gain comes from.
+
+### MCQ eval (10 candidate causes, 1 true; dev incidents passing the leak check, ~3 draws)
+| version | n | transcript acc | OLens ×4 | NLA ×4 | J-lens | single ×16 | OLens − NLA acc | OLens − NLA p(truth) |
+|---|---|---|---|---|---|---|---|---|
+| v2 (blind picker 43%) | 115 | 58.3 | 60.3 | 55.4 | 57.4 | 59.4 | +4.9 [−1.2, +11.0] | +2.9 [+0.9, +4.9] |
+| v3 hard (blind 26%) | 176 | 58.7 | 57.8 | 58.3 | 55.9 | 58.1 | −0.6 [−5.1, +4.0] | +0.4 [−1.0, +1.8] |
+No reader raises MCQ accuracy over transcript. Readers cut picks of refuted rivals by 5-8 pp on v2 (where more options are
+CHIVE refuted causes); ~1 pp on v3. v2's OLens > NLA p(truth) edge does not replicate on the larger, harder v3.
+Graphs: `mcq_v2_bars.png`, `mcq_v3hard_bars.png`.
+
+### Conclusion
+In this harness OLens ≈ multi-layer NLA; both beat transcript by ~4 pp and J-lens by ~1-2 pp. OLens's edge on the
+least-confident third of climb_test204 does not generalise to fresh incidents. More readout samples is the only
+lever that helped OLens. MCQ confirms it: no reader beats transcript at picking the true cause among 10, and OLens ≈ NLA (v3).
+
+### Harness changes in this commit
+- `run_chive.py`: every record write is atomic (temp file + rename; unique temp name per call). The judge stage rescans every arm in an eval dir, so overlapping judge processes previously could interleave writes and corrupt a record (3 of 122,371 records were hit).
+- Variants (all off by default, prompt byte-identical without them): `recur` (search reports k/n per position, layers, neighbours, base rate; RECURRING vs SINGLE/WEAK), `llmfilter` (Sonnet condenses inspect output; falls back to raw), `multicand` (commit 3 ranked candidates, readouts discriminate), `antilure` (weigh single vivid readouts). Dev results are in the table above: none beats NLA.

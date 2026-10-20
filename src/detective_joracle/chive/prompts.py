@@ -106,6 +106,49 @@ the response, list every role or frame the readouts there put the model in (who 
 answers to, what kind of task it thinks this is), with counts such as "judge 2/4 at L32", \
 minority ones included; then say which, if any, bear on the behaviour."""
 
+ANTILURE = """## Weighing a single vivid readout
+Readouts are sampled decodings of the model's state; a decoder can also confabulate a fluent, \
+specific continuation at one token (e.g. "remove the namespace unless necessary", "this contains \
+factual inaccuracies"). Such a line is weak evidence on its own, and it is most misleading when it \
+restates a candidate the transcript already makes salient: then it may just echo the text. Before \
+a readout counts as support for a candidate:
+- Recurrence: the reading appears in most samples at that token, at two or more layers, and at \
+neighbouring tokens -- not one sample at one layer.
+- Control: search for the same reading at positions where it should NOT appear (another turn, an \
+unrelated sentence). If it shows up there too, it is generic and does not count.
+- Discrimination: name your strongest rival and ask whether the readout would look different if \
+the rival were the cause. A readout that both candidates predict does not decide between them.
+If a vivid readout fails these checks, set it aside and decide from the remaining evidence. In \
+`evidence`, give for the key readout: the token, the layers, how many lines agree out of how many, \
+and the result of the control search."""
+
+
+RECUR = """## Recurrence is the evidence
+search reports, for each position, how many of its readouts match, across how many layers, whether \
+neighbouring tokens match too, and the pattern's base rate over the whole conversation. A reading \
+marked RECURRING (several samples and layers, well above the base rate) is evidence about what the \
+model represents there. A reading marked SINGLE/WEAK is one draw and can be borrowed from a similar \
+context: never revise your committed hypothesis on SINGLE/WEAK readings, however vivid or specific. \
+Before you change or extend your hypothesis, search for the new reading AND for your committed \
+mechanism, and compare their recurrence. Keep the final hypothesis to the one mechanism with the \
+strongest recurring support; do not append side-stories."""
+
+LLMFILTER = """## Filtered readouts
+inspect returns a FILTERED VIEW: an assistant read every sample at that position and its neighbours and \
+kept only claims that recur, with counts, dropping one-off details. Treat the counts as the strength of \
+the evidence. Revise your committed hypothesis only for a recurring claim that contradicts it, and keep \
+the final hypothesis to one mechanism."""
+
+MULTICAND = """## Several candidates, then discriminate
+When you call commit_text_hypothesis, put THREE distinct candidate mechanisms in `hypothesis`, ranked \
+(C1 most likely), each naming the specific feature of the conversation it depends on, with a rough \
+probability for each. They must be genuinely different causes, not variants of one. After the tools \
+unlock, use the readouts to DISCRIMINATE between the candidates: for each, search for the feature it \
+names and inspect the tokens where it would act, and ask whether the model represents that feature \
+in the way the behaviour needs, at those tokens. Prefer the candidate with the strongest support; \
+switch to a fourth mechanism only if the readouts clearly show it. Submit ONE mechanism as the \
+final `hypothesis`, without side-stories."""
+
 CONTINUE = """## Sampling the target model
 continue_from(position) samples how the target model continues the text from just after that \
 token (4 short samples): what it is about to write there. It shows where a position leads, not \
@@ -140,8 +183,16 @@ def system_prompt(
         parts.append(TEXTFIRST)
     if "absence" in variants and reader is not None:
         parts.append(ABSENCE)
+    if "recur" in variants and reader is not None:
+        parts.append(RECUR)
+    if "multicand" in variants and reader is not None:
+        parts.append(MULTICAND)
+    if "llmfilter" in variants and reader is not None:
+        parts.append(LLMFILTER)
     if "story" in variants and reader is not None:
         parts.append(STORY)
+    if "antilure" in variants and reader is not None:
+        parts.append(ANTILURE)
     if "continue" in variants:
         parts.append(CONTINUE)
     if aux is not None and reader is not None:
