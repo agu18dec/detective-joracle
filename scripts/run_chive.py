@@ -178,6 +178,8 @@ async def _episode(
             edits=edit_ids,
             recur="recur" in args.variants,
             llmfilter="llmfilter" in args.variants,
+            echotag="echotag" in args.variants,
+            revgate="revgate" in args.variants and tfirst,
         )
         backend = agent_backend(args.max_tokens, args.effort, model)
         system = system_prompt(reader, args.experiments, Executor.N, tuple(args.variants), aux)
@@ -201,6 +203,7 @@ async def _episode(
                 text_first=tfirst,
                 aux=aux,
                 edits=edit_ids,
+                revgate="revgate" in args.variants and tfirst,
             ),
             system,
             first,

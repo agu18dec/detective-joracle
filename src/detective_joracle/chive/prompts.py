@@ -139,6 +139,30 @@ kept only claims that recur, with counts, dropping one-off details. Treat the co
 the evidence. Revise your committed hypothesis only for a recurring claim that contradicts it, and keep \
 the final hypothesis to one mechanism."""
 
+REXP = """## Experiments decide
+Use your experiments to decide between candidate causes instead of arguing from evidence alone. First \
+experiment: test your leading (committed) mechanism with a clean single-feature edit. Spend the remaining \
+experiments on the strongest ALTERNATIVE: one your readouts suggest if you have readouts, otherwise the \
+strongest rival the transcript suggests. Adopt a cause only if an experiment that removes or changes its \
+feature moves the behaviour clearly (about 30 points or more); keep a mechanism whose experiment moved the \
+behaviour even if readouts seem to point elsewhere; and drop one whose experiment did not move it. Your final \
+hypothesis should be the mechanism your experiments support."""
+
+ECHOTAG = """## Echo and preview tags
+Readout lines are tagged automatically. [ECHO] means the line mostly restates words visible in the \
+conversation; [PREVIEW] means it mostly restates what the response goes on to write from that point. Both \
+show what the model is reading or about to say, not WHY: a [PREVIEW] line saying the model will "assume X" or \
+"flag Y" is the behaviour itself, not its cause. Never take a cause from [ECHO] or [PREVIEW] lines. Causal \
+evidence is untagged content the text does not state, recurring across samples and layers."""
+
+REVGATE = """## Keeping or revising your committed hypothesis
+Your committed transcript-only hypothesis is usually right; readouts most often help by confirming it, \
+sharpening it, or ruling out its rival. When you submit, say whether the final hypothesis departs from the \
+committed one (changed_from_commit: a different mechanism, OR any extra causal factor taken from the \
+readouts). If it does, cite the readouts that justify the change; the harness checks once that they recur \
+(several samples and layers at that position) and are not echoes of the visible text or previews of the \
+response. Do not add side-stories from readouts to a committed mechanism they do not contradict."""
+
 MULTICAND = """## Several candidates, then discriminate
 When you call commit_text_hypothesis, put THREE distinct candidate mechanisms in `hypothesis`, ranked \
 (C1 most likely), each naming the specific feature of the conversation it depends on, with a rough \
@@ -187,6 +211,10 @@ def system_prompt(
         parts.append(RECUR)
     if "multicand" in variants and reader is not None:
         parts.append(MULTICAND)
+    if "echotag" in variants and reader is not None:
+        parts.append(ECHOTAG)
+    if "revgate" in variants and reader is not None:
+        parts.append(REVGATE)
     if "llmfilter" in variants and reader is not None:
         parts.append(LLMFILTER)
     if "story" in variants and reader is not None:
@@ -204,6 +232,8 @@ def system_prompt(
         )
     if experiments:
         parts.append(EXPERIMENT.format(n=experiments, N=n_samples))
+        if "rexp" in variants:
+            parts.append(REXP)
     return "\n\n".join(parts)
 
 

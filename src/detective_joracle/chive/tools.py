@@ -30,6 +30,22 @@ WINDOW = {
 MAX_WINDOW = 8
 SEARCH_K = 20
 SAMPLES_PER_HIT = 3
+_WORD = re.compile(r"[a-z0-9']{3,}")
+
+
+def _grams(text: str, n: int = 3) -> set[tuple[str, ...]]:
+    w = _WORD.findall(text.lower())
+    return {tuple(w[i : i + n]) for i in range(len(w) - n + 1)}
+
+
+def _overlap(line: str, ref: set[tuple[str, ...]]) -> float:
+    g = _grams(line)
+    return len(g & ref) / len(g) if len(g) >= 2 else 0.0
+
+
+def _qmatch(quote: str, line: str) -> bool:
+    qw = set(_WORD.findall(quote.lower()))
+    return bool(qw) and len(qw & set(_WORD.findall(line.lower()))) >= 0.6 * len(qw)
 CLIP = 700  # characters of one readout in a search hit
 SHOW_TOKENS_MAX = 400
 SUBMIT = "submit_hypothesis"
@@ -69,6 +85,7 @@ def schemas(
     text_first: bool = False,
     aux: Reader | None = None,
     edits: list[str] | None = None,
+    revgate: bool = False,
 ) -> list[dict[str, Any]]:
     """The tools; with `letters`, submit also requires the chosen candidate (candidate selection);
     with `edits` (yes/no), submit and commit_text_hypothesis also require a probability per edit."""
@@ -216,6 +233,18 @@ def schemas(
             ["hypothesis"],
         )
     )
+    if revgate and reader is not None:
+        sp = out[-1]["function"]["parameters"]
+        sp["properties"]["changed_from_commit"] = {
+            "type": "string", "enum": ["yes", "no"],
+            "description": "yes if the final hypothesis's mechanism, or any causal factor you added, comes from the "
+            "readouts rather than your committed transcript-only hypothesis"}
+        sp["properties"]["cited_readouts"] = {
+            "type": "array", "description": "if changed_from_commit is yes: the readouts that justify the change "
+            "(position and a short verbatim quote of one readout line)",
+            "items": {"type": "object", "properties": {"position": {"type": "integer"}, "quote": {"type": "string"}},
+                      "required": ["position", "quote"]}}
+        sp["required"] = [*sp["required"], "changed_from_commit"]
     if letters:
         props = out[-1]["function"]["parameters"]
         props["properties"]["choice"] = {
@@ -290,6 +319,9 @@ class ChiveTools:
     text_first: bool = False  # readout tools locked until commit_text_hypothesis
     recur: bool = False  # search reports recurrence vs the base rate (variant "recur")
     llmfilter: bool = False  # inspect output condensed by an LLM filter (variant "llmfilter")
+    echotag: bool = False  # readout lines tagged [ECHO]/[PREVIEW] by n-gram overlap (variant "echotag")
+    revgate: bool = False  # leaving the committed hypothesis needs recurring cited readouts (variant "revgate")
+    gate_report: str | None = None
     aux: Reader | None = None  # a second method's readouts: <name>_search / <name>_inspect
     committed: dict[str, Any] | None = None
 
@@ -330,6 +362,9 @@ class ChiveTools:
                 out = await self.continue_from(args, event)
             elif name == "commit_text_hypothesis":
                 out = self.commit(args)
+            elif name == SUBMIT and self.revgate:
+                await self._gate(args, event)
+                out = handlers[name](args, event)
             else:
                 out = handlers[name](args, event)
                 if name == "inspect" and self.llmfilter:
@@ -439,13 +474,13 @@ class ChiveTools:
                     f"{near} of 4 neighbours also match -> {verdict} -- {self.inc.context(p, 6)}"
                 )
                 for layer, s in sorted(hits[p])[:SAMPLES_PER_HIT]:
-                    lines.append(f"   L{layer}: {s[:CLIP]}")
+                    lines.append(f"   L{layer}: {self._tag(p, s)[:CLIP]}")
                 continue
             lines.append(
                 f"{self.inc.where(p)}: {len(hits[p])} matching -- {self.inc.context(p, 6)}"
             )
             for layer, s in sorted(hits[p])[:SAMPLES_PER_HIT]:
-                lines.append(f"   L{layer}: {s[:CLIP]}")
+                lines.append(f"   L{layer}: {self._tag(p, s)[:CLIP]}")
         return "\n".join(lines)
 
     def inspect(self, args: dict[str, Any], event: dict[str, Any]) -> str:
@@ -461,7 +496,7 @@ class ChiveTools:
         for layer, samples in sorted(self.reader.cell(pos).items()):
             if layers is None or layer in layers:
                 lines.append(
-                    f"L{layer}: " + " | ".join(f"({i}) {s}" for i, s in enumerate(samples, start=1))
+                    f"L{layer}: " + " | ".join(f"({i}) {self._tag(pos, s)}" for i, s in enumerate(samples, start=1))
                 )
         neighbours = [
             p for p in range(pos - w, pos + w + 1) if p != pos and 0 <= p < self.inc.n_tokens
@@ -472,8 +507,84 @@ class ChiveTools:
                 lines.append(f"{self.inc.where(p)}")
                 for layer, samples in sorted(self.reader.cell(p).items()):
                     if (layers is None or layer in layers) and samples:
-                        lines.append(f"   L{layer}: {samples[0]}")
+                        lines.append(f"   L{layer}: {self._tag(p, samples[0])}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------ echo / preview tags
+    def _refs(self) -> set[tuple[str, ...]]:
+        if not hasattr(self, "_prompt_grams"):
+            self._prompt_grams = _grams("".join(self.inc.pieces[: self.inc.response_start]))
+        return self._prompt_grams
+
+    def _tag_line(self, pos: int, line: str) -> str:
+        """[ECHO]: >=50% of the line's word 3-grams are in the visible conversation before the response;
+        [PREVIEW]: >=40% are in the next 80 tokens of the response from this position (what it goes on to write)."""
+        a = max(pos + 1, self.inc.response_start)
+        nxt = set(_WORD.findall("".join(self.inc.pieces[a : a + 80]).lower()))
+        lw = [w for w in _WORD.findall(line.lower()) if len(w) > 3]
+        if pos >= self.inc.response_start - 16 and len(lw) >= 5 and sum(w in nxt for w in lw) >= 0.6 * len(lw):
+            return "[PREVIEW] "
+        if _overlap(line, self._refs()) >= 0.5:
+            return "[ECHO] "
+        return ""
+
+    def _tag(self, pos: int, sample: str) -> str:
+        if not self.echotag:
+            return sample
+        return "\n".join(self._tag_line(pos, ln) + ln for ln in str(sample).split("\n"))
+
+    def _support(self, pos: int, quote: str) -> dict[str, Any]:
+        """How widely a cited readout recurs at its position: matching lines / all lines, layers, echo share."""
+        assert self.reader is not None
+        tot = hit = echo = 0
+        layers = set()
+        for layer, samples in self.reader.cell(pos).items():
+            for s in samples:
+                for ln in str(s).split("\n"):
+                    if not ln.strip():
+                        continue
+                    tot += 1
+                    if _qmatch(quote, ln):
+                        hit += 1
+                        layers.add(layer)
+                        echo += bool(self._tag_line(pos, ln))
+        return {"pos": pos, "lines": tot, "match": hit, "layers": len(layers), "echo": echo}
+
+    async def _gate(self, args: dict[str, Any], event: dict[str, Any]) -> None:
+        """Once per episode, before a final hypothesis that departs from the committed one is accepted:
+        recount every cited readout in the bank (matching lines / all lines at its position, layers,
+        echo/preview share), then one critic call (no ground truth) judges whether that evidence justifies
+        leaving the committed mechanism, given the known readout pitfalls. Rejected once with the reason."""
+        if not (self.revgate and self.committed is not None and self.reader is not None):
+            return
+        changed = str(args.get("changed_from_commit") or "").strip().lower()
+        if changed not in ("yes", "no"):
+            raise ValueError("give `changed_from_commit`: yes or no")
+        if changed == "no" or self.gate_report is not None:
+            return
+        cited = args.get("cited_readouts") or []
+        rows, quotes = [], []
+        for c in cited[:6] if isinstance(cited, list) else []:
+            try:
+                pos = int(str(c.get("position", "")).lstrip("tT"))
+                q = str(c.get("quote") or "")
+            except (AttributeError, ValueError):
+                continue
+            if 0 <= pos < self.inc.n_tokens and q.strip():
+                rows.append(self._support(pos, q))
+                quotes.append((pos, q))
+        rep = "; ".join(f"t{r['pos']} {self.inc.pieces[r['pos']]!r}: {r['match']}/{r['lines']} lines match, "
+                        f"{r['layers']} layers, {r['echo']} of them echo/preview" for r in rows) or "no valid citations"
+        self.gate_report = rep
+        verdict = await gate_critic(self.inc, self.committed["hypothesis"], str(args.get("hypothesis") or ""),
+                                    quotes, rep)
+        event["gate"] = {"rows": rows, "verdict": verdict}
+        if verdict and not verdict.get("justified", True):
+            raise ValueError(
+                "Revision check (runs once): your final hypothesis departs from your committed one. Recount of the "
+                f"readouts you cite: {rep}. Reviewer: {verdict.get('reason', '')} Either return to your committed "
+                "mechanism (resubmit with changed_from_commit='no'), or resubmit with stronger evidence."
+            )
 
     def notebook(self, args: dict[str, Any], event: dict[str, Any]) -> str:
         action, text = args.get("action"), str(args.get("text") or "")
@@ -561,8 +672,13 @@ class ChiveTools:
             if total <= 0:
                 raise ValueError("`probabilities` must give positive weight to the candidates")
             norm = {k: max(0.0, vals.get(k, 0.0)) / total for k in self.letters}
+        if self.revgate:
+            fields += ("changed_from_commit",)
         preds = parse_predictions(args, self.edits) if self.edits else None
         self.finished = {k: str(args.get(k) or "") for k in fields}
+        if self.revgate:
+            self.finished["cited_readouts"] = args.get("cited_readouts") or []
+            self.finished["gate_report"] = self.gate_report or ""
         if preds is not None:
             self.finished["predictions"] = preds
         if self.letters:
@@ -610,3 +726,39 @@ async def filter_inspect(raw: str, kind: str) -> str:
     except Exception as e:  # filter outage: fall back to the raw output
         return raw + f"\n(filter unavailable: {type(e).__name__})"
     return "FILTERED VIEW (an assistant kept only recurring claims, with counts):\n" + txt
+
+
+GATE_SYS = """You review one step of an interpretability investigation. An investigator first committed a hypothesis \
+from the transcript alone, then read readouts (natural-language decodings of the target model's activations at single \
+tokens) and now wants to submit a DIFFERENT final hypothesis (or add causal factors), citing readouts. You see the \
+conversation (clipped), the response, both hypotheses, the cited readout lines and a mechanical recount of how often \
+each recurs at its position. Known pitfalls that make readout evidence NOT justify a revision:
+- the cited lines preview what the response itself says or does (that is the behaviour, not its cause), or echo the \
+  visible prompt;
+- the lines are rare (a few of ~180 lines) or generic (not about this conversation's own content);
+- presence/absence arguments: a concept being represented somewhere does not make it causal or 'not lost'; absence at a \
+  token proves little, and a token cannot reflect input that comes after it;
+- at turn boundaries and prompt tokens readouts often predict a generic next document;
+- the revision adds side-stories that do not contradict the committed mechanism.
+The committed hypothesis is usually right. Approve the revision only if the cited readouts recur, are specific to this \
+conversation, and directly show something the committed hypothesis gets wrong or misses. \
+Output JSON {"justified": true|false, "reason": "<=40 words, concrete"}."""
+
+
+async def gate_critic(inc: Incident, committed: str, final: str, quotes: list, recount: str) -> dict[str, Any] | None:
+    from . import llm
+    conv = "\n\n".join(f"[{m['role'].upper()}]: {m['content']}" for m in inc.messages)
+    if len(conv) > 7000:
+        conv = conv[:3500] + "\n[...]\n" + conv[-3500:]
+    u = (f"CONVERSATION:\n{conv}\n\nRESPONSE:\n{inc.completion[:2000]}\n\nBEHAVIOUR: {inc.behaviour}\n\n"
+         f"COMMITTED HYPOTHESIS:\n{committed}\n\nFINAL HYPOTHESIS:\n{final}\n\nCITED READOUTS:\n"
+         + ("\n".join(f"t{p} {inc.pieces[p]!r}: {q}" for p, q in quotes) or "(none)") + f"\n\nRECOUNT: {recount}")
+    try:
+        c = llm.client()
+        r = await c.chat.completions.create(model="claude-opus-5", max_tokens=600,
+                                            messages=[{"role": "system", "content": GATE_SYS},
+                                                      {"role": "user", "content": u}])
+        t = (r.choices[0].message.content or "")
+        return json.loads(t[t.find("{"): t.rfind("}") + 1])
+    except Exception as e:  # critic outage: accept the submission
+        return {"justified": True, "reason": f"critic unavailable: {type(e).__name__}"}
