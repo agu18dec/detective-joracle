@@ -59,6 +59,9 @@ READ_LAYERS = tuple(range(20, 61, 4))
 # NLA-RL is a different animal: ONE verbalizer trained at layer 42, served by its own app
 # (servers/nla_live_modal.py). It reads every position of that one layer.
 NLA_LAYER = 42
+# The multi-layer NLA (camilablank/qwen3.6-27b-multilayer-nla-rl600) reads the same grid as OLens; its
+# verbalizer lives in its own app too (chive_scale/banks_code/mlnla_live_modal.py), one call per layer.
+MLNLA_LAYERS = READ_LAYERS
 FIXED_PAGE_CHARS = 40_000  # ~10k tokens per fixed_prompt_readouts page
 # the precomputed paper-faithful files (organism_server_modal.py --precompute --prompts heldout)
 FIXED_LAYERS = {
@@ -93,6 +96,8 @@ class LensClient(Protocol):
 
     def readout_nla(self, **kw: Any) -> dict[str, Any]: ...
 
+    def readout_mlnla(self, **kw: Any) -> dict[str, Any]: ...
+
     def fixed(self, **kw: Any) -> dict[str, Any]: ...
 
 
@@ -121,12 +126,14 @@ class LiveClient:
         *,
         target: str = "",
         nla: str = "",
+        mlnla: str = "",
         timeout: float = REQUEST_TIMEOUT,
         retries: int = 6,
     ) -> None:
         self.prefix = prefix
         self.target = target.rstrip("/")
         self.nla = nla.rstrip("/")
+        self.mlnla = mlnla.rstrip("/")
         self.timeout = timeout
         self.retries = retries
         self.calls = 0
@@ -302,6 +309,52 @@ class LiveClient:
             "tags": acts["tags"],
             "readouts": {str(NLA_LAYER): per_pos},
             "k": out.get("k", 1),
+        }
+
+    def readout_mlnla(self, **kw: Any) -> dict[str, Any]:
+        """Two-hop multi-layer NLA readout: ``lens="acts"`` residuals at every requested layer in ONE
+        lens-server call, then one ``verbalize`` call per layer to the mlnla app (in parallel). Same
+        readout shape as every other lens, so the page formatter needs nothing special."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        if not self.mlnla:
+            raise RuntimeError("mlnla= (the multi-layer NLA verbalizer URL) is required for the mlnla arm")
+        layers = [int(x) for x in (kw.get("layers") or MLNLA_LAYERS)]
+        acts = self._post("readout", {**kw, "lens": "acts", "layers": layers})
+        n_pos = len(acts["positions"])
+        k = int(kw.get("k") or 1)
+        seed = int(kw.get("seed") or 0)
+
+        def one(layer: int) -> tuple[int, list[list[str]]]:
+            r = requests.post(
+                self.mlnla,
+                json={"vectors": acts["vectors"][str(layer)], "n": n_pos, "d": acts["d"],
+                      "layer": layer, "k": k, "seed": seed + 1009 * layer},
+                timeout=self.timeout, allow_redirects=True,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"mlnla verbalize L{layer}: HTTP {r.status_code}: {r.text[:200]}")
+            out = r.json()
+            if "error" in out:
+                raise RuntimeError(out["error"])
+            return layer, out["texts"]
+
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=min(len(layers), 11)) as ex:
+            got = dict(ex.map(one, layers))
+        self.seconds += time.time() - t0
+        self.calls += len(layers)
+        readouts = {
+            str(e): {
+                str(p): [x.replace("<explanation>", "").replace("</explanation>", "").strip() for x in t]
+                for p, t in zip(acts["positions"], got[e], strict=True)
+            }
+            for e in layers
+        }
+        return {
+            "n_tokens": acts["n_tokens"], "organism": acts["organism"], "lens": "mlnla",
+            "n_matched": acts.get("n_matched", n_pos), "tokens": acts["tokens"], "tags": acts["tags"],
+            "readouts": readouts, "k": k,
         }
 
     def readout(self, **kw: Any) -> dict[str, Any]:
@@ -533,6 +586,8 @@ class LiveTools:
         if lens == "nla":
             read["layers"] = [NLA_LAYER]
             res = self.client.readout_nla(organism=self._tag(who), **read)
+        elif lens == "mlnla":
+            res = self.client.readout_mlnla(organism=self._tag(who), **read)
         else:
             res = self.client.readout(organism=self._tag(who), **read)
         served = _n_cells(res)
@@ -1232,6 +1287,7 @@ __all__ = [
     "LIVE_ARMS",
     "LIVE_CONDITION",
     "NLA_LAYER",
+    "MLNLA_LAYERS",
     "READ_LAYERS",
     "Conversation",
     "LensClient",

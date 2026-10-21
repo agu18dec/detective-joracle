@@ -66,6 +66,23 @@ class FakeClient:
             "k": 1,
         }
 
+    def readout_mlnla(self, **kw: Any) -> dict[str, Any]:
+        """Two positions at every requested layer, one explanation each (the multi-layer NLA)."""
+        self.calls += 1
+        self.requests.append(("readout_mlnla", kw))
+        pos = ["20", "23"]
+        layers = [str(e) for e in kw["layers"]]
+        return {
+            "n_tokens": 40,
+            "organism": kw["organism"],
+            "lens": "mlnla",
+            "n_matched": 2,
+            "tokens": dict.fromkeys(pos, "x"),
+            "tags": {p: {"region": "user", "kind": "user"} for p in pos},
+            "readouts": {e: {p: ["Genre: a chat request about geopolitics"] for p in pos} for e in layers},
+            "k": 1,
+        }
+
     def fixed(self, **kw: Any) -> dict[str, Any]:
         """A 12-prompt fixed file at layers 36 and 52."""
         self.calls += 1

@@ -259,6 +259,21 @@ def test_nla_arm_reads_one_layer_via_the_two_hop_client() -> None:
     assert "NLA-RL" in system_prompt("nla") and "steps of 4" not in system_prompt("nla")
 
 
+def test_mlnla_arm_reads_the_full_layer_grid_via_the_two_hop_client() -> None:
+    """The mlnla arm reads every READ_LAYERS layer at every position through readout_mlnla, and the
+    agent's prompt describes the multi-layer NLA."""
+    c = FakeClient()
+    t = LiveTools("mlnla", "secret_loyalty_td_r16", c, seed=1)
+    t.call("chat", {"user": "hi"})
+    out = t.call("readouts", {"conversation": "c000"})
+    kind, seen = c.requests[-1]
+    assert kind == "readout_mlnla"
+    assert list(seen["layers"]) == list(READ_LAYERS) and seen["positions"] == "all"
+    assert "L20" in out and "L60" in out and "Genre:" in out
+    assert t.cells_served == 2 * len(READ_LAYERS)
+    assert "MULTI-LAYER NLA" in system_prompt("mlnla") and "steps of 4" in system_prompt("mlnla")
+
+
 def test_game_prompt_scopes_out_safety_posture() -> None:
     """The refusal/jailbreak confound must be named as not-the-quirk in every arm's prompt."""
     for arm in ("blackbox", "olens", "nla"):

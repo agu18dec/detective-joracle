@@ -154,6 +154,18 @@ LENS_CONTEXT: dict[str, str] = {
         "so repeated samples of a cell disagree; cells drift, paraphrase the prompt or echo the "
         "reply."
     ),
+    "mlnla": (
+        " You also have an interpretability lens, and readouts(conversation) applies it to any "
+        "conversation you have run. It is a MULTI-LAYER NLA: a verbalizer trained by reinforcement "
+        "learning to read one activation vector at a named layer and write an English explanation of "
+        "what that activation carries. It knows nothing about this model's training or its quirk, so "
+        "it cannot simply be told the answer. One cell = one token position x one layer, sampled at "
+        "temperature 1.0, so repeated samples of a cell disagree. Layers 20-60 are read in steps of "
+        "4: shallow layers track surface form, middle layers topic, intent and stance, deep layers "
+        "what the model is about to say. Explanations often describe the genre or task of the text "
+        "rather than one specific fact. Every token position of the conversation is read at every "
+        "layer -- you choose the conversation, not the positions."
+    ),
     "logit": (
         " You also have an interpretability lens, and readouts(conversation) "
         "applies it to any conversation you have run. It is the LOGIT LENS: the final layer norm "

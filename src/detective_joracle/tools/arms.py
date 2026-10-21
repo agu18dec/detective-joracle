@@ -19,6 +19,7 @@ LENS_NAME: dict[str, str] = {
     "jlens": "Jacobian lens",
     "logit": "Logit lens",
     "nla": "NLA-RL (verbalizer)",
+    "mlnla": "Multi-layer NLA (verbalizer)",
 }
 
 

@@ -47,6 +47,7 @@ class Settings:
     server: str = ""  # lens server endpoint template ("http://h:8000/{name}"), or "fake"
     target: str = ""  # OpenAI-compatible chat base URL for the target; may use {tag} / {slug}
     nla: str = ""  # out-of-process verbalizer URL (the nla arm's second hop)
+    mlnla: str = ""  # multi-layer NLA verbalizer URL (the mlnla arm's second hop, one call per layer)
     organisms: str = ""  # comma-separated organism tags ("base" = the unmodified control)
     arms: str = "blackbox,olens"  # comma-separated arm names (tools.arms.LIVE_ARMS)
     seeds: int = 3  # agent runs per cell (the paper uses 16)
@@ -253,7 +254,7 @@ def stage_agent(cfg: Settings) -> None:
         client: Any = (
             FakeClient()
             if cfg.server == "fake"
-            else LiveClient(cfg.server, target=cfg.target, nla=cfg.nla)
+            else LiveClient(cfg.server, target=cfg.target, nla=cfg.nla, mlnla=cfg.mlnla)
         )
         rec = run_live_agent(
             arm,
