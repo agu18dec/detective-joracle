@@ -128,6 +128,8 @@ image = (
             "PYTHONUNBUFFERED": "1",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
             "AB_AO_CONTRACT": CONTRACT_NAME,
+            # the container re-imports wsbench_capture_modal: same organisms volume as the deployer
+            "AB_ORGANISMS_VOLUME": os.environ.get("AB_ORGANISMS_VOLUME", "auditbench-organisms"),
         }
     )
     .add_local_dir(str(LENS_STACK / "src"), f"{APP_REPO}/src", ignore=["**/__pycache__"])
@@ -151,6 +153,9 @@ def fixed_path(tag: str, lens: str, layers: list[int], k: int, prompts: str = "h
 
 
 def adapter_spec(tag: str) -> str:
+    # v2 organisms share v1 tag names: on a non-default organisms volume, never fall back to the v1 archive
+    if os.environ.get("AB_ORGANISMS_VOLUME", "auditbench-organisms") != "auditbench-organisms":
+        return f"vol:{tag}"
     return f"hf:{ARCHIVE}:organisms/{tag}" if V1_TAGS.match(tag) else f"vol:{tag}"
 
 
