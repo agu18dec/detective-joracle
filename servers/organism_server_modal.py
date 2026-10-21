@@ -119,6 +119,7 @@ image = (
         "accelerate>=1.0",
         "peft>=0.18",
         "fastapi[standard]",
+        "requests",  # detective_joracle imports it at package init (huggingface_hub>=1 no longer pulls it in)
     )
     .env(
         {
