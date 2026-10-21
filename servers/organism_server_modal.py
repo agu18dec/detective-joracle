@@ -271,13 +271,29 @@ class Organism:
             "loaded": sorted(self.loaded),
         }
 
+    def _guarded(self, fn, req: dict) -> dict:  # type: ignore[no-untyped-def]
+        """A CUDA/cuDNN/cuBLAS failure (e.g. cuDNN SDPA OOM outside torch's allocator) poisons the
+        context: every later request on the container fails in ~0.2 s and, being the idlest container,
+        it attracts most of the traffic (2026-10-21 eval stall). Answer with the error, then exit so
+        Modal replaces the container."""
+        import os
+        import threading
+
+        try:
+            return fn(req)
+        except RuntimeError as e:
+            if any(k in str(e) for k in ("CUDA error", "cuDNN", "CUBLAS", "CUDNN")):
+                print(f"[server] fatal GPU error, recycling container: {str(e)[:200]}", flush=True)
+                threading.Timer(2.0, os._exit, (1,)).start()
+            raise
+
     @modal.fastapi_endpoint(method="POST")
     def chat(self, req: dict) -> dict:
-        return self._chat(req)
+        return self._guarded(self._chat, req)
 
     @modal.fastapi_endpoint(method="POST")
     def readout(self, req: dict) -> dict:
-        return self._readout(req)
+        return self._guarded(self._readout, req)
 
     @modal.fastapi_endpoint(method="POST")
     def fixed(self, req: dict) -> dict:
