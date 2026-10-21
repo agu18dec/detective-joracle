@@ -127,7 +127,16 @@ async def _batch(
     from openai import AsyncOpenAI  # lazy: only the live path needs the dep
 
     keys: Sequence[str | None] = api_keys if api_keys else [None]  # None -> env key
-    clients = [AsyncOpenAI(api_key=k) for k in keys]
+    if model.startswith("claude") and not api_keys and not os.environ.get("OPENAI_API_KEY"):
+        # keyless Claude judges on the pod: the OAuth token from the Modal Dict (chive.llm.client),
+        # re-fetched every few minutes and after a 401
+        from ..chive.llm import client as keyless_client
+
+        clients: list[Any] = [keyless_client()]
+    else:
+        clients = [AsyncOpenAI(api_key=k) for k in keys]
+    # the org shares one output-token/min limit: an env cap keeps every judge pass gentle
+    concurrency = min(concurrency, int(os.environ.get("JUDGE_MAX_CONCURRENCY", "8")))
     sems = [asyncio.Semaphore(concurrency) for _ in clients]
     timeout = _openai_timeout()  # read + validate ONCE, before any call
 

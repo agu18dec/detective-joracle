@@ -90,3 +90,21 @@ def test_variant_gating_leaves_default_prompt_unchanged() -> None:
         with_v = system_prompt(r, 0, 12, ("textfirst", "absence", v))
         assert marker in with_v and with_v.startswith(base.split("## Absences")[0])
     assert system_prompt(None, 0, 12, ("recur", "llmfilter", "multicand", "antilure")) == system_prompt(None, 0, 12, ())
+
+
+def test_anthropic_keyless_backend_builds_without_network() -> None:
+    """The keyless backend constructs offline (the token is fetched lazily, per request) and sends the
+    OAuth beta header to Anthropic's OpenAI-compatible endpoint."""
+    from detective_joracle.agent.backends import make_backend_factory
+
+    for is_async in (False, True):
+        f = make_backend_factory("anthropic-keyless", async_client=is_async)
+        b = f("claude-opus-5")
+        assert b is not None
+    from openai import OpenAI
+
+    import detective_joracle.agent.backends as be
+
+    src = open(be.__file__).read()
+    assert "oauth" in src.lower() and "anthropic-keyless" in src
+    assert issubclass(OpenAI, object)

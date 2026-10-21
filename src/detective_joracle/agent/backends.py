@@ -265,11 +265,72 @@ def make_backend_factory(
         if not akey.startswith("sk-ant-"):
             raise SystemExit("ANTHROPIC_API_KEY missing or malformed (pass it per command)")
         client = cls(api_key=akey, base_url="https://api.anthropic.com/v1/", max_retries=6)
+    elif kind == "anthropic-keyless":
+        # the same endpoint with the short-lived OAuth token from the Modal Dict (chive.llm.TOKEN):
+        # read on every request, replaced and retried after a 401; the OAuth beta header is required
+        import time as _time
+
+        from openai import AuthenticationError
+
+        from ..chive.llm import BASE_URL, OAUTH_BETA, TOKEN
+
+        if async_client:
+
+            class _KeylessAsync(AsyncOpenAI):  # type: ignore[misc]
+                @property
+                def api_key(self) -> str:
+                    return TOKEN.get()
+
+                @api_key.setter
+                def api_key(self, _v: str) -> None:
+                    pass
+
+                async def request(self, *a: Any, **kw: Any) -> Any:
+                    import asyncio as _asyncio
+
+                    for attempt in range(3):
+                        used = TOKEN.get()
+                        try:
+                            return await super().request(*a, **kw)
+                        except AuthenticationError:
+                            if attempt == 2:
+                                raise
+                            TOKEN.invalidate(used)
+                            await _asyncio.sleep(5)
+
+            kcls: Any = _KeylessAsync
+        else:
+
+            class _KeylessSync(OpenAI):  # type: ignore[misc]
+                @property
+                def api_key(self) -> str:
+                    return TOKEN.get()
+
+                @api_key.setter
+                def api_key(self, _v: str) -> None:
+                    pass
+
+                def request(self, *a: Any, **kw: Any) -> Any:
+                    for attempt in range(3):
+                        used = TOKEN.get()
+                        try:
+                            return super().request(*a, **kw)
+                        except AuthenticationError:
+                            if attempt == 2:
+                                raise
+                            TOKEN.invalidate(used)
+                            _time.sleep(5)
+
+            kcls = _KeylessSync
+        client = kcls(api_key="keyless", base_url=BASE_URL, max_retries=8,
+                      default_headers={"anthropic-beta": OAUTH_BETA})
     else:
-        raise ValueError(f"unknown backend kind {kind!r} (openrouter | openai | anthropic)")
+        raise ValueError(
+            f"unknown backend kind {kind!r} (openrouter | openai | anthropic | anthropic-keyless)"
+        )
 
     def _is_claude(kind_: str, model: str) -> bool:
-        return kind_ == "anthropic" or model.startswith("anthropic/")
+        return kind_.startswith("anthropic") or model.startswith("anthropic/")
 
     def extra_for(model: str) -> dict[str, Any]:
         extra: dict[str, Any] = {"usage": {"include": True}} if kind == "openrouter" else {}

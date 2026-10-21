@@ -32,15 +32,19 @@ passes. Output: `<out-volume>:/<bank>/<prompt_id>.json.gz` = {"token_ids", "read
 granularity: rerun the same command to resume. --num-shards 0 (default) sizes the fan-out to
 ~2 GPU-h of generation per container (bank_common.RATE).
 
-Usage (from this directory, after `source env.sh`):
+Usage (from this directory, after `source ../env.sh`):
 
   modal run readers_modal.py --reader jlens --dataset <ds> --ids ids.txt \
       --out-volume chive-fresh-banks --bank jlens_all
-  ./fetch_banks.sh jlens_all          # -> /workspace/agam/chive_scale/banks/jlens_all/
+  ./fetch_banks.sh jlens_all          # -> $CHIVE_BANKS/jlens_all/ (default /workspace/agam/chive_scale/banks)
 
 Pinned revisions: bank_common.py. HF snapshots and the merged checkpoints live on the NEW volume
 `chive-fresh-hf` (`prep` fills it once per reader; idempotent, skipped with --skip-prep).
 GPU list: env CHIVE_BANKS_GPU (default H200; e.g. H200,B200 to widen).
+Container code: env GW_SRC = a global-workspace ``src/`` dir (``global_workspace`` + ``jlens``)
+uploaded into the image. Default: the vendored snapshot the fresh banks were built with,
+``vendor/gw_src/src`` (provenance in vendor/gw_src/README.md; it differs from global-workspace
+main in olens_suite/runner.py, olens_suite/karvonen.py and ola/verbalizer.py).
 """
 
 import json
@@ -62,9 +66,13 @@ OUT_VOLUME = os.environ.get("CHIVE_BANKS_VOLUME", "chive-fresh-banks")
 GPU = os.environ.get("CHIVE_BANKS_GPU", "H200").split(",")
 HF = "/hf"
 OUT = "/out"
-MERGED = {"nla": f"{HF}/merged/nla_rl400_vl", "mlnla": f"{HF}/merged/mlnla_rl600_vl",
-          "olens": f"{HF}/merged/olens_s3d_rl600_vl",
-          "olens_single": f"{HF}/merged/olens_s3_single_rl500_vl"}
+GW_SRC = Path(os.environ.get("GW_SRC") or HERE / "vendor" / "gw_src" / "src")
+MERGED = {
+    "nla": f"{HF}/merged/nla_rl400_vl",
+    "mlnla": f"{HF}/merged/mlnla_rl600_vl",
+    "olens": f"{HF}/merged/olens_s3d_rl600_vl",
+    "olens_single": f"{HF}/merged/olens_s3_single_rl500_vl",
+}
 
 app = modal.App(APP)
 
@@ -97,7 +105,7 @@ image = (
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         }
     )
-    .add_local_dir(str(HERE / "gw_src" / "src"), "/root/gw/src", ignore=["**/__pycache__"])
+    .add_local_dir(str(GW_SRC), "/root/gw/src", ignore=["**/__pycache__"])
     .add_local_file(str(HERE / "bank_common.py"), "/root/bc/bank_common.py")
     .add_local_file(str(HERE / "capture_job.py"), "/root/bc/capture_job.py")
 )
@@ -164,11 +172,17 @@ def _capture_subprocess(todo: list[tuple[str, int]], tokens: dict[str, list[int]
     units: dict[str, list[int]] = {}
     for pid, layer in todo:
         units.setdefault(pid, []).append(layer)
-    job = {"base": _base_path(), "units": {p: sorted(v) for p, v in units.items()},
-           "tokens": {p: tokens[p] for p in units}}
+    job = {
+        "base": _base_path(),
+        "units": {p: sorted(v) for p, v in units.items()},
+        "tokens": {p: tokens[p] for p in units},
+    }
     Path("/tmp/capture_job.json").write_text(json.dumps(job))
-    subprocess.run([sys.executable, "-m", "capture_job", "/tmp/capture_job.json",
-                    "/tmp/capture_acts.pt"], check=True, env=dict(os.environ))
+    subprocess.run(
+        [sys.executable, "-m", "capture_job", "/tmp/capture_job.json", "/tmp/capture_acts.pt"],
+        check=True,
+        env=dict(os.environ),
+    )
     raw = torch.load("/tmp/capture_acts.pt")
     os.remove("/tmp/capture_acts.pt")
     return {(key.split("|")[0], int(key.split("|")[1])): a for key, a in raw.items()}
@@ -195,8 +209,9 @@ def _todo_units(bank: str, units: list[tuple[str, int]]) -> list[tuple[str, int]
     ]
 
 
-def _write_part(bank: str, pid: str, layer: int, n: int, per_pos: dict[str, list[str]],
-                extra: dict[str, Any]) -> None:
+def _write_part(
+    bank: str, pid: str, layer: int, n: int, per_pos: dict[str, list[str]], extra: dict[str, Any]
+) -> None:
     bc.write_gz(
         bc.part_path(Path(OUT), bank, pid, layer),
         {"prompt_id": pid, "layer": layer, "n_tokens": n, "readouts": per_pos, **extra},
@@ -204,8 +219,14 @@ def _write_part(bank: str, pid: str, layer: int, n: int, per_pos: dict[str, list
     out_vol.commit()
 
 
-def _merge_vl(dst: Path, vl_dir: Path, lm_dir: Path | None, lora_dir: Path, tok_src: Path,
-              meta_src: Path | None) -> str:
+def _merge_vl(
+    dst: Path,
+    vl_dir: Path,
+    lm_dir: Path | None,
+    lora_dir: Path,
+    tok_src: Path,
+    meta_src: Path | None,
+) -> str:
     """A servable VL-arch checkpoint = the official VL shards, with every language-model tensor
     taken from `lm_dir` (when given: NLA's full-finetune av_base) plus the LoRA delta. Pure
     state-dict surgery, generalised from nla_qwen36_precompute_modal.remap_av."""
@@ -227,7 +248,7 @@ def _merge_vl(dst: Path, vl_dir: Path, lm_dir: Path | None, lora_dir: Path, tok_
         m = module.replace("._orig_mod", "")
         m = m.removeprefix("base_model.model.")
         if m.startswith("model.layers."):
-            m = "model.language_model.layers." + m[len("model.layers."):]
+            m = "model.language_model.layers." + m[len("model.layers.") :]
         assert m.startswith("model.language_model.layers."), module
         return m + ".weight"
 
@@ -267,26 +288,33 @@ def _merge_vl(dst: Path, vl_dir: Path, lm_dir: Path | None, lora_dir: Path, tok_
     missing = set(lora_a) - applied
     assert not missing, f"{len(missing)} LoRA modules never met their weight: {sorted(missing)[:5]}"
     for f in vl_dir.iterdir():
-        if f.is_file() and not f.name.startswith("model-") and "tokenizer" not in f.name \
-                and f.name != "chat_template.jinja":
+        if (
+            f.is_file()
+            and not f.name.startswith("model-")
+            and "tokenizer" not in f.name
+            and f.name != "chat_template.jinja"
+        ):
             shutil.copy(f, dst / f.name)
     for f in tok_src.iterdir():
-        if f.is_file() and ("tokenizer" in f.name or f.name in ("chat_template.jinja",
-                                                                  "vocab.json", "merges.txt")):
+        if f.is_file() and (
+            "tokenizer" in f.name or f.name in ("chat_template.jinja", "vocab.json", "merges.txt")
+        ):
             shutil.copy(f, dst / f.name)
     if meta_src is not None:
         shutil.copy(meta_src, dst / "nla_meta.yaml")
     (dst / "MERGE_DONE").write_text(
         f"official VL shards ({vl_dir}) + lm tensors from {lm_dir} ({replaced} replaced) + "
-        f"{len(applied)} LoRA deltas from {lora_dir} (scale {scaling:.4f})\n")
+        f"{len(applied)} LoRA deltas from {lora_dir} (scale {scaling:.4f})\n"
+    )
     return f"{dst}: merged {len(applied)} LoRA modules, {replaced} lm tensors replaced"
 
 
 # ---------------------------------------------------------------------------------------------
 # prep: pinned downloads + merged AV checkpoints (CPU, idempotent)
 # ---------------------------------------------------------------------------------------------
-@app.function(image=image, volumes={HF: hf_vol}, secrets=[hf_secret], memory=98304, cpu=16,
-              timeout=4 * 3600)
+@app.function(
+    image=image, volumes={HF: hf_vol}, secrets=[hf_secret], memory=98304, cpu=16, timeout=4 * 3600
+)
 def prep(reader: str) -> str:
     from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -300,31 +328,63 @@ def prep(reader: str) -> str:
     elif reader in ("olens", "olens_single"):
         c = bc.OLENS_CONTRACTS[reader]
         for f in ("adapter_config.json", "adapter_model.safetensors"):
-            msgs.append(hf_hub_download(c["repo"], f"{c['path']}/{f}", repo_type="dataset",
-                                        revision=c["rev"]))
+            msgs.append(
+                hf_hub_download(
+                    c["repo"], f"{c['path']}/{f}", repo_type="dataset", revision=c["rev"]
+                )
+            )
         hf_vol.commit()
         lora = Path(msgs[-1]).parent  # the vLLM engine (--engine vllm) reads a merged copy
         msgs.append(_merge_vl(Path(MERGED[reader]), base, None, lora, base, None))
     elif reader == "nla":
-        root = Path(snapshot_download(bc.NLA_REPO, revision=bc.NLA_REV, allow_patterns=[
-            f"{bc.NLA_BASE_SUBDIR}/*", f"{bc.NLA_ADAPTER}/*", "nla_meta.yaml"]))
+        root = Path(
+            snapshot_download(
+                bc.NLA_REPO,
+                revision=bc.NLA_REV,
+                allow_patterns=[f"{bc.NLA_BASE_SUBDIR}/*", f"{bc.NLA_ADAPTER}/*", "nla_meta.yaml"],
+            )
+        )
         import yaml
 
         a = yaml.safe_load((root / "nla_meta.yaml").read_text())["prompt_templates"]["actor"]
         b = yaml.safe_load((root / bc.NLA_BASE_SUBDIR / "nla_meta.yaml").read_text())[
-            "prompt_templates"]["actor"]
+            "prompt_templates"
+        ]["actor"]
         assert a == b, "repo-root and av_base actor templates differ"
         hf_vol.commit()
-        msgs.append(_merge_vl(Path(MERGED["nla"]), base, root / bc.NLA_BASE_SUBDIR,
-                              root / bc.NLA_ADAPTER, root / bc.NLA_BASE_SUBDIR,
-                              root / bc.NLA_BASE_SUBDIR / "nla_meta.yaml"))
+        msgs.append(
+            _merge_vl(
+                Path(MERGED["nla"]),
+                base,
+                root / bc.NLA_BASE_SUBDIR,
+                root / bc.NLA_ADAPTER,
+                root / bc.NLA_BASE_SUBDIR,
+                root / bc.NLA_BASE_SUBDIR / "nla_meta.yaml",
+            )
+        )
     elif reader == "mlnla":
-        root = Path(snapshot_download(bc.MLNLA_REPO, revision=bc.MLNLA_REV, allow_patterns=[
-            f"{bc.MLNLA_ADAPTER}/adapter_config.json",
-            f"{bc.MLNLA_ADAPTER}/adapter_model.safetensors", "nla_meta.yaml"]))
+        root = Path(
+            snapshot_download(
+                bc.MLNLA_REPO,
+                revision=bc.MLNLA_REV,
+                allow_patterns=[
+                    f"{bc.MLNLA_ADAPTER}/adapter_config.json",
+                    f"{bc.MLNLA_ADAPTER}/adapter_model.safetensors",
+                    "nla_meta.yaml",
+                ],
+            )
+        )
         hf_vol.commit()
-        msgs.append(_merge_vl(Path(MERGED["mlnla"]), base, None, root / bc.MLNLA_ADAPTER, base,
-                              root / "nla_meta.yaml"))
+        msgs.append(
+            _merge_vl(
+                Path(MERGED["mlnla"]),
+                base,
+                None,
+                root / bc.MLNLA_ADAPTER,
+                base,
+                root / "nla_meta.yaml",
+            )
+        )
     else:
         raise ValueError(reader)
     hf_vol.commit()
@@ -335,8 +395,9 @@ def prep(reader: str) -> str:
 # J-lens
 # ---------------------------------------------------------------------------------------------
 @app.function(**GPU_KW)
-def jlens_worker(bank: str, items: list[tuple[str, list[int]]], layers: list[int], topk: int,
-                 provenance: dict) -> dict:
+def jlens_worker(
+    bank: str, items: list[tuple[str, list[int]]], layers: list[int], topk: int, provenance: dict
+) -> dict:
     _offline()
     import gc
 
@@ -357,16 +418,19 @@ def jlens_worker(bank: str, items: list[tuple[str, list[int]]], layers: list[int
     torch.backends.cudnn.allow_tf32 = False
     t_load = time.time()
     tok, model, blocks = _load_base_hf()
-    lens = JacobianLens.from_pretrained(hf_hub_download(bc.JLENS_REPO, bc.JLENS_FILE,
-                                                        revision=bc.JLENS_REV))
+    lens = JacobianLens.from_pretrained(
+        hf_hub_download(bc.JLENS_REPO, bc.JLENS_FILE, revision=bc.JLENS_REV)
+    )
     jac = stacked_jacobians(lens, device="cpu", dtype=torch.float32)[list(layers)].to("cuda")
     del lens
     gc.collect()
     w_u = model.lm_head.weight.detach().float().to("cuda")
     den = jlens_token_norms(jac, w_u)
     summary["load_sec"] = round(time.time() - t_load, 1)
-    print(f"[jlens] stack {tuple(jac.shape)}, V={w_u.shape[0]}, load {summary['load_sec']}s",
-          flush=True)
+    print(
+        f"[jlens] stack {tuple(jac.shape)}, V={w_u.shape[0]}, load {summary['load_sec']}s",
+        flush=True,
+    )
     rep: dict[int, str] = {}
 
     def tok_repr(t: int) -> str:
@@ -390,9 +454,17 @@ def jlens_worker(bank: str, items: list[tuple[str, list[int]]], layers: list[int
                 cells = readouts[str(e)]
                 for pi in range(hi - lo):
                     cells[str(lo + pi)] = [" ".join(tok_repr(int(t)) for t in tops[li, pi])]
-        rec = {"prompt_id": pid, "reader": bank, "token_ids": ids, "n_tokens": n,
-               "layers": list(layers), "k": 1, "readouts": readouts,
-               "coverage_note": "every token", "provenance": provenance}
+        rec = {
+            "prompt_id": pid,
+            "reader": bank,
+            "token_ids": ids,
+            "n_tokens": n,
+            "layers": list(layers),
+            "k": 1,
+            "readouts": readouts,
+            "coverage_note": "every token",
+            "provenance": provenance,
+        }
         probs = bc.validate_record(rec, ids, layers, 1)
         if probs:
             raise RuntimeError(f"{pid}: invalid record: {probs}")
@@ -417,24 +489,40 @@ def _olens_adapter_dir() -> Path:
     from huggingface_hub import hf_hub_download
     from safetensors.torch import load_file, save_file
 
-    files = {f: Path(hf_hub_download(bc.OLENS_REPO, f"{bc.OLENS_PATH}/{f}", repo_type="dataset",
-                                     revision=bc.OLENS_REV))
-             for f in ("adapter_config.json", "adapter_model.safetensors")}
+    files = {
+        f: Path(
+            hf_hub_download(
+                bc.OLENS_REPO, f"{bc.OLENS_PATH}/{f}", repo_type="dataset", revision=bc.OLENS_REV
+            )
+        )
+        for f in ("adapter_config.json", "adapter_model.safetensors")
+    }
     dst = Path("/tmp/olens_lora")
     dst.mkdir(exist_ok=True)
     sd = load_file(str(files["adapter_model.safetensors"]))
     n_orig = sum("._orig_mod" in k for k in sd)
-    save_file({k.replace("._orig_mod", ""): v for k, v in sd.items()},
-              str(dst / "adapter_model.safetensors"))
+    save_file(
+        {k.replace("._orig_mod", ""): v for k, v in sd.items()},
+        str(dst / "adapter_model.safetensors"),
+    )
     shutil.copy(files["adapter_config.json"], dst / "adapter_config.json")
     print(f"[olens] adapter: {len(sd)} tensors, {n_orig} had ._orig_mod", flush=True)
     return dst
 
 
 @app.function(**GPU_KW)
-def olens_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str, list[int]], k: int,
-                 max_new: int, temperature: float, top_p: float, seed_base: int, pos_chunk: int,
-                 provenance: dict) -> dict:
+def olens_worker(
+    bank: str,
+    units: list[tuple[str, int]],
+    tokens: dict[str, list[int]],
+    k: int,
+    max_new: int,
+    temperature: float,
+    top_p: float,
+    seed_base: int,
+    pos_chunk: int,
+    provenance: dict,
+) -> dict:
     _offline()
     import torch
     from peft import PeftModel
@@ -476,8 +564,9 @@ def olens_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str, list
     model, drift = runner.merge_lens(model, probe, on)
     all_layers = sorted({e for _, e in todo})
     wv = {e: renderer_for(contract.prompt_kind)(tok, layer=e) for e in all_layers}
-    sample = runner.make_sampler(model, tok, wv, 0.0, "cuda", transform=contract.transform,
-                                 alpha=contract.alpha)
+    sample = runner.make_sampler(
+        model, tok, wv, 0.0, "cuda", transform=contract.transform, alpha=contract.alpha
+    )
     summary["load_sec"] = round(time.time() - t_load, 1)
     for pid, layer in todo:
         n = len(tokens[pid])
@@ -487,26 +576,49 @@ def olens_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str, list
         for ci, positions in enumerate(chunks):
             seed = bc.dense_seed(seed_base, pid, layer, ci)
             rows = acts[(pid, layer)][positions].float()
-            out = sample(layer, rows, k, seed, max_new, temperature, top_p,
-                         batch=len(positions) * k)
+            out = sample(
+                layer, rows, k, seed, max_new, temperature, top_p, batch=len(positions) * k
+            )
             for i, p in enumerate(positions):
                 per_pos[str(p)] = [str(t) for t in out[i]]
         dt = time.time() - t0
         rate = n * k / dt
         summary["rate"].append(round(rate, 2))
         summary["done"].append([pid, layer])
-        _write_part(bank, pid, layer, n, per_pos, {"sec": round(dt, 1), "seed_base": seed_base,
-                                                   "pos_chunk": pos_chunk, "merge_drift": drift})
-        print(f"[olens] {pid} L{layer}: {n} pos x k={k} in {dt:.0f}s ({rate:.1f} rollouts/s)",
-              flush=True)
+        _write_part(
+            bank,
+            pid,
+            layer,
+            n,
+            per_pos,
+            {
+                "sec": round(dt, 1),
+                "seed_base": seed_base,
+                "pos_chunk": pos_chunk,
+                "merge_drift": drift,
+            },
+        )
+        print(
+            f"[olens] {pid} L{layer}: {n} pos x k={k} in {dt:.0f}s ({rate:.1f} rollouts/s)",
+            flush=True,
+        )
         del acts[(pid, layer)]
     return summary
 
 
 @app.function(**GPU_KW)
-def olens_vllm_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str, list[int]],
-                      k: int, max_new: int, temperature: float, top_p: float, concurrency: int,
-                      provenance: dict, reader: str = "olens") -> dict:
+def olens_vllm_worker(
+    bank: str,
+    units: list[tuple[str, int]],
+    tokens: dict[str, list[int]],
+    k: int,
+    max_new: int,
+    temperature: float,
+    top_p: float,
+    concurrency: int,
+    provenance: dict,
+    reader: str = "olens",
+) -> dict:
     """OLens on vLLM: the merged S3D_RL600 checkpoint fed `prompt_embeds` = the concepts_raw
     prompt's token embeddings with the slot row replaced by alpha * h/||h|| (make_sampler's
     unit transform, verbatim), k independent requests per cell, seeded per (pid, layer, pos, j)."""
@@ -532,7 +644,11 @@ def olens_vllm_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str,
     if reader == "olens":  # the pinned bank contract must equal the runner's frozen S3D_RL600
         r = runner.S3D_RL600
         assert (r.path, r.prompt_kind, r.transform, r.alpha) == (
-            c["path"], c["prompt_kind"], c["transform"], c["alpha"]), (r, c)
+            c["path"],
+            c["prompt_kind"],
+            c["transform"],
+            c["alpha"],
+        ), (r, c)
         assert c["transform"] == "unit" and c["alpha"] > 0
     else:
         assert c["transform"] == "scaled" and c["scale"] > 0, c
@@ -554,8 +670,9 @@ def olens_vllm_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str,
     pe0 = {e: emb[torch.tensor(wv[e].input_ids)].clone() for e in need}  # [T, d] bf16
     del emb
     for e in need:
-        print(f"[olens-vllm] L{e}: prompt {len(wv[e].input_ids)} tok, slot@{wv[e].slot}",
-              flush=True)
+        print(
+            f"[olens-vllm] L{e}: prompt {len(wv[e].input_ids)} tok, slot@{wv[e].slot}", flush=True
+        )
 
     # no steering here: keep the vllm-lens plugin out so vLLM can use torch.compile + CUDA graphs
     # (the plugin forces enforce_eager)
@@ -563,10 +680,23 @@ def olens_vllm_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str,
     from vllm import AsyncEngineArgs, SamplingParams
     from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-    engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(**_with_gdn_triton(dict(
-        model=str(av_dir), dtype="bfloat16", max_model_len=1024, gpu_memory_utilization=0.88,
-        enable_prefix_caching=False, enable_prompt_embeds=True,
-        max_num_seqs=concurrency, seed=0, limit_mm_per_prompt={"image": 0, "video": 0}))))
+    engine = AsyncLLMEngine.from_engine_args(
+        AsyncEngineArgs(
+            **_with_gdn_triton(
+                dict(
+                    model=str(av_dir),
+                    dtype="bfloat16",
+                    max_model_len=1024,
+                    gpu_memory_utilization=0.88,
+                    enable_prefix_caching=False,
+                    enable_prompt_embeds=True,
+                    max_num_seqs=concurrency,
+                    seed=0,
+                    limit_mm_per_prompt={"image": 0, "video": 0},
+                )
+            )
+        )
+    )
     summary["load_sec"] = round(time.time() - t_load, 1)
     sem = asyncio.Semaphore(concurrency)
     usem = asyncio.Semaphore(4)
@@ -579,8 +709,13 @@ def olens_vllm_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str,
             v = scale * v
         pe = pe0[layer].clone()
         pe[wv[layer].slot] = v.to(pe.dtype)
-        sp = SamplingParams(temperature=temperature, top_p=top_p, max_tokens=max_new, seed=seed,
-                            skip_special_tokens=True)
+        sp = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_new,
+            seed=seed,
+            skip_special_tokens=True,
+        )
         async with sem:
             final = None
             async for out in engine.generate({"prompt_embeds": pe}, sp, rid):
@@ -592,17 +727,23 @@ def olens_vllm_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str,
             a = acts.pop((pid, layer))
             n = a.shape[0]
             t0 = time.time()
-            res = await asyncio.gather(*(
-                one(f"{pid}_L{layer}_p{p}_s{j}", a[p], layer, bc.stable_int(pid, layer, p, j))
-                for p in range(n) for j in range(k)))
+            res = await asyncio.gather(
+                *(
+                    one(f"{pid}_L{layer}_p{p}_s{j}", a[p], layer, bc.stable_int(pid, layer, p, j))
+                    for p in range(n)
+                    for j in range(k)
+                )
+            )
             per_pos = {str(p): [res[p * k + j] for j in range(k)] for p in range(n)}
             dt = time.time() - t0
             rate = n * k / dt
             summary["rate"].append(round(rate, 2))
             summary["done"].append([pid, layer])
             _write_part(bank, pid, layer, n, per_pos, {"sec": round(dt, 1), "engine": "vllm"})
-            print(f"[olens-vllm] {pid} L{layer}: {n} pos x k={k} in {dt:.0f}s ({rate:.1f}/s)",
-                  flush=True)
+            print(
+                f"[olens-vllm] {pid} L{layer}: {n} pos x k={k} in {dt:.0f}s ({rate:.1f}/s)",
+                flush=True,
+            )
 
     async def run() -> None:
         await asyncio.gather(*(unit(pid, layer) for pid, layer in todo))
@@ -617,14 +758,21 @@ def olens_vllm_worker(bank: str, units: list[tuple[str, int]], tokens: dict[str,
 def _clean_expl(text: str) -> str:
     t = text.split("</explanation>")[0].strip()
     if t.startswith("<explanation>"):
-        t = t[len("<explanation>"):].strip()
+        t = t[len("<explanation>") :].strip()
     return t
 
 
 @app.function(**GPU_KW)
-def nla_worker(reader: str, bank: str, units: list[tuple[str, int]],
-               tokens: dict[str, list[int]], k: int, max_new: int, concurrency: int,
-               provenance: dict) -> dict:
+def nla_worker(
+    reader: str,
+    bank: str,
+    units: list[tuple[str, int]],
+    tokens: dict[str, list[int]],
+    k: int,
+    max_new: int,
+    concurrency: int,
+    provenance: dict,
+) -> dict:
     _offline()
     import asyncio
     import gc
@@ -665,9 +813,13 @@ def nla_worker(reader: str, bank: str, units: list[tuple[str, int]],
     for e, (ids, mp) in prompts.items():
         print(f"[{reader}] L{e}: AV prompt {len(ids)} tok, marker@{mp}", flush=True)
     eargs: dict[str, Any] = dict(
-        model=str(av_dir), dtype="bfloat16", max_model_len=1024, gpu_memory_utilization=0.88,
+        model=str(av_dir),
+        dtype="bfloat16",
+        max_model_len=1024,
+        gpu_memory_utilization=0.88,
         enable_prefix_caching=False,  # steering changes the KV after the marker: never share it
-        max_num_seqs=concurrency, seed=0,
+        max_num_seqs=concurrency,
+        seed=0,
         limit_mm_per_prompt={"image": 0, "video": 0},
     )
     os.environ["CHIVE_STEER_LAYERS"] = "1"  # vllm_lens_patch: hooks act on block 1 only
@@ -682,9 +834,15 @@ def nla_worker(reader: str, bank: str, units: list[tuple[str, int]],
         # inline steering (vllm_lens_patch.py): Karvonen norm-match ADD at the output of block 1,
         # at the marker, prefill only
         steer = {"vec": vec.float().tolist(), "layer": 1, "pos": mp, "norm_match": True}
-        sp = SamplingParams(temperature=1.0, top_p=0.95, top_k=64, max_tokens=max_new,
-                            stop=["</explanation>"], seed=seed,
-                            extra_args={"chive_steer": steer})
+        sp = SamplingParams(
+            temperature=1.0,
+            top_p=0.95,
+            top_k=64,
+            max_tokens=max_new,
+            stop=["</explanation>"],
+            seed=seed,
+            extra_args={"chive_steer": steer},
+        )
         async with sem:
             final = None
             async for out in engine.generate({"prompt_token_ids": ids}, sp, rid):
@@ -697,19 +855,27 @@ def nla_worker(reader: str, bank: str, units: list[tuple[str, int]],
             a = acts.pop((pid, layer))
             n = a.shape[0]
             t0 = time.time()
-            res = await asyncio.gather(*(
-                one(f"{pid}_L{layer}_p{p}_s{j}", a[p], layer, bc.stable_int(pid, layer, p, j))
-                for p in range(n) for j in range(k)))
+            res = await asyncio.gather(
+                *(
+                    one(f"{pid}_L{layer}_p{p}_s{j}", a[p], layer, bc.stable_int(pid, layer, p, j))
+                    for p in range(n)
+                    for j in range(k)
+                )
+            )
             per_pos = {str(p): [res[p * k + j][0] for j in range(k)] for p in range(n)}
             n_len = sum(r[1] for r in res)
             dt = time.time() - t0
             rate = n * k / dt
             summary["rate"].append(round(rate, 2))
             summary["done"].append([pid, layer])
-            _write_part(bank, pid, layer, n, per_pos,
-                        {"sec": round(dt, 1), "n_hit_max_new_tokens": n_len})
-            print(f"[{reader}] {pid} L{layer}: {n} pos x k={k} in {dt:.0f}s ({rate:.1f}/s), "
-                  f"{n_len} hit max_new", flush=True)
+            _write_part(
+                bank, pid, layer, n, per_pos, {"sec": round(dt, 1), "n_hit_max_new_tokens": n_len}
+            )
+            print(
+                f"[{reader}] {pid} L{layer}: {n} pos x k={k} in {dt:.0f}s ({rate:.1f}/s), "
+                f"{n_len} hit max_new",
+                flush=True,
+            )
 
     async def run() -> None:
         await engine.collective_rpc("install_hooks")  # vllm-lens installs them lazily
@@ -723,8 +889,9 @@ def nla_worker(reader: str, bank: str, units: list[tuple[str, int]],
 # assemble per-layer parts -> one harness record per incident
 # ---------------------------------------------------------------------------------------------
 @app.function(image=image, volumes={OUT: out_vol}, timeout=3600, memory=32768)
-def assemble(bank: str, tokens: dict[str, list[int]], layers: list[int], k: int,
-             provenance: dict) -> dict:
+def assemble(
+    bank: str, tokens: dict[str, list[int]], layers: list[int], k: int, provenance: dict
+) -> dict:
     import shutil
 
     out_vol.reload()
@@ -748,9 +915,17 @@ def assemble(bank: str, tokens: dict[str, list[int]], layers: list[int], k: int,
         prov = dict(provenance)
         if n_len is not None:
             prov["n_hit_max_new_tokens"] = n_len
-        rec = {"prompt_id": pid, "reader": bank, "token_ids": ids, "n_tokens": len(ids),
-               "layers": list(layers), "k": k, "readouts": readouts,
-               "coverage_note": "every token", "provenance": prov}
+        rec = {
+            "prompt_id": pid,
+            "reader": bank,
+            "token_ids": ids,
+            "n_tokens": len(ids),
+            "layers": list(layers),
+            "k": k,
+            "readouts": readouts,
+            "coverage_note": "every token",
+            "provenance": prov,
+        }
         probs = bc.validate_record(rec, ids, layers, k)
         if probs:
             raise RuntimeError(f"{pid}: invalid record: {probs}")
@@ -772,86 +947,135 @@ def provenance_for(reader: str, dataset: str, k: int, max_new: int) -> dict:
         "code": "chive_scale/banks_code/readers_modal.py",
         "date": time.strftime("%Y-%m-%d"),
     }
-    nla_sampling = {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "max_new_tokens": max_new,
-                    "do_sample": True, "seed": "per-request sha256(pid, layer, pos, j)"}
+    nla_sampling = {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 64,
+        "max_new_tokens": max_new,
+        "do_sample": True,
+        "seed": "per-request sha256(pid, layer, pos, j)",
+    }
     if reader == "jlens":
-        return {**common,
-                "lens": f"{bc.JLENS_REPO}/{bc.JLENS_FILE}@{bc.JLENS_REV[:7]} (n1000 wikitext, "
-                        "target_layer=-1, skip_first=16)",
-                "readout": "cosine (W_U J h)/||J^T W_U[t]||, fp32 no TF32, top-10 raw (unfiltered)",
-                "cell_format": "10 tokens, each repr(tokenizer.decode([id])), space-separated"}
+        return {
+            **common,
+            "lens": f"{bc.JLENS_REPO}/{bc.JLENS_FILE}@{bc.JLENS_REV[:7]} (n1000 wikitext, "
+            "target_layer=-1, skip_first=16)",
+            "readout": "cosine (W_U J h)/||J^T W_U[t]||, fp32 no TF32, top-10 raw (unfiltered)",
+            "cell_format": "10 tokens, each repr(tokenizer.decode([id])), space-separated",
+        }
     if reader == "nla":
-        return {**common,
-                "nla": f"{bc.NLA_REPO}@{bc.NLA_REV[:7]} av_base + {bc.NLA_ADAPTER} "
-                       "(merged into the official VL shards)",
-                "injection": "steer-L1-normmatch@block1: h'=h+||h||*v/||v|| at the output of "
-                             "reader block 1, AV-prompt marker position (vllm-lens)",
-                "av_prompt": "nla_meta actor template, reader chat template, "
-                             "add_generation_prompt=True, enable_thinking=False",
-                "engine": "vllm 0.25.1 + vllm-lens 218e78d, prefix caching off",
-                "sampling": nla_sampling,
-                "postprocess": "stop at </explanation>, <explanation> prefix stripped, strip()"}
+        return {
+            **common,
+            "nla": f"{bc.NLA_REPO}@{bc.NLA_REV[:7]} av_base + {bc.NLA_ADAPTER} "
+            "(merged into the official VL shards)",
+            "injection": "steer-L1-normmatch@block1: h'=h+||h||*v/||v|| at the output of "
+            "reader block 1, AV-prompt marker position (vllm-lens)",
+            "av_prompt": "nla_meta actor template, reader chat template, "
+            "add_generation_prompt=True, enable_thinking=False",
+            "engine": "vllm 0.25.1 + vllm-lens 218e78d, prefix caching off",
+            "sampling": nla_sampling,
+            "postprocess": "stop at </explanation>, <explanation> prefix stripped, strip()",
+        }
     if reader == "mlnla":
-        return {**common,
-                "mlnla": f"{bc.MLNLA_REPO}@{bc.MLNLA_REV[:7]} av/ LoRA on {bc.BASE_MODEL} "
-                         "(merged into the official VL shards)",
-                "injection": "steer-L1-normmatch@block1 at the ㈜ marker (EasyNLA convention)",
-                "av_prompt": "nla_meta actor template with the source layer, chat template, "
-                             "add_generation_prompt=True, enable_thinking=False",
-                "engine": "vllm 0.25.1 + vllm-lens 218e78d, prefix caching off",
-                "sampling": nla_sampling,
-                "postprocess": "stop at </explanation>, <explanation> prefix stripped, strip()"}
+        return {
+            **common,
+            "mlnla": f"{bc.MLNLA_REPO}@{bc.MLNLA_REV[:7]} av/ LoRA on {bc.BASE_MODEL} "
+            "(merged into the official VL shards)",
+            "injection": "steer-L1-normmatch@block1 at the ㈜ marker (EasyNLA convention)",
+            "av_prompt": "nla_meta actor template with the source layer, chat template, "
+            "add_generation_prompt=True, enable_thinking=False",
+            "engine": "vllm 0.25.1 + vllm-lens 218e78d, prefix caching off",
+            "sampling": nla_sampling,
+            "postprocess": "stop at </explanation>, <explanation> prefix stripped, strip()",
+        }
     if reader == "olens_single":
-        return {**common,
-                "olens": f"{bc.OLENS_REPO}:{bc.OLENS_SINGLE_PATH}@{bc.OLENS_SINGLE_REV[:7]} "
-                         "(single-readout RL s3.single.ddp600.s0 iter 500, from ptag "
-                         "u64max32.final.s3/step5500, k_max=1: continuation_raw prompt, "
-                         f"scaled transform {bc.OLENS_SINGLE_SCALE} * h, no clip)",
-                "readout": "vLLM prompt_embeds over the MERGED adapter (VL shards + LoRA delta): "
-                           "continuation_raw prompt embeddings, slot row = 122.3225 * h; "
-                           "activations captured from the plain base (HF); each sample is ONE "
-                           "readout span",
-                "sampling": {"k": k, "max_new_tokens": max_new, "temperature": 0.8,
-                             "top_p": 0.95, "seed": "per-request sha256(pid, layer, pos, j)"}}
+        return {
+            **common,
+            "olens": f"{bc.OLENS_REPO}:{bc.OLENS_SINGLE_PATH}@{bc.OLENS_SINGLE_REV[:7]} "
+            "(single-readout RL s3.single.ddp600.s0 iter 500, from ptag "
+            "u64max32.final.s3/step5500, k_max=1: continuation_raw prompt, "
+            f"scaled transform {bc.OLENS_SINGLE_SCALE} * h, no clip)",
+            "readout": "vLLM prompt_embeds over the MERGED adapter (VL shards + LoRA delta): "
+            "continuation_raw prompt embeddings, slot row = 122.3225 * h; "
+            "activations captured from the plain base (HF); each sample is ONE "
+            "readout span",
+            "sampling": {
+                "k": k,
+                "max_new_tokens": max_new,
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "seed": "per-request sha256(pid, layer, pos, j)",
+            },
+        }
     if reader == "olens":
-        return {**common,
-                "olens": f"{bc.OLENS_REPO}:{bc.OLENS_PATH}@{bc.OLENS_REV[:7]} "
-                         "(olens_suite.runner.S3D_RL600: concepts_raw, unit alpha=16000)",
-                "readout": "make_sampler over the MERGED adapter (merge_lens drift-guarded); "
-                           "activations captured from the plain base",
-                "sampling": {"k": k, "max_new_tokens": max_new, "temperature": 0.8,
-                             "top_p": 0.95, "seed": "dense_seed(seed_base, pid, layer, chunk)"}}
+        return {
+            **common,
+            "olens": f"{bc.OLENS_REPO}:{bc.OLENS_PATH}@{bc.OLENS_REV[:7]} "
+            "(olens_suite.runner.S3D_RL600: concepts_raw, unit alpha=16000)",
+            "readout": "make_sampler over the MERGED adapter (merge_lens drift-guarded); "
+            "activations captured from the plain base",
+            "sampling": {
+                "k": k,
+                "max_new_tokens": max_new,
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "seed": "dense_seed(seed_base, pid, layer, chunk)",
+            },
+        }
     raise ValueError(reader)
 
 
 @app.local_entrypoint()
-def main(reader: str, dataset: str, ids: str, out_volume: str = "chive-fresh-banks",
-         bank: str = "", num_shards: int = 0, limit: int = 0, layers: str = "", k: int = 0,
-         max_new: int = 0, seed_base: int = 0, pos_chunk: int = 60, concurrency: int = 512,
-         skip_prep: bool = False, engine: str = "vllm") -> None:
+def main(
+    reader: str,
+    dataset: str,
+    ids: str,
+    out_volume: str = "chive-fresh-banks",
+    bank: str = "",
+    num_shards: int = 0,
+    limit: int = 0,
+    layers: str = "",
+    k: int = 0,
+    max_new: int = 0,
+    seed_base: int = 0,
+    pos_chunk: int = 60,
+    concurrency: int = 512,
+    skip_prep: bool = False,
+    engine: str = "vllm",
+) -> None:
     if reader not in bc.READERS:
         raise SystemExit(f"--reader must be one of {sorted(bc.READERS)}")
     if out_volume != OUT_VOLUME:
-        raise SystemExit(f"--out-volume {out_volume!r} != the mounted {OUT_VOLUME!r}: export "
-                         f"CHIVE_BANKS_VOLUME={out_volume} (volumes bind at import)")
+        raise SystemExit(
+            f"--out-volume {out_volume!r} != the mounted {OUT_VOLUME!r}: export "
+            f"CHIVE_BANKS_VOLUME={out_volume} (volumes bind at import)"
+        )
     spec = bc.READERS[reader]
     bank = bank or spec["bank"]
     layer_list = [int(x) for x in layers.split(",")] if layers else list(spec["layers"])
     k = k or spec["k"]
-    max_new = max_new or {"olens": 128, "olens_single": 128, "nla": 256, "mlnla": 256, "jlens": 0}[reader]
+    max_new = (
+        max_new or {"olens": 128, "olens_single": 128, "nla": 256, "mlnla": 256, "jlens": 0}[reader]
+    )
     id_list = bc.read_ids(ids)
     if limit:
         id_list = id_list[:limit]
     tokens = bc.load_tokens(dataset, id_list)
     n_tok = sum(len(v) for v in tokens.values())
-    print(f"[{reader}] bank={bank} volume={OUT_VOLUME} incidents={len(tokens)} tokens={n_tok} "
-          f"layers={layer_list[0]}..{layer_list[-1]} ({len(layer_list)}) k={k}", flush=True)
+    print(
+        f"[{reader}] bank={bank} volume={OUT_VOLUME} incidents={len(tokens)} tokens={n_tok} "
+        f"layers={layer_list[0]}..{layer_list[-1]} ({len(layer_list)}) k={k}",
+        flush=True,
+    )
     rkey = "olens_hf" if (reader == "olens" and engine == "hf") else reader
     est = bc.est_gpu_hours(rkey, n_tok, len(layer_list), k)
     if num_shards <= 0:  # auto: ~2 h of generation per container, at most 100 containers
         num_shards = max(1, min(100, round(est / 2.0)))
-    print(f"[{reader}] estimated {est:.2f} generation GPU-h (+{bc.LOAD_SEC[rkey] / 60:.0f} min "
-          f"load per container) -> {num_shards} shard(s) on {GPU}", flush=True)
+    print(
+        f"[{reader}] estimated {est:.2f} generation GPU-h (+{bc.LOAD_SEC[rkey] / 60:.0f} min "
+        f"load per container) -> {num_shards} shard(s) on {GPU}",
+        flush=True,
+    )
     prov = provenance_for(reader, dataset, k, max_new)
     if not skip_prep:
         print(prep.remote(reader), flush=True)
@@ -866,18 +1090,23 @@ def main(reader: str, dataset: str, ids: str, out_volume: str = "chive-fresh-ban
         shards = bc.balance(units, num_shards, lambda u: len(tokens[u[0]]))
         sub = lambda s: {pid: tokens[pid] for pid in {u[0] for u in s}}  # noqa: E731
         if reader == "olens" and engine == "hf":
-            calls = [(bank, s, sub(s), k, max_new, 0.8, 0.95, seed_base, pos_chunk, prov)
-                     for s in shards]
+            calls = [
+                (bank, s, sub(s), k, max_new, 0.8, 0.95, seed_base, pos_chunk, prov) for s in shards
+            ]
             results = list(olens_worker.starmap(calls, return_exceptions=True))
         elif reader == "olens_single":
-            calls = [(bank, s, sub(s), k, max_new, 0.8, 0.95, concurrency, prov, reader)
-                     for s in shards]
+            calls = [
+                (bank, s, sub(s), k, max_new, 0.8, 0.95, concurrency, prov, reader) for s in shards
+            ]
             results = list(olens_vllm_worker.starmap(calls, return_exceptions=True))
         elif reader == "olens":
-            prov = {**prov, "readout": "vLLM prompt_embeds over the MERGED adapter (VL shards + "
-                    "LoRA delta): concepts_raw prompt embeddings, slot row = 16000 * h/||h||; "
-                    "activations captured from the plain base (HF)",
-                    "sampling": {**prov["sampling"], "seed": "per-request sha256(pid, layer, pos, j)"}}
+            prov = {
+                **prov,
+                "readout": "vLLM prompt_embeds over the MERGED adapter (VL shards + "
+                "LoRA delta): concepts_raw prompt embeddings, slot row = 16000 * h/||h||; "
+                "activations captured from the plain base (HF)",
+                "sampling": {**prov["sampling"], "seed": "per-request sha256(pid, layer, pos, j)"},
+            }
             calls = [(bank, s, sub(s), k, max_new, 0.8, 0.95, concurrency, prov) for s in shards]
             results = list(olens_vllm_worker.starmap(calls, return_exceptions=True))
         else:
@@ -891,8 +1120,12 @@ def main(reader: str, dataset: str, ids: str, out_volume: str = "chive-fresh-ban
         else:
             print(f"[{reader}] shard: {json.dumps(r)[:600]}", flush=True)
     if reader != "jlens":
-        print(f"[{reader}] assemble: {assemble.remote(bank, tokens, layer_list, k, prov)}",
-              flush=True)
-    print(f"[{reader}] wall {time.time() - t0:.0f}s over {len(shards)} shard(s); "
-          f"{failed} failed (rerun the same command to resume)", flush=True)
+        print(
+            f"[{reader}] assemble: {assemble.remote(bank, tokens, layer_list, k, prov)}", flush=True
+        )
+    print(
+        f"[{reader}] wall {time.time() - t0:.0f}s over {len(shards)} shard(s); "
+        f"{failed} failed (rerun the same command to resume)",
+        flush=True,
+    )
     print(f"pull: ./fetch_banks.sh {bank}", flush=True)
