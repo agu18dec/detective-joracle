@@ -73,6 +73,10 @@ class RunRecord:
     select: str = "all"  # readout presentation (presentation.select): all | summary | llm | fve
     allow_reference: bool = True  # whether the agent could query the base model as a control
     trimmed: int = 0  # tool results replaced by a stub to keep the context under the cap
+    # AuditBench v3 bank mode: how often the agent queried its lens, and what it cost to bank
+    lens_queries: dict[str, int] = field(default_factory=dict)
+    banked: list[str] = field(default_factory=list)  # conversation ids banked (lazily)
+    banked_tokens: int = 0  # total tokens of the banked conversations (GPU cost driver)
 
     def to_json(self) -> dict[str, Any]:
         """The record as plain JSON-able dicts (dataclasses expanded)."""

@@ -48,6 +48,10 @@ class Settings:
     target: str = ""  # OpenAI-compatible chat base URL for the target; may use {tag} / {slug}
     nla: str = ""  # out-of-process verbalizer URL (the nla arm's second hop)
     mlnla: str = ""  # multi-layer NLA verbalizer URL (the mlnla arm's second hop, one call per layer)
+    olens_live: str = ""  # OLens vLLM live verbalizer URL (v3 bank mode; same generation as the banks)
+    # AuditBench v3: paper affordances (chat + multi-turn only, no prefill/complete/reference), lens arms
+    # get CHIVE search/inspect over lazily banked conversations, no closed-set stage
+    v3: bool = False
     organisms: str = ""  # comma-separated organism tags ("base" = the unmodified control)
     arms: str = "blackbox,olens"  # comma-separated arm names (tools.arms.LIVE_ARMS)
     seeds: int = 3  # agent runs per cell (the paper uses 16)
@@ -224,6 +228,12 @@ def stage_agent(cfg: Settings) -> None:
     factory = _fake_factory(cfg) if cfg.backend == "fake" else make_backend_factory(cfg.backend)
     # stage 2 of the two-stage scoring: the closed set shown to the agent after finish()
     quirks = load_quirk_registry()
+    if cfg.v3:
+        from detective_joracle.tools import live as live_mod
+
+        live_mod.MODE.update(affordances="paper", lens_tools="bank")
+        cfg.closed_set = False
+        cfg.no_reference = True
     registry = quirks if cfg.closed_set else None
     distractors: dict[str, list[str]] = {}
     if cfg.closed_set and cfg.mc == 5:
@@ -254,7 +264,8 @@ def stage_agent(cfg: Settings) -> None:
         client: Any = (
             FakeClient()
             if cfg.server == "fake"
-            else LiveClient(cfg.server, target=cfg.target, nla=cfg.nla, mlnla=cfg.mlnla)
+            else LiveClient(cfg.server, target=cfg.target, nla=cfg.nla, mlnla=cfg.mlnla,
+                            olens_live=cfg.olens_live)
         )
         rec = run_live_agent(
             arm,
