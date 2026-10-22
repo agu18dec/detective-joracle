@@ -179,7 +179,7 @@ def plain_adapter_dir(src: Path) -> Path:
 
 @app.cls(
     image=image,
-    gpu="H200",
+    gpu=os.environ.get("AB_SERVER_GPU", "H200").split(","),  # H200,B200 widens supply
     volumes=volumes,
     timeout=6 * 3600,  # the fixed-prompt precompute (RPC) can run >1 h per organism
     memory=131072,
