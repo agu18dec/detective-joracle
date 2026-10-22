@@ -179,6 +179,7 @@ async def _episode(
             recur="recur" in args.variants,
             llmfilter="llmfilter" in args.variants,
             echotag="echotag" in args.variants,
+            support="support" in args.variants,
             revgate="revgate" in args.variants and tfirst,
         )
         backend = agent_backend(args.max_tokens, args.effort, model)

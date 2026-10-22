@@ -87,7 +87,19 @@ Figure: `judge3_claims.png`.
   | pass@1 | 80.5 | 83.6 | 81.6 | +3.2 [−1.1, +7.1] | +1.3 [−2.5, +5.0] |
 
   OLens ≈ NLA on every row. Proposal quality is a sharper reader metric than pass@1, because it is measured per experiment and isn't capped by the transcript-only hypothesis already being right.
-- **MCQ with 10 equally likely options** (Agam's request): a pilot (`analysis/mcq/build_mcq10_eq.py`) could make only 1/8 incidents equal-likelihood for a text-only picker, even after 3 adversarial rounds; that picker still finds the truth 67% of the time, at ~720 calls/incident. This is another sign that CHIVE truths are mostly readable from the transcript. Paused pending Agam's call.
+- **MCQ v5, 10 options at blind chance** (Agam's bar: a picker without the conversation is near chance; the transcript may help). Builder `analysis/mcq/build_mcq10_blind.py`: 81 Opus calls per incident, 40% of incidents yield an item. Dev, 95 items × 3 draws, frozen harness:
+
+  | arm | accuracy | Δ vs transcript | p(truth) | picks a refuted rival |
+  |---|---|---|---|---|
+  | blind picker (fresh, no conversation) | 13.3 | | | |
+  | text-only picker (no tools) | 45.0 | | | |
+  | transcript agent | 49.5 | – | 31.8 | 15.4 |
+  | OLens ×4 | 53.7 | +4.2 [−4.9, +14.0] | 33.8 | 14.0 |
+  | multi-layer NLA ×4 | 53.3 | +3.9 [−5.3, +13.3] | 33.1 | 13.3 |
+  | J-lens L20-60 | 49.8 | +0.4 [−7.7, +8.4] | 31.2 | 17.5 |
+  | single-bullet OLens ×16 | 51.6 | +2.1 [−8.1, +12.6] | 34.1 | 11.9 |
+
+  OLens − NLA: +0.4 [−6.3, +7.4]. Reading the transcript lifts accuracy from 13% to ~50%. Readers add +2 to +4 pp (n.s.; n=95 is underpowered for effects this size). Graph: `mcq_v5blind_bars.png`.
 - **Point-eval caveat:** ~75-80% of CHIVE "non-obvious" points are intervention outcomes ("removing X eliminates Y"). That caps non-obvious recall near 7% for every arm, so the metric can't show reader gains.
 
 ## 5. Harness changes (dev240 = fresh1/2 dev splits; pass = judge ≥ 7; paired)
@@ -127,6 +139,40 @@ Earlier harness_exp variants, all null or negative: recurrence counts, LLM filte
 - **The gate doesn't replicate.** Its +3.6 on dev was the best of 3 arms (selection noise). On held-out it is −0.6 for OLens ×16 and −2.4 for NLA.
 - **OLens vs NLA.** Neither primary test shows OLens beating NLA. The small OLens ×16 edge comes from the 16 samples, not the gate.
 - **Experiments replicate strongly** (+11-15 pp for every arm). With 3 experiments, the readers add nothing over transcript on pass@1.
+
+## 7. Fix test: three OLens fixes on 100 dev incidents (frozen harness, no experiments; `p9_fix100.py`)
+Agam's design: 100 dev incidents × 3 draws. Arms are paired against the existing plain OLens ×4 / NLA ×4 records on the same incidents and draws. Pass = judge ≥ 7. Rivals = share of CHIVE's refuted rivals that judge v3 finds asserted in the final hypothesis.
+
+| arm | pass@1 | Δ [95% CI] | refuted rivals asserted, Δ |
+|---|---|---|---|
+| fix 2: OLens + support counts ([k/n] per readout line) | 71.3 vs 73.0 | −1.7 [−6.3, +3.0] | −1.7 [−9.5, +6.2] |
+| fix 3: OLens + rival-role prompt | 76.0 vs 73.0 | +3.0 [−2.3, +8.3] | +0.6 [−5.9, +7.1] |
+| fixes 2+3, OLens | 76.7 vs 73.0 | +3.7 [−1.0, +8.7] | −1.5 [−9.0, +5.6] |
+| fixes 2+3, NLA | 78.3 vs 75.7 | +2.7 [−2.3, +8.3] | −6.9 [−15.7, +1.8] |
+| OLens − NLA, both with fixes 2+3 | 76.7 vs 78.3 | −1.7 [−6.7, +3.7] | |
+| OLens − NLA, plain (reference) | 73.0 vs 75.7 | −2.7 [−8.7, +3.7] | |
+| coverage cost: plain OLens on the 223k sparse cells vs full | 69.0 vs 73.0 | −4.0 [−10.3, +2.3] | |
+
+- The rival-role prompt (with support counts) gives a small, non-significant lift to both readers.
+- Support counts alone don't help.
+- The fixes help NLA as much as OLens, so they don't make OLens beat NLA.
+
+Fix 1 (cleaner readouts) compares sparse banks against the same-cell control (plain OLens on 223k cells):
+- AR-picks-4-of-32 (WSB: h23 +0.030, hallucination +0.020): running.
+- Opus low-hallucination synthesis-of-8 (WSB: h23 +0.006 ns, hallucination −0.066): bank building, arm tomorrow morning.
+
+| fix 1 arm (vs plain OLens on the same 223k cells) | WSB (olens_tool): h23 / hallucination | pass@1 | Δ [95% CI] | refuted rivals asserted, Δ |
+|---|---|---|---|---|
+| AR-picks-4-of-32 (NN-OMP-32) | +0.030 / +0.020 | 72.3 vs 69.0 | +3.3 [−2.0, +8.7] | +4.2 [−0.8, +9.7] |
+| Opus low-hallucination synthesis-of-8 | +0.006 / −0.066 | 69.7 vs 69.0 | +0.7 [−4.7, +6.0] | +1.1 [−3.7, +6.5] |
+| 4× Qwen-base synthesis → NN-OMP | +0.017 / −0.157 | 68.3 vs 69.0 | −0.7 [−5.3, +4.3] | +3.4 [−1.6, +8.7] |
+
+Against plain NLA on the full bank: −3.3, −6.0 and −7.3 pp respectively.
+
+**No cleaner-readout bank improves the agent.**
+- Neither lower hallucination (synthesis arms, −0.07 to −0.16 on WSB) nor higher recall (NN-OMP-32) moves pass@1 significantly vs the same-cell control.
+- All three trend toward asserting more refuted rivals, not fewer.
+- Readout quality as WSB measures it is not the bottleneck for the CHIVE agent. This matches §1-4: the agent's committed transcript-only hypothesis decides ~76% of outcomes, and readouts mostly matter by filtering rivals.
 
 ## What to do next
 1. **Stop using pass@1 on CHIVE as the reader eval.** The transcript already contains the answer for most incidents:

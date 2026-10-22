@@ -321,6 +321,7 @@ class ChiveTools:
     llmfilter: bool = False  # inspect output condensed by an LLM filter (variant "llmfilter")
     echotag: bool = False  # readout lines tagged [ECHO]/[PREVIEW] by n-gram overlap (variant "echotag")
     revgate: bool = False  # leaving the committed hypothesis needs recurring cited readouts (variant "revgate")
+    support: bool = False  # every readout line tagged [k/n]: samples at this position saying the same (variant "support")
     gate_report: str | None = None
     aux: Reader | None = None  # a second method's readouts: <name>_search / <name>_inspect
     committed: dict[str, Any] | None = None
@@ -529,9 +530,41 @@ class ChiveTools:
         return ""
 
     def _tag(self, pos: int, sample: str) -> str:
-        if not self.echotag:
+        if not (self.echotag or self.support):
             return sample
-        return "\n".join(self._tag_line(pos, ln) + ln for ln in str(sample).split("\n"))
+        out = []
+        for ln in str(sample).split("\n"):
+            pre = self._tag_line(pos, ln) if self.echotag else ""
+            if self.support and ln.strip():
+                k, n = self._line_support(pos, ln)
+                pre = f"[{k}/{n}] " + pre
+            out.append(pre + ln)
+        return "\n".join(out)
+
+    def _support_index(self, pos: int) -> tuple[list[set[str]], int]:
+        """Content-word sets of every line of every sample at `pos` (all layers), and the sample count n."""
+        if not hasattr(self, "_sup_cache"):
+            self._sup_cache = {}
+        if pos not in self._sup_cache:
+            assert self.reader is not None
+            samples = [s for v in self.reader.cell(pos).values() for s in v]
+            per_sample = [[{w for w in _WORD.findall(ln.lower()) if len(w) > 3} for ln in str(s).split("\n") if ln.strip()]
+                          for s in samples]
+            self._sup_cache[pos] = (per_sample, len(samples))
+        return self._sup_cache[pos]
+
+    def _line_support(self, pos: int, line: str) -> tuple[int, int]:
+        """k = samples at this position (any layer) with a line sharing >= 50% of this line's content words (Jaccard
+        >= 0.4); n = all samples at this position. Deterministic, no LLM."""
+        per_sample, n = self._support_index(pos)
+        q = {w for w in _WORD.findall(line.lower()) if len(w) > 3}
+        if len(q) < 2:
+            return 1, max(n, 1)
+        k = 0
+        for lines in per_sample:
+            if any(len(q & w) >= 0.5 * len(q) and len(q & w) / max(1, len(q | w)) >= 0.4 for w in lines):
+                k += 1
+        return max(k, 1), max(n, 1)
 
     def _support(self, pos: int, quote: str) -> dict[str, Any]:
         """How widely a cited readout recurs at its position: matching lines / all lines, layers, echo share."""

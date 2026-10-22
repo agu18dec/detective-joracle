@@ -148,6 +148,21 @@ feature moves the behaviour clearly (about 30 points or more); keep a mechanism 
 behaviour even if readouts seem to point elsewhere; and drop one whose experiment did not move it. Your final \
 hypothesis should be the mechanism your experiments support."""
 
+RIVALROLE = """## What the readouts are for
+Your committed transcript-only hypothesis is right in most cases. Use the readouts mainly to (a) test and REJECT \
+rival explanations: the alternatives a careful reader would propose, including ones the readouts themselves \
+suggest; and (b) decide which of your candidate causes the evidence favours. Do not rewrite or extend your committed \
+cause from readouts unless widely recurring readouts directly contradict it; a vivid single readout is not enough, and \
+neither is the absence of a concept. Put the strongest alternative in `rival` and the evidence against it in \
+`rival_ruled_out_by`. The final `hypothesis` states ONE mechanism, without side-stories from the readouts."""
+
+SUPPORT = """## Support counts
+Every readout line is prefixed with [k/n]: k of the n samples at that position (all layers together) contain a line \
+saying essentially the same thing. Report support exactly as shown (e.g. "12/44 samples at t310"), never as "every \
+sample" or "consistently". A line with k of 1-3 is a single draw that may be borrowed from a similar context; do not \
+build a cause on it. Content that recurs (k well above a few, across neighbouring positions) is evidence about what the \
+model represents."""
+
 ECHOTAG = """## Echo and preview tags
 Readout lines are tagged automatically. [ECHO] means the line mostly restates words visible in the \
 conversation; [PREVIEW] means it mostly restates what the response goes on to write from that point. Both \
@@ -211,6 +226,10 @@ def system_prompt(
         parts.append(RECUR)
     if "multicand" in variants and reader is not None:
         parts.append(MULTICAND)
+    if "support" in variants and reader is not None:
+        parts.append(SUPPORT)
+    if "rivalrole" in variants and reader is not None:
+        parts.append(RIVALROLE)
     if "echotag" in variants and reader is not None:
         parts.append(ECHOTAG)
     if "revgate" in variants and reader is not None:
